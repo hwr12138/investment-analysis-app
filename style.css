@@ -1,0 +1,32 @@
+/* style.css */
+.metric-container {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    padding: 8px;
+    width: auto;
+    margin: 0 auto;
+}
+
+.metric-call {
+    background-color: #90ee90;
+    color: black;
+    border-radius: 10px;
+}
+
+.metric-put {
+    background-color: #ffcccb;
+    color: black;
+    border-radius: 10px;
+}
+
+.metric-value {
+    font-size: 1.5rem;
+    font-weight: bold;
+    margin: 0;
+}
+
+.metric-greeks {
+    font-size: 1rem;
+    margin: 0;
+}
