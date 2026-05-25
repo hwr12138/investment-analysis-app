@@ -30,6 +30,6 @@ st.markdown(f'<a href="{linkedin_url}" target="_blank" style="text-decoration: n
 
 tab1, tab2 = st.tabs(["Black-Scholes Model", "Technical Analysis Framework"])
 with tab1:
-    bs_tab.render()
+    bs_tab.render_tab()
 with tab2:
-    ta_tab.render()
+    ta_tab.render_tab()
