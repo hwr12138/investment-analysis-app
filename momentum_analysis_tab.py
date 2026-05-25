@@ -106,4 +106,4 @@ def render_tab():
 
         # Update layout
         fig.update_layout(height=800, xaxis_rangeslider_visible=False, template='plotly_dark', margin=dict(t=30, b=10, l=10, r=10))
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig)
