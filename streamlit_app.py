@@ -1,6 +1,6 @@
 import streamlit as st
 import black_scholes_tab as bs_tab
-import technical_analysis_tab as ta_tab
+import momentum_analysis_tab as ma_tab
 
 # Set the title and favicon that appear in the Browser's tab bar.
 st.set_page_config(
@@ -32,4 +32,4 @@ tab1, tab2 = st.tabs(["Black-Scholes Model", "Momentum Analysis"])
 with tab1:
     bs_tab.render_tab()
 with tab2:
-    ta_tab.render_tab()
+    ma_tab.render_tab()
