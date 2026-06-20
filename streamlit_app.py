@@ -1,6 +1,6 @@
 import streamlit as st
-import black_scholes_tab as bs_tab
-import momentum_analysis_tab as ma_tab
+import tabs.black_scholes_tab as bs_tab
+import tabs.momentum_analysis_tab as ma_tab
 
 # Set the title and favicon that appear in the Browser's tab bar.
 st.set_page_config(

@@ -1,6 +1,6 @@
 import streamlit as st
 import numpy as np
-import black_scholes_model as bs
+import tabs.black_scholes_model as bs
 
 def render_tab():
     st.header("Black-Scholes Model")

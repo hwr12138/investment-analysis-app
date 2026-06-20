@@ -3,7 +3,7 @@ import yfinance as yf
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import momentum_analysis_models as ma_models
+import tabs.momentum_analysis_models as ma_models
 
 # --- Main Dashboard Render ---
 
