@@ -1,10 +1,11 @@
 import streamlit as st
 import tabs.black_scholes_tab as bs_tab
 import tabs.momentum_analysis_tab as ma_tab
+import tabs.portfolio_optimization_tab as po_tab
 
 # Set the title and favicon that appear in the Browser's tab bar.
 st.set_page_config(
-    page_title='Quant Analysis App',
+    page_title='Quantitative Analysis App',
     page_icon=':earth_americas:', # This is an emoji shortcode. Could be a URL too.
     layout="wide",
     initial_sidebar_state="expanded"
@@ -28,8 +29,10 @@ st.write("`Created by:`")
 linkedin_url = "https://www.linkedin.com/in/ansonrui/"
 st.markdown(f'<a href="{linkedin_url}" target="_blank" style="text-decoration: none; color: inherit;"><img src="https://cdn-icons-png.flaticon.com/512/174/174857.png" width="25" height="25" style="vertical-align: middle; margin-right: 10px;">`Anson (Hao Wen) Rui`</a>', unsafe_allow_html=True)
 
-tab1, tab2 = st.tabs(["Black-Scholes Model", "Momentum Analysis"])
+tab1, tab2, tab3 = st.tabs(["Portfolio Optimization", "Black-Scholes Model", "Momentum Analysis"])
 with tab1:
-    bs_tab.render_tab()
+    po_tab.render_tab()
 with tab2:
+    bs_tab.render_tab()
+with tab3:
     ma_tab.render_tab()
