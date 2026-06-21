@@ -8,7 +8,7 @@ TRADING_DAYS = 251
 
 # --- Data Fetching ---
 
-def fetch_data_and_market(tickers: list, start_date: str, end_date: str, market_ticker="SPY"):
+def fetch_data_and_market(tickers: list, start_date: str, end_date: str, market_ticker="^GSPC"):
     all_tickers = list(set(tickers + [market_ticker]))
     data = po_models.fetch_historical_data(all_tickers, start_date, end_date)
     return data
@@ -79,7 +79,7 @@ def calculate_all_metrics(portfolio_returns: pd.Series, market_returns: pd.Serie
         "Treynor Ratio": treynor
     }
 
-def get_comprehensive_metrics(data: pd.DataFrame, allocations: dict, custom_start: str, end_date: str, risk_free_rate: float, market_ticker="SPY") -> pd.DataFrame:
+def get_comprehensive_metrics(data: pd.DataFrame, allocations: dict, custom_start: str, end_date: str, risk_free_rate: float, market_ticker="^GSPC") -> pd.DataFrame:
     try:
         end = datetime.strptime(end_date, '%Y-%m-%d')
     except ValueError:

@@ -25,7 +25,8 @@ def render_tab():
                 "Risk-Free Rate (%)", 
                 value=st.session_state.default_rf_rate, 
                 step=0.1,
-                key="ps_rf_input"
+                key="ps_rf_input",
+                help="Defaults to the implied rate of the 30-Day Fed Funds Futures (ZQ=F)."
             )
         with col2:
             start_date = st.date_input("Custom Start Date", value=date(2020, 1, 1), min_value=date(1900, 1, 1), key="ps_start")
@@ -54,6 +55,10 @@ def render_tab():
         if len(tickers_list) < 1:
             st.error("Please enter at least one valid ticker.")
             return
+
+        total_alloc = sum(allocations.values())
+        if abs(total_alloc - 100.0) > 0.01 and abs(total_alloc - 1.0) > 0.001:
+            st.error(f"Allocations sum to {total_alloc}, not 100. They have been automatically normalized.")
 
         rf_rate_decimal = rf_input / 100.0
         start_str = start_date.strftime('%Y-%m-%d')
@@ -92,17 +97,17 @@ def render_tab():
             col_corr, col_cov = st.columns(2)
             with col_corr:
                 fig_corr = px.imshow(corr_matrix, text_auto=".2f", aspect="auto", 
-                                     color_continuous_scale="RdBu_r", zmin=-1, zmax=1,
+                                     color_continuous_scale="Peach", zmin=-1, zmax=1,
                                      title="Correlation Matrix")
                 fig_corr.update_layout(template='plotly_dark', margin=dict(t=50, b=20, l=20, r=20))
-                st.plotly_chart(fig_corr, use_container_width=True)
+                st.plotly_chart(fig_corr, width='stretch')
 
             with col_cov:
                 fig_cov = px.imshow(cov_matrix, text_auto=".4f", aspect="auto", 
-                                    color_continuous_scale="Viridis",
+                                    color_continuous_scale="Peach",
                                     title="Annualized Covariance Matrix")
                 fig_cov.update_layout(template='plotly_dark', margin=dict(t=50, b=20, l=20, r=20))
-                st.plotly_chart(fig_cov, use_container_width=True)
+                st.plotly_chart(fig_cov, width='stretch')
         elif len(valid_tickers) == 1:
             st.info("Need at least two valid assets to compute correlation and covariance matrices.")
         else:
@@ -112,7 +117,7 @@ def render_tab():
         st.subheader("Portfolio Performance & Risk Metrics")
         
         metrics_df = ps_models.get_comprehensive_metrics(
-            data, allocations, start_str, end_str, rf_rate_decimal, market_ticker="SPY"
+            data, allocations, start_str, end_str, rf_rate_decimal, market_ticker="^GSPC"
         )
         
         if metrics_df.empty:
@@ -130,4 +135,4 @@ def render_tab():
             for col in formatted_df.columns:
                 formatted_df[col] = [format_metric(val, idx) for idx, val in formatted_df[col].items()]
 
-            st.dataframe(formatted_df, use_container_width=True)
+            st.dataframe(formatted_df, width='stretch')
