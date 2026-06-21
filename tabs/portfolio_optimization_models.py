@@ -48,89 +48,54 @@ def fetch_current_risk_free_rate(ticker: str = "ZQ=F") -> float:
     # Fallback default if Yahoo Finance fails to fetch the futures contract
     return 0.04 
 
-# --- Metric Calculations ---
-
-def calculate_metrics(returns: pd.Series, rf_rate: float):
-    if returns.empty:
-        return None, None, None
-
-    # 1. Traditional Sharpe (Arithmetic)
-    ann_arith_return = returns.mean() * TRADING_DAYS
-    ann_volatility = returns.std() * np.sqrt(TRADING_DAYS)
-    sharpe = (ann_arith_return - rf_rate) / ann_volatility if ann_volatility != 0 else 0.0
-
-    # 2. Geometric Sharpe
-    total_compound_return = (1 + returns).prod()
-    ann_geom_return = total_compound_return ** (TRADING_DAYS / len(returns)) - 1
-    geom_sharpe = (ann_geom_return - rf_rate) / ann_volatility if ann_volatility != 0 else 0.0
-
-    # 3. Sortino Ratio
-    downside_returns = returns[returns < 0]
-    downside_deviation = np.sqrt((downside_returns**2).mean()) * np.sqrt(TRADING_DAYS)
-    sortino = (ann_arith_return - rf_rate) / downside_deviation if downside_deviation != 0 else 0.0
-
-    return sharpe, geom_sharpe, sortino
-
-def get_portfolio_risk_metrics(data: pd.DataFrame, allocations: dict, end_date: str, risk_free_rate: float) -> pd.DataFrame:
-    """
-    Calculates 3, 5, and 10 year risk metrics based on pre-fetched DataFrame.
-    """
-    try:
-        end = datetime.strptime(end_date, '%Y-%m-%d')
-    except ValueError:
-        return pd.DataFrame()
-
-    start_10yr = end - relativedelta(years=10)
-    start_5yr = end - relativedelta(years=5)
-    start_3yr = end - relativedelta(years=3)
-
-    tickers = list(allocations.keys())
-    weights = np.array(list(allocations.values()))
-
-    # Normalize weights if they don't exactly equal 1
-    if not np.isclose(weights.sum(), 1.0) and weights.sum() > 0:
-        weights = weights / weights.sum()
-
-    # Filter available tickers in data
-    valid_tickers = [t for t in tickers if t in data.columns]
-    if not valid_tickers:
-        return pd.DataFrame()
-
-    daily_returns = data[valid_tickers].pct_change().dropna()
-    valid_weights = np.array([allocations[t] for t in valid_tickers])
-    
-    if not np.isclose(valid_weights.sum(), 1.0) and valid_weights.sum() > 0:
-        valid_weights = valid_weights / valid_weights.sum()
-
-    portfolio_returns = daily_returns.dot(valid_weights)
-    
-    periods = {
-        "3 Year": start_3yr,
-        "5 Year": start_5yr,
-        "10 Year": start_10yr
-    }
-
-    results = []
-    for label, start_date in periods.items():
-        # Using string representation for slicing compatibility
-        period_returns = portfolio_returns.loc[start_date.strftime('%Y-%m-%d'):]
-        
-        expected_days = (end - start_date).days * (TRADING_DAYS / 365.25)
-        if len(period_returns) < (expected_days * 0.9):
-            results.append({"Period": label, "Trad. Sharpe": None, "Geom. Sharpe": None, "Sortino": None})
-            continue
-
-        sharpe, geom_sharpe, sortino = calculate_metrics(period_returns, risk_free_rate)
-        results.append({
-            "Period": label, 
-            "Trad. Sharpe": sharpe, 
-            "Geom. Sharpe": geom_sharpe, 
-            "Sortino": sortino
-        })
-
-    return pd.DataFrame(results)
-
 # --- Optimizers ---
+
+def maximize_sharpe(data: pd.DataFrame, risk_free_rate: float):
+    """
+    Finds the portfolio allocation that maximizes the traditional Sharpe Ratio.
+    Returns: (allocation_dict, expected_return, expected_volatility, max_sharpe)
+    """
+    if data.empty or data.shape[1] < 2:
+        return None, 0.0, 0.0, 0.0
+
+    returns = data.pct_change().dropna()
+    expected_returns = returns.mean() * TRADING_DAYS
+    cov_matrix = returns.cov() * TRADING_DAYS
+    num_assets = len(data.columns)
+    tickers = data.columns.tolist()
+
+    def neg_sharpe(weights):
+        port_return = np.dot(weights, expected_returns)
+        port_volatility = np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights)))
+        if port_volatility == 0:
+            return 0.0
+        return -((port_return - risk_free_rate) / port_volatility)
+
+    # Constraints: sum of weights equals 1
+    constraints = ({'type': 'eq', 'fun': lambda x: np.sum(x) - 1})
+    # Bounds: no short selling (weights between 0 and 1)
+    bounds = tuple((0.0, 1.0) for _ in range(num_assets))
+    initial_guess = num_assets * [1. / num_assets]
+
+    result = minimize(neg_sharpe, initial_guess, method='SLSQP', bounds=bounds, constraints=constraints)
+
+    if not result.success:
+        return None, 0.0, 0.0, 0.0
+
+    optimal_weights = result.x
+    max_sharpe_val = -result.fun
+    
+    allocation = {tickers[i]: round(optimal_weights[i], 4) for i in range(num_assets)}
+
+    # Calculate Geometric Return (CAGR) for the optimal weights
+    optimal_returns = returns.dot(optimal_weights)
+    total_compound = (1 + optimal_returns).prod()
+    ann_geom_ret = total_compound ** (TRADING_DAYS / len(optimal_returns)) - 1
+    
+    # Standard Volatility
+    ann_vol = np.sqrt(np.dot(optimal_weights.T, np.dot(cov_matrix, optimal_weights)))
+
+    return allocation, ann_geom_ret, ann_vol, max_sharpe_val
 
 def maximize_geometric_sharpe(data: pd.DataFrame, risk_free_rate: float):
     """

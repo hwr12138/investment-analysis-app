@@ -114,13 +114,34 @@ def render_tab():
 
         # Create sub-tabs for the different optimization strategies
         st.divider()
-        tab_geo, tab_vol, tab_kelly = st.tabs([
+        tab_sharpe, tab_geo, tab_vol, tab_kelly = st.tabs([
+            "📊 Maximize Traditional Sharpe",
             "📈 Maximize Geometric Sharpe", 
             "🛡️ Volatility Targeting", 
             "🎲 Fractional Kelly"
         ])
 
-        # --- 1. Maximize Geometric Sharpe ---
+        # --- 1. Maximize Traditional Sharpe ---
+        with tab_sharpe:
+            st.subheader("Maximum Traditional Sharpe Portfolio")
+            alloc_sharpe, cagr_sharpe, vol_sharpe, sharpe_val = po_models.maximize_sharpe(data, rf_rate_decimal)
+            
+            if alloc_sharpe:
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Expected CAGR", f"{cagr_sharpe*100:.2f}%")
+                c2.metric("Annual Volatility", f"{vol_sharpe*100:.2f}%")
+                c3.metric("Max Sharpe Ratio", f"{sharpe_val:.3f}")
+
+                col_pie, col_bar = st.columns([1, 1.2])
+                with col_pie:
+                    st.plotly_chart(plot_allocation(alloc_sharpe, "Allocation Weights"), width='stretch')
+                with col_bar:
+                    yearly_rets_sharpe, _ = po_models.get_portfolio_yearly_returns(data, alloc_sharpe)
+                    st.plotly_chart(plot_yearly_returns(yearly_rets_sharpe, "Yearly Portfolio Returns"), width='stretch')
+            else:
+                st.error("Optimization failed.")
+
+        # --- 2. Maximize Geometric Sharpe ---
         with tab_geo:
             st.subheader("Maximum Geometric Sharpe Portfolio")
             alloc_geo, cagr_geo, vol_geo, sharpe_geo = po_models.maximize_geometric_sharpe(data, rf_rate_decimal)
@@ -140,7 +161,7 @@ def render_tab():
             else:
                 st.error("Optimization failed.")
 
-        # --- 2. Volatility Targeting ---
+        # --- 3. Volatility Targeting ---
         with tab_vol:
             st.subheader(f"Max Return (Cap at {vol_target}% Volatility)")
             alloc_vol, ret_vol, port_vol, sharpe_vol = po_models.volatility_targeting_optimizer(data, vol_target_decimal, rf_rate_decimal)
@@ -160,7 +181,7 @@ def render_tab():
             else:
                 st.error("Optimization failed to converge under current volatility constraints.")
 
-        # --- 3. Fractional Kelly ---
+        # --- 4. Fractional Kelly ---
         with tab_vol: # (Will be placed in tab_kelly)
             pass
             
