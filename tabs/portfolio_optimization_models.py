@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 import yfinance as yf
+import requests
 from scipy.optimize import minimize
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
@@ -31,21 +32,26 @@ def fetch_historical_data(tickers: list, start_date: str, end_date: str) -> pd.D
         
     return data.dropna(how='all')
 
-def fetch_current_risk_free_rate(ticker: str = "ZQ=F") -> float:
+def fetch_current_risk_free_rate() -> float:
     """
-    Fetches the current 30-Day Federal Funds Futures price to calculate the implied risk-free rate.
-    Priced at 100 - rate (e.g., a price of 95.00 implies a 5.00% rate).
+    Fetches the current 1-month Treasury rate from Financial Modeling Prep (FMP) 
+    to use as the risk-free rate.
     """
     try:
-        t = yf.Ticker(ticker)
-        hist = t.history(period="5d") # Fetch last 5 days to ensure we get a valid trading day
-        if not hist.empty:
-            latest_price = hist['Close'].iloc[-1]
-            implied_rate = (100 - latest_price) / 100.0
-            return implied_rate
+        api_key = st.secrets.get("FMP_API_KEY")
+        if api_key:
+            url = f"https://financialmodelingprep.com/stable/treasury-rates?apikey={api_key}"
+            response = requests.get(url, timeout=5)
+            if response.status_code == 200:
+                data = response.json()
+                if data and len(data) > 0:
+                    rate_pct = data[0].get("month1")
+                    if rate_pct is not None:
+                        return float(rate_pct) / 100.0
     except Exception:
         pass
-    # Fallback default if Yahoo Finance fails to fetch the futures contract
+    
+    # Fallback default if API fails or key is missing
     return 0.04 
 
 # --- Optimizers ---
