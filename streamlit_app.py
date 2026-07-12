@@ -1,8 +1,8 @@
 import streamlit as st
-import tabs.black_scholes_tab as bs_tab
-import tabs.momentum_analysis_tab as ma_tab
-import tabs.portfolio_optimization_tab as po_tab
-import tabs.portfolio_statistics_tab as ps_tab
+import pages.black_scholes_page as bs_page
+import pages.momentum_analysis_page as ma_page
+import pages.portfolio_optimization_page as po_page
+import pages.portfolio_statistics_page as ps_page
 
 # Set the title and favicon that appear in the Browser's tab bar.
 st.set_page_config(
@@ -34,9 +34,9 @@ st.markdown(f'<a href="{linkedin_url}" target="_blank" style="text-decoration: n
 # Navigation
 
 pg = st.navigation([
-    st.Page(po_tab.render_tab, title="Portfolio Optimization", url_path="portfolio_optimization"),
-    st.Page(ps_tab.render_tab, title="Portfolio Statistics", url_path="portfolio_statistics"),
-    st.Page(bs_tab.render_tab, title="Black-Scholes Model", url_path="black_scholes"),
-    st.Page(ma_tab.render_tab, title="Momentum Analysis", url_path="momentum_analysis"),
+    st.Page(po_page.render_page, title="Portfolio Optimization", icon="📈", url_path="portfolio_optimization"),
+    st.Page(ps_page.render_page, title="Portfolio Statistics", icon="📊", url_path="portfolio_statistics"),
+    st.Page(bs_page.render_page, title="Black-Scholes Model", icon="📉", url_path="black_scholes"),
+    st.Page(ma_page.render_page, title="Momentum Analysis", icon="🚀", url_path="momentum_analysis"),
 ])
 pg.run()

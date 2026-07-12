@@ -1,8 +1,8 @@
 import streamlit as st
 import numpy as np
-import tabs.black_scholes_model as bs
+import pages.black_scholes_model as bs
 
-def render_tab():
+def render_page():
     st.header("Black-Scholes Model")
     st.write("This section allows you to input parameters for the Black-Scholes model and visualize the results.")
     col1, col2, col3 = st.columns(3)

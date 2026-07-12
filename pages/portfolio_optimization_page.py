@@ -3,7 +3,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import date, datetime
-import tabs.portfolio_optimization_models as po_models
+import pages.portfolio_optimization_models as po_models
 
 # --- Helper Plotting Functions ---
 
@@ -50,7 +50,7 @@ def plot_yearly_returns(yearly_returns_series, title="Yearly Returns"):
 
 # --- Main Dashboard Render ---
 
-def render_tab():
+def render_page():
     st.header("Portfolio Optimization")
     st.write("Determine optimal capital allocations based on Historical Data, Geometric Risk metrics, and the Kelly Criterion.")
     

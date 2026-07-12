@@ -2,10 +2,10 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 from datetime import date, datetime
-import tabs.portfolio_statistics_models as ps_models
-import tabs.portfolio_optimization_models as po_models
+import pages.portfolio_statistics_models as ps_models
+import pages.portfolio_optimization_models as po_models
 
-def render_tab():
+def render_page():
     st.header("Portfolio Statistics")
     st.write("Calculate comprehensive risk and return metrics for a custom portfolio and view asset correlations.")
 

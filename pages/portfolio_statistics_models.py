@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
-import tabs.portfolio_optimization_models as po_models
+import pages.portfolio_optimization_models as po_models
 
 TRADING_DAYS = 251
 

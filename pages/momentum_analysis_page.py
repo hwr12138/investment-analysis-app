@@ -3,11 +3,11 @@ import yfinance as yf
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import tabs.momentum_analysis_models as ma_models
+import pages.momentum_analysis_models as ma_models
 
 # --- Main Dashboard Render ---
 
-def render_tab():
+def render_page():
     st.header("Momentum Analysis")
     
     # Inputs: Ticker and Timeframe
