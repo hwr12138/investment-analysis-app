@@ -1,29 +1,30 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-from datetime import date, datetime
-import pages.portfolio_statistics_models as ps_models
-import pages.portfolio_optimization_models as po_models
+from datetime import date
+
+from app.data import market_data
+from app.logic import portfolio_statistics as ps_logic
 
 def render_page():
     st.header("Portfolio Statistics")
     st.write("Calculate comprehensive risk and return metrics for a custom portfolio and view asset correlations.")
 
     if "default_rf_rate" not in st.session_state:
-        st.session_state.default_rf_rate = po_models.fetch_current_risk_free_rate() * 100
+        st.session_state.default_rf_rate = market_data.fetch_current_risk_free_rate() * 100
 
     st.markdown("### ⚙️ Portfolio Parameters")
     with st.container(border=True):
         col1, col2 = st.columns(2)
         with col1:
             allocations_input = st.text_input(
-                "Enter Tickers and Allocations", 
+                "Enter Tickers and Allocations",
                 value="QQQ:55, GLD:30, XLE:15",
                 help="Format as TICKER:PERCENTAGE, separated by commas."
             )
             rf_input = st.number_input(
-                "Risk-Free Rate (%)", 
-                value=st.session_state.default_rf_rate, 
+                "Risk-Free Rate (%)",
+                value=st.session_state.default_rf_rate,
                 step=0.1,
                 key="ps_rf_input",
                 help="Defaults to the implied rate of the 30-Day Fed Funds Futures (ZQ=F)."
@@ -63,17 +64,17 @@ def render_page():
         rf_rate_decimal = rf_input / 100.0
         start_str = start_date.strftime('%Y-%m-%d')
         end_str = end_date.strftime('%Y-%m-%d')
-        
+
         # We need historical data stretching back 10 years for the 10-year metrics.
         try:
             earliest_start = min(start_date, end_date.replace(year=end_date.year - 10))
         except ValueError: # handle leap years
             earliest_start = min(start_date, end_date.replace(year=end_date.year - 10, day=28))
-            
+
         earliest_start_str = earliest_start.strftime('%Y-%m-%d')
 
         with st.spinner(f"Fetching historical data and computing metrics..."):
-            data = ps_models.fetch_data_and_market(tickers_list, earliest_start_str, end_str)
+            data = ps_logic.fetch_data_and_market(tickers_list, earliest_start_str, end_str)
 
         if data.empty or not any(t in data.columns for t in tickers_list):
             st.error("Failed to download enough valid data. Please check your tickers.")
@@ -88,7 +89,7 @@ def render_page():
 
         st.divider()
         st.subheader("Asset Relationships (Custom Period)")
-        
+
         custom_data = data[valid_tickers].loc[start_str:end_str].pct_change().dropna()
         if not custom_data.empty and len(valid_tickers) > 1:
             corr_matrix = custom_data.corr()
@@ -96,14 +97,14 @@ def render_page():
 
             col_corr, col_cov = st.columns(2)
             with col_corr:
-                fig_corr = px.imshow(corr_matrix, text_auto=".2f", aspect="auto", 
+                fig_corr = px.imshow(corr_matrix, text_auto=".2f", aspect="auto",
                                      color_continuous_scale="Peach", zmin=-1, zmax=1,
                                      title="Correlation Matrix")
                 fig_corr.update_layout(template='plotly_dark', margin=dict(t=50, b=20, l=20, r=20))
                 st.plotly_chart(fig_corr, width='stretch')
 
             with col_cov:
-                fig_cov = px.imshow(cov_matrix, text_auto=".4f", aspect="auto", 
+                fig_cov = px.imshow(cov_matrix, text_auto=".4f", aspect="auto",
                                     color_continuous_scale="Peach",
                                     title="Annualized Covariance Matrix")
                 fig_cov.update_layout(template='plotly_dark', margin=dict(t=50, b=20, l=20, r=20))
@@ -115,16 +116,16 @@ def render_page():
 
         st.divider()
         st.subheader("Portfolio Performance & Risk Metrics")
-        
-        metrics_df = ps_models.get_comprehensive_metrics(
+
+        metrics_df = ps_logic.get_comprehensive_metrics(
             data, allocations, start_str, end_str, rf_rate_decimal, market_ticker="^GSPC"
         )
-        
+
         if metrics_df.empty:
             st.warning("Not enough data to calculate portfolio metrics.")
         else:
             formatted_df = metrics_df.copy()
-            
+
             def format_metric(val, metric_name):
                 if pd.isna(val) or val is None:
                     return "N/A"

@@ -1,6 +1,7 @@
 import streamlit as st
 import numpy as np
-import pages.black_scholes_model as bs
+
+from app.logic import black_scholes as bs
 
 def render_page():
     st.header("Black-Scholes Model")

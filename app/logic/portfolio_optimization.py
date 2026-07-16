@@ -1,58 +1,8 @@
 import numpy as np
 import pandas as pd
-import yfinance as yf
-import requests
 from scipy.optimize import minimize
-from datetime import datetime
-from dateutil.relativedelta import relativedelta
-import streamlit as st
 
 TRADING_DAYS = 251
-
-# --- Global Helpers & Data Fetching ---
-
-@st.cache_data(show_spinner=False, ttl=3600)
-def fetch_historical_data(tickers: list, start_date: str, end_date: str) -> pd.DataFrame:
-    """
-    Fetches historical adjusted close prices for a list of tickers.
-    Cached to prevent redundant API calls when UI parameters change.
-    """
-    if not tickers:
-        return pd.DataFrame()
-    
-    df = yf.download(tickers, start=start_date, end=end_date, auto_adjust=False, progress=False)
-    
-    if df.empty:
-        return pd.DataFrame()
-
-    # Handle multi-index columns vs single ticker series
-    data = df['Adj Close']
-    if isinstance(data, pd.Series):
-        data = data.to_frame(name=tickers[0])
-        
-    return data.dropna(how='all')
-
-def fetch_current_risk_free_rate(period="month1") -> float:
-    """
-    Fetches the current 1-month Treasury rate from Financial Modeling Prep (FMP) 
-    to use as the risk-free rate.
-    """
-    try:
-        api_key = st.secrets.get("FMP_API_KEY")
-        if api_key:
-            url = f"https://financialmodelingprep.com/stable/treasury-rates?apikey={api_key}"
-            response = requests.get(url, timeout=5)
-            if response.status_code == 200:
-                data = response.json()
-                if data and len(data) > 0:
-                    rate_pct = data[0].get(period)
-                    if rate_pct is not None:
-                        return float(rate_pct) / 100.0
-    except Exception:
-        pass
-    
-    # Fallback default if API fails or key is missing
-    return 0.04 
 
 # --- Optimizers ---
 
@@ -90,14 +40,14 @@ def maximize_sharpe(data: pd.DataFrame, risk_free_rate: float):
 
     optimal_weights = result.x
     max_sharpe_val = -result.fun
-    
+
     allocation = {tickers[i]: round(optimal_weights[i], 4) for i in range(num_assets)}
 
     # Calculate Geometric Return (CAGR) for the optimal weights
     optimal_returns = returns.dot(optimal_weights)
     total_compound = (1 + optimal_returns).prod()
     ann_geom_ret = total_compound ** (TRADING_DAYS / len(optimal_returns)) - 1
-    
+
     # Standard Volatility
     ann_vol = np.sqrt(np.dot(optimal_weights.T, np.dot(cov_matrix, optimal_weights)))
 
@@ -135,7 +85,7 @@ def maximize_geometric_sharpe(data: pd.DataFrame, risk_free_rate: float):
 
     optimal_weights = result.x
     max_geo_sharpe = -result.fun
-    
+
     allocation = {tickers[i]: round(optimal_weights[i], 4) for i in range(num_assets)}
 
     optimal_returns = daily_returns.dot(optimal_weights)
@@ -167,7 +117,7 @@ def volatility_targeting_optimizer(data: pd.DataFrame, vol_constraint: float, ri
 
     sum_constraint = {'type': 'eq', 'fun': lambda w: np.sum(w) - 1}
     vol_limit = {'type': 'ineq', 'fun': lambda w: vol_constraint - portfolio_volatility(w)}
-    
+
     constraints = [sum_constraint, vol_limit]
     bounds = tuple((0, 1) for _ in range(num_assets))
     initial_weights = np.array([1.0 / num_assets] * num_assets)
@@ -183,7 +133,7 @@ def volatility_targeting_optimizer(data: pd.DataFrame, vol_constraint: float, ri
     sharpe = (opt_ret - risk_free_rate) / opt_vol if opt_vol > 0 else 0
 
     allocation = {tickers[i]: round(opt_weights[i], 4) for i in range(num_assets)}
-    
+
     return allocation, opt_ret, opt_vol, sharpe
 
 def calculate_kelly_allocation(data: pd.DataFrame, risk_free_rate: float, kelly_fraction: float = 0.5):
@@ -238,13 +188,13 @@ def get_portfolio_yearly_returns(data: pd.DataFrame, weights_dict: dict):
     tickers = list(weights_dict.keys())
     # Exclude 'CASH' from historical data mapping if it was added by Kelly
     valid_tickers = [t for t in tickers if t in data.columns]
-    
+
     if data.empty or not valid_tickers:
         return pd.Series(), 0.0
 
     returns = data[valid_tickers].pct_change().dropna()
     portfolio_weights = np.array([weights_dict[t] for t in valid_tickers])
-    
+
     # Normalize if weights don't sum to 1 (ignoring cash)
     if not np.isclose(portfolio_weights.sum(), 1.0) and portfolio_weights.sum() > 0:
         portfolio_weights = portfolio_weights / portfolio_weights.sum()

@@ -1,9 +1,9 @@
 import streamlit as st
-import pages.black_scholes_page as bs_page
-import pages.momentum_analysis_page as ma_page
-import pages.portfolio_optimization_page as po_page
-import pages.portfolio_statistics_page as ps_page
-import pages.valuation_triangulation_page as vt_page
+from app.views import black_scholes as bs_page
+from app.views import momentum_analysis as ma_page
+from app.views import portfolio_optimization as po_page
+from app.views import portfolio_statistics as ps_page
+from app.views import valuation_triangulation as vt_page
 
 # Set the title and favicon that appear in the Browser's tab bar.
 st.set_page_config(
@@ -22,7 +22,7 @@ def local_css(file_name):
         st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
 
 # Call the function to apply the styles
-local_css("style.css")
+local_css("assets/style.css")
 
 # -----------------------------------------------------------------------------
 # Set the title that appears at the top of the page.

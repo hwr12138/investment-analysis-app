@@ -5,4 +5,5 @@ numpy
 matplotlib
 seaborn
 yfinance
-plotlysimfin
+plotly
+requests

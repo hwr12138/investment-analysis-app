@@ -1,5 +1,7 @@
 import streamlit as st
-import pages.valuation_triangulation_models as models
+
+from app.data import market_data
+from app.logic import valuation_triangulation as vt_logic
 
 def render_page():
     st.title("Valuation Triangulation")
@@ -19,10 +21,10 @@ def render_page():
 
     # Create the 5 tabs
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "Unlevered DCF", 
-        "Levered DCF", 
-        "Comparable Company Analysis", 
-        "Historical Multiple Reversion", 
+        "Unlevered DCF",
+        "Levered DCF",
+        "Comparable Company Analysis",
+        "Historical Multiple Reversion",
         "Reverse DCF"
     ])
 
@@ -31,19 +33,19 @@ def render_page():
         if st.session_state['vt_run']:
             with st.spinner(f"Fetching data for {ticker}..."):
                 # Fetch baseline data
-                financials = models.fetch_simfin_financials(ticker)
-                
+                financials = market_data.fetch_simfin_financials(ticker)
+
                 if not financials:
                     st.error("Failed to fetch historical data. Check if Ticker is correct or try again.")
                 else:
-                    risk_free_rate = models.fetch_10y_treasury_rate()
-                    beta = models.fetch_beta(ticker)
-                    erp = models.fetch_erp()
-                    defaults = models.calculate_historical_averages(financials)
-                    
+                    risk_free_rate = market_data.fetch_10y_treasury_rate()
+                    beta = market_data.fetch_beta(ticker)
+                    erp = market_data.fetch_erp()
+                    defaults = vt_logic.calculate_historical_averages(financials)
+
                     st.subheader("Assumptions (Derived from Historicals)")
                     col1, col2, col3, col4 = st.columns(4)
-                    
+
                     with col1:
                         rev_growth = st.number_input("Revenue Growth Rate (%)", value=defaults.get('rev_growth', 0.05) * 100, step=1.0) / 100
                         ebit_margin = st.number_input("Target EBIT Margin (%)", value=defaults.get('ebit_margin', 0.15) * 100, step=1.0) / 100
@@ -56,7 +58,7 @@ def render_page():
                     with col4:
                         cost_of_debt = st.number_input("Cost of Debt (%)", value=defaults.get('cost_of_debt', 0.05) * 100, step=0.1) / 100
                         exit_multiple = st.number_input("Exit Multiple (EV/EBITDA)", value=defaults.get('exit_multiple', 10.0), step=1.0)
-                        
+
                     st.subheader("WACC Inputs")
                     w_col1, w_col2, w_col3, w_col4 = st.columns(4)
                     with w_col1:
@@ -69,15 +71,15 @@ def render_page():
                         ev_market_cap = financials['shares'] * financials['current_price']
                         latest_debt = financials['total_debt'].iloc[0] if not financials['total_debt'].empty else 0
                         ev_total = ev_market_cap + latest_debt
-                        
+
                         debt_weight_def = latest_debt / ev_total if ev_total > 0 else 0.2
                         debt_weight = st.number_input("Debt Weight (%)", value=debt_weight_def * 100, step=1.0) / 100
                         equity_weight = 1.0 - debt_weight
                         st.caption(f"Equity Weight: {equity_weight*100:.1f}%")
-                        
-                    wacc = models.calculate_wacc(rfr_input, beta_input, erp_input, cost_of_debt, tax_rate, debt_weight, equity_weight)
+
+                    wacc = vt_logic.calculate_wacc(rfr_input, beta_input, erp_input, cost_of_debt, tax_rate, debt_weight, equity_weight)
                     st.markdown(f"**Calculated WACC:** {wacc*100:.2f}%")
-                    
+
                     assumptions = {
                         'rev_growth': rev_growth,
                         'ebit_margin': ebit_margin,
@@ -87,18 +89,18 @@ def render_page():
                         'nwc_margin': nwc_margin,
                         'exit_multiple': exit_multiple
                     }
-                    
-                    dcf_results = models.run_unlevered_dcf(financials, assumptions, wacc)
-                    
+
+                    dcf_results = vt_logic.run_unlevered_dcf(financials, assumptions, wacc)
+
                     st.subheader("Results")
                     res_col1, res_col2, res_col3 = st.columns(3)
                     res_col1.metric("Implied Share Price", f"${dcf_results['implied_share_price']:.2f}")
                     res_col2.metric("Current Share Price", f"${financials['current_price']:.2f}")
-                    
+
                     if financials['current_price'] > 0:
                         premium_discount = (dcf_results['implied_share_price'] / financials['current_price']) - 1
                         res_col3.metric("Premium / (Discount)", f"{premium_discount*100:.2f}%")
-                    
+
                     st.subheader("Projected Free Cash Flows")
                     st.dataframe(dcf_results['projections'].style.format({
                         'Revenue': '${:,.0f}',
