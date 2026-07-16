@@ -32,7 +32,7 @@ def fetch_historical_data(tickers: list, start_date: str, end_date: str) -> pd.D
         
     return data.dropna(how='all')
 
-def fetch_current_risk_free_rate() -> float:
+def fetch_current_risk_free_rate(period="month1") -> float:
     """
     Fetches the current 1-month Treasury rate from Financial Modeling Prep (FMP) 
     to use as the risk-free rate.
@@ -45,7 +45,7 @@ def fetch_current_risk_free_rate() -> float:
             if response.status_code == 200:
                 data = response.json()
                 if data and len(data) > 0:
-                    rate_pct = data[0].get("month1")
+                    rate_pct = data[0].get(period)
                     if rate_pct is not None:
                         return float(rate_pct) / 100.0
     except Exception:

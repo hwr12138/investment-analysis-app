@@ -3,6 +3,7 @@ import pages.black_scholes_page as bs_page
 import pages.momentum_analysis_page as ma_page
 import pages.portfolio_optimization_page as po_page
 import pages.portfolio_statistics_page as ps_page
+import pages.valuation_triangulation_page as vt_page
 
 # Set the title and favicon that appear in the Browser's tab bar.
 st.set_page_config(
@@ -34,6 +35,7 @@ st.markdown(f'<a href="{linkedin_url}" target="_blank" style="text-decoration: n
 # Navigation
 
 pg = st.navigation([
+    st.Page(vt_page.render_page, title="Valuation Triangulation", icon="📐", url_path="valuation_triangulation"),
     st.Page(po_page.render_page, title="Portfolio Optimization", icon="📈", url_path="portfolio_optimization"),
     st.Page(ps_page.render_page, title="Portfolio Statistics", icon="📊", url_path="portfolio_statistics"),
     st.Page(bs_page.render_page, title="Black-Scholes Model", icon="📉", url_path="black_scholes"),
