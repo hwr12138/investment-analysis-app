@@ -10,8 +10,17 @@ def render_page():
     st.header("Portfolio Statistics")
     st.write("Calculate comprehensive risk and return metrics for a custom portfolio and view asset correlations.")
 
+    # The Resolved is memoized whole rather than just its value, so a session
+    # running on the 4% fallback keeps saying so instead of pinning it silently.
     if "default_rf_rate" not in st.session_state:
-        st.session_state.default_rf_rate = market_data.fetch_current_risk_free_rate() * 100
+        st.session_state.default_rf_rate = market_data.fetch_current_risk_free_rate()
+
+    rf_rate = st.session_state.default_rf_rate
+    if rf_rate.is_fallback:
+        # A missing API key reports as an error, a failed call as a warning.
+        getattr(st, rf_rate.severity)(
+            f"Risk-free rate: standing in the {rf_rate.value:.2%} default — {rf_rate.detail}."
+        )
 
     st.markdown("### ⚙️ Portfolio Parameters")
     with st.container(border=True):
@@ -24,7 +33,7 @@ def render_page():
             )
             rf_input = st.number_input(
                 "Risk-Free Rate (%)",
-                value=st.session_state.default_rf_rate,
+                value=rf_rate.value * 100,
                 step=0.1,
                 key="ps_rf_input",
                 help="Defaults to the implied rate of the 30-Day Fed Funds Futures (ZQ=F)."
