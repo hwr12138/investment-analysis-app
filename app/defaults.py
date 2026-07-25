@@ -7,7 +7,8 @@ what they actually are: a set of editorial choices that shape every valuation
 the app produces, and that deserve to be reviewed as a set.
 
 Each carries its own rationale, so the question "why 5.5%?" has an answer that
-lives next to the number rather than in someone's memory. The bounds are the
+lives next to the number rather than in someone's memory, and the ones a user
+could look up for themselves carry that pointer too. The bounds are the
 plausible band a derived value has to clear before it's trusted over the
 default; see app.provenance for how a rejection gets classified.
 """
@@ -21,12 +22,16 @@ class Default:
     """One stand-in, with everything needed to use, render and explain it."""
 
     def __init__(self, value: float, label: str, fmt: str = "{:.1%}",
-                 bounds: Optional[tuple] = None, rationale: str = ""):
+                 bounds: Optional[tuple] = None, rationale: str = "", guidance: str = ""):
         self.value = value
         self.label = label
         self.fmt = fmt
         self.bounds = bounds
         self.rationale = rationale
+        # Where a better figure can be sourced, for the inputs that have a real
+        # answer outside the filings. Rendered verbatim, so it carries its own
+        # lead-in rather than leaving each render site to invent one.
+        self.guidance = guidance
 
     def fallback(self, origin: Origin, detail: str) -> Resolved:
         """Builds the Resolved that stands this default in for real data."""
@@ -87,10 +92,15 @@ _ASSUMPTIONS = {
                   "inapplicable to banks and insurers, which report no working capital.",
     ),
     'cost_of_debt': Default(
-        0.05, "Cost of Debt", bounds=(0.0, 0.2),
+        0.05, "Pre-Tax Cost of Debt", bounds=(0.0, 0.2),
         rationale="Approximately an investment-grade corporate yield. Bounded because a "
                   "derived rate above 20% usually means the debt balance is wrong, not "
                   "that the company borrows at distressed rates.",
+        guidance="Where to get a better number: the yield on the company's outstanding "
+                 "bonds, at [FINRA Fixed Income](https://www.finra.org/finra-data/fixed-income). "
+                 "What's derived here is interest expense over the debt balance - a realized "
+                 "rate on debt issued years ago, not what the company would pay today. Enter "
+                 "it pre-tax; WACC applies (1 - tax rate) itself.",
     ),
     'exit_multiple': Default(
         10.0, "Exit Multiple (EV/EBITDA)", "{:.1f}x",
