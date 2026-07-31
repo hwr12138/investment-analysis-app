@@ -21,13 +21,6 @@ def _marked(key: str, resolved) -> str:
     return f"⚠️ {label}" if resolved.is_fallback else label
 
 
-def _help(key: str, resolved) -> str:
-    """Hover text for an input: where the number came from, then how to better it."""
-    base = f"{resolved.detail}." if resolved.detail else f"Derived from {resolved.source}."
-    guidance = DEFAULTS[key].guidance
-    return f"{base}\n\n{guidance}" if guidance else base
-
-
 def _still_default(resolved, current: float) -> bool:
     """True when a defaulted input is still sitting at its default.
 
@@ -62,8 +55,6 @@ def _report_provenance(inputs: list) -> None:
             write(f"**{spec.label}** — standing in {spec.format(resolved.value)}. "
                   f"{resolved.detail}.{overridden}")
             st.caption(f"Why this default: {spec.rationale}")
-            if spec.guidance:
-                st.caption(spec.guidance)
 
 
 def render_page():
@@ -119,7 +110,7 @@ def render_page():
                         resolved = defaults[key] if resolved is None else resolved
                         return st.number_input(
                             f"{_marked(key, resolved)} (%)", value=resolved.value * 100, step=step,
-                            help=_help(key, resolved),
+                            help=resolved.detail or f"Derived from {resolved.source}.",
                         ) / 100
 
                     with col1:
@@ -136,7 +127,7 @@ def render_page():
                         exit_multiple = st.number_input(
                             _marked('exit_multiple', defaults['exit_multiple']),
                             value=defaults['exit_multiple'].value, step=1.0,
-                            help=_help('exit_multiple', defaults['exit_multiple']),
+                            help=defaults['exit_multiple'].detail or f"Derived from {defaults['exit_multiple'].source}.",
                         )
 
                     st.subheader("WACC Inputs")
@@ -146,7 +137,7 @@ def render_page():
                     with w_col2:
                         beta_input = st.number_input(
                             _marked('beta', beta), value=beta.value, step=0.1,
-                            help=_help('beta', beta),
+                            help=beta.detail or f"Calculated from {beta.source}.",
                         )
                     with w_col3:
                         erp_input = pct_input('erp', step=0.1, resolved=erp)
