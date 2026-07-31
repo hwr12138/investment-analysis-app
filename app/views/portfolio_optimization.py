@@ -11,18 +11,9 @@ def render_page():
     st.header("Portfolio Optimization")
     st.write("Determine optimal capital allocations based on Historical Data, Geometric Risk metrics, and the Kelly Criterion.")
 
-    # Initialize the default risk-free rate in session state to avoid fetching on every interaction.
-    # The Resolved is memoized whole rather than just its value, so a session
-    # running on the 4% fallback keeps saying so instead of pinning it silently.
+    # Initialize the default risk-free rate in session state to avoid fetching on every interaction
     if "default_rf_rate" not in st.session_state:
-        st.session_state.default_rf_rate = market_data.fetch_current_risk_free_rate()
-
-    rf_rate = st.session_state.default_rf_rate
-    if rf_rate.is_fallback:
-        # A missing API key reports as an error, a failed call as a warning.
-        getattr(st, rf_rate.severity)(
-            f"Risk-free rate: standing in the {rf_rate.value:.2%} default — {rf_rate.detail}."
-        )
+        st.session_state.default_rf_rate = market_data.fetch_current_risk_free_rate() * 100
 
     # --- UI Inputs ---
     st.markdown("### ⚙️ Optimization Parameters")
@@ -40,7 +31,7 @@ def render_page():
         with col2:
             rf_input = st.number_input(
                 "Risk-Free Rate (%)",
-                value=rf_rate.value * 100,
+                value=st.session_state.default_rf_rate,
                 step=0.1,
                 help="Defaults to the implied rate of the 30-Day Fed Funds Futures (ZQ=F)."
             )
