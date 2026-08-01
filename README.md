@@ -8,7 +8,7 @@ An interactive Streamlit web application designed for financial engineering, tec
 
 The application is organized into five analytical modules:
 
-* **Valuation Triangulation:** Estimates a company's intrinsic value from multiple angles. The Unlevered DCF is implemented — it pulls historical financials, derives baseline assumptions (growth, margins, capital intensity), computes WACC, and projects five years of free cash flow to an implied share price versus the current price. Levered DCF, Comparable Company Analysis, Historical Multiple Reversion, and Reverse DCF are scaffolded for future work.
+* **DCF Valuation:** An unlevered free-cash-flow-to-the-firm model producing an intrinsic value per share for a US-listed equity, built on the SimFin v3 API. Resolves every financial concept against the columns the API actually returns rather than hardcoding names, builds FCFF two independent ways and reconciles them, regresses beta against the S&P 500 with its R², and computes both Gordon growth and exit multiple terminal values side by side with each method's implied version of the other. Every displayed number carries a provenance badge (reported / derived / estimated / user) and, where computed, its formula. Twenty-two validation checks run on load and surface as a persistent red (critical) or amber (warning) banner with per-check acknowledgement; banks and insurers are rejected outright rather than valued with a model that does not fit them. The full model exports to a multi-sheet workbook that reproduces value per share outside the app.
 * **Portfolio Optimization:** Allocates capital across multiple assets from historical data using four methodologies: Maximum Traditional Sharpe, Maximum Geometric Sharpe, Volatility Targeting, and the Fractional Kelly Criterion. Outputs include expected CAGR, volatility metrics, and visualized yearly returns.
 * **Portfolio Statistics:** Computes comprehensive risk and return metrics (Mean Annual Return, CAGR, Standard Deviation, Alpha, Beta, Sharpe, Geometric Sharpe, Sortino, and Treynor) for a custom-weighted portfolio across trailing 1/3/5/10-year and custom periods, alongside correlation and annualized covariance matrices.
 * **Black-Scholes Model:** Calculates Call and Put option prices alongside their respective Greeks (Delta, Gamma, Theta, Vega, Rho). Features interactive heatmaps to visualize pricing and PnL across varying spot prices and volatilities.
@@ -22,16 +22,19 @@ investment-analysis-app/
 ├── app/
 │   ├── views/             # Streamlit UI for each page (render_page functions)
 │   ├── logic/             # Pure calculations, one module per feature
-│   ├── data/              # Shared market-data access (yfinance, FMP, ERP, SimFin)
+│   │   └── dcf/           # The DCF engine (see below)
+│   ├── data/              # Shared data access (yfinance, FMP, ERP, SimFin)
+│   ├── provenance.py      # Origin/Sourced types shared by the data and logic layers
 │   └── charts.py          # Reusable Plotly chart helpers
 ├── assets/style.css       # Custom CSS
-└── requirements.txt
+├── tests/                 # pytest suite; all network calls mocked
+├── requirements.txt
+└── requirements-dev.txt   # adds pytest; not installed on the deployed app
 ```
 
 Each feature is split into a **view** (`app/views/<feature>.py`) that renders the
 UI and a **logic** module (`app/logic/<feature>.py`) that holds the math. All
-external API calls live in `app/data/market_data.py` so caching and API keys
-stay in one place.
+external API calls live in `app/data/` so caching and API keys stay in one place.
 
 To add a new page:
 
@@ -39,6 +42,43 @@ To add a new page:
 2. Create `app/views/<feature>.py` with a `render_page()` function.
 3. Register it in the `st.navigation([...])` list in `streamlit_app.py`.
 4. Reuse `app/data/market_data.py` for any data fetching.
+
+### The DCF engine
+
+The DCF feature is a package rather than the usual single logic module, because
+its schema resolution, statement normalisation, validation and arithmetic each
+need to be testable on their own:
+
+| Module | Responsibility |
+|---|---|
+| `app/data/simfin_client.py` | SimFin v3 auth, retry, caching, columnar parsing |
+| `app/logic/dcf/schema.py` | Concept alias table and runtime column resolution |
+| `app/logic/dcf/financials.py` | Statement normalisation, TTM, ratio derivation |
+| `app/logic/dcf/wacc.py` | Beta regression and discount rate — **pure** |
+| `app/logic/dcf/valuation.py` | FCFF, projection, terminal value, equity bridge — **pure** |
+| `app/logic/dcf/validation.py` | Checks, severity model, issue types, tolerances |
+| `app/logic/dcf/model.py` | Orchestration: fetch → resolve → normalise → validate → value |
+| `app/logic/dcf/export.py` | Multi-sheet workbook and CSV export |
+
+`wacc.py` and `valuation.py` import no Streamlit, make no network calls, and
+hold no global state — numbers in, dataclasses out. Every tolerance in the model
+lives in one `Tolerances` dataclass in `validation.py`.
+
+### API keys
+
+`FMP_API_KEY` (Treasury rates) and `SIMFIN_API_KEY` (fundamentals) are read from
+`.streamlit/secrets.toml`, which is gitignored. The SimFin key is sent as a
+header with a literal `api-key ` prefix — not a bearer token — and never appears
+in a URL, a log line, an error message, or an export.
+
+## Running the tests
+
+```
+$ pip install -r requirements-dev.txt
+$ python -m pytest tests/ -v
+```
+
+No test touches the network; the SimFin fixtures are recorded responses.
 
 ## How to run it on your own machine
 

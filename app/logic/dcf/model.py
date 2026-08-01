@@ -1,0 +1,741 @@
+"""Assembly: fetch → resolve → normalise → validate → value.
+
+The page calls :func:`load_company` once per ticker and :func:`run_model` on
+every assumption change. Only the first touches the network, so moving a slider
+never triggers a refetch.
+
+Everything here is orchestration. The arithmetic lives in :mod:`valuation` and
+:mod:`wacc`, which stay pure.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import date, timedelta
+
+import numpy as np
+import pandas as pd
+
+from app.data import market_data, simfin_client
+from app.data.simfin_client import StatementSet
+from app.logic.dcf import financials as fin
+from app.logic.dcf import validation as val
+from app.logic.dcf import valuation as dcf
+from app.logic.dcf import wacc as wacc_lib
+from app.logic.dcf.schema import SchemaMap, resolve_schema
+from app.provenance import Origin, Sourced
+
+#: Years of daily prices pulled for the beta regression.
+BETA_HISTORY_YEARS = 5
+
+#: SimFin sector codes beginning with this prefix are the financial sector.
+_FINANCIAL_SECTOR_PREFIX = 104
+
+
+@dataclass
+class BasePeriod:
+    """The period the forecast starts from.
+
+    Flows come from the trailing twelve months where SimFin has four quarters,
+    because a valuation struck today should not project off figures that stop at
+    the last fiscal year end. Stock items always come from the most recent
+    balance sheet and are labelled with its date.
+    """
+
+    label: str
+    flows: pd.Series
+    stocks: pd.Series
+    stocks_as_of: date | None
+    is_ttm: bool
+    detail: str
+
+
+@dataclass
+class CompanyDataset:
+    """Everything fetched for one ticker. Built once, reused across reruns."""
+
+    ticker: str
+    name: str
+    currency: str
+    template: str
+    simfin_id: int
+    listing: dict | None
+    general: dict
+    schema: SchemaMap
+
+    annual: pd.DataFrame
+    annual_meta: pd.DataFrame
+    quarterly: pd.DataFrame
+    quarterly_meta: pd.DataFrame
+    #: Every quarter SimFin returned, used by the quarters-sum check.
+    quarterly_all: pd.DataFrame
+    ttm: pd.Series | None
+    ttm_label: str | None
+    manual_ttm: pd.Series | None
+
+    prices: pd.DataFrame
+    common_shares: pd.DataFrame
+    weighted_shares_annual: pd.DataFrame
+    weighted_shares_ttm: pd.DataFrame
+    filings: pd.DataFrame
+
+    statements_annual: StatementSet
+    asreported: bool
+    fiscal_year_end_month: int | None
+    capex_result: fin.CapexResult
+    ratios: pd.DataFrame
+
+    # Quote and share counts, each with its own as-of date.
+    last_price: float | None = None
+    price_date: date | None = None
+    reported_market_cap: float | None = None
+    shares_point_in_time: float | None = None
+    shares_point_in_time_date: date | None = None
+    #: The prices endpoint's own share count — a second, independent read on
+    #: the same point-in-time concept, and the one SimFin has historically got
+    #: wrong by orders of magnitude.
+    shares_from_prices: float | None = None
+    shares_weighted_diluted: float | None = None
+    shares_weighted_basic: float | None = None
+    shares_weighted_label: str = ""
+    shares_eps_implied: float | None = None
+
+    @property
+    def sector_name(self) -> str | None:
+        return (self.listing or {}).get("sectorName")
+
+    @property
+    def industry_name(self) -> str | None:
+        return (self.listing or {}).get("industryName")
+
+    def filing_link(self, fiscal_year: int) -> str | None:
+        """Source filing for a fiscal year, preferring the annual filing index."""
+        if not self.filings.empty:
+            hits = self.filings[
+                (self.filings["fyear"] == fiscal_year) & (self.filings["period"] == "FY")
+            ]
+            if not hits.empty:
+                return str(hits.iloc[-1]["sourceLink"])
+        if fiscal_year in self.annual_meta.index:
+            link = self.annual_meta.loc[fiscal_year, "source_link"]
+            if isinstance(link, str) and link:
+                return link
+        return None
+
+
+def _reject_financial_sector(
+    ticker: str, statements: StatementSet, listing: dict | None
+) -> None:
+    """Banks and insurers get rejected before anything is computed.
+
+    The statement template is authoritative: ``sectorCode`` and ``sectorName``
+    are null for a good number of SimFin's companies, but every company that
+    returns statements has a template.
+    """
+    sector = (listing or {}).get("sectorName") or ""
+    sector_code = (listing or {}).get("sectorCode")
+
+    if statements.is_financial_template:
+        raise val.UnsupportedSectorError(ticker, sector, statements.template)
+
+    if sector_code is not None and not pd.isna(sector_code):
+        if int(sector_code) // 1000 == _FINANCIAL_SECTOR_PREFIX:
+            raise val.UnsupportedSectorError(ticker, sector, statements.template)
+
+
+def _series_value(series: pd.Series | None, key: str) -> float | None:
+    if series is None or key not in series.index:
+        return None
+    value = series[key]
+    if value is None or (isinstance(value, float) and np.isnan(value)):
+        return None
+    return float(value)
+
+
+def load_company(ticker: str, *, asreported: bool = False) -> CompanyDataset:
+    """Fetches and normalises everything for one ticker.
+
+    Raises :class:`~app.logic.dcf.validation.UnsupportedSectorError` for banks
+    and insurers, :class:`~app.logic.dcf.schema.SchemaResolutionError` when a
+    required concept cannot be resolved, and
+    :class:`~app.data.simfin_client.TickerNotFoundError` when SimFin has no data
+    — all BLOCKING, all before a single number is displayed.
+    """
+    ticker = ticker.strip().upper()
+    listing = simfin_client.lookup_company(ticker)
+
+    annual_statements = simfin_client.fetch_statements(
+        ticker, period="FY", asreported=asreported
+    )
+    _reject_financial_sector(ticker, annual_statements, listing)
+
+    schema = resolve_schema(
+        annual_statements.frames, ticker, annual_statements.template
+    )
+    annual, annual_meta = fin.build_concept_table(annual_statements, schema)
+
+    quarterly_statements = simfin_client.fetch_statements(
+        ticker, period="Q1,Q2,Q3,Q4", asreported=asreported
+    )
+    quarterly_all, quarterly_meta_all = fin.build_concept_table(quarterly_statements, schema)
+    # Eight quarters is enough for a TTM plus a prior-year comparison, and is
+    # what the page displays. The full series is kept for the quarters-sum
+    # check, which gets far stronger coverage from it at no extra network cost.
+    quarterly = quarterly_all.tail(8)
+    quarterly_meta = quarterly_meta_all.tail(8)
+
+    ttm_series: pd.Series | None = None
+    ttm_label: str | None = None
+    try:
+        ttm_statements = simfin_client.fetch_statements(
+            ticker, period="Q1,Q2,Q3,Q4", ttm=True, asreported=asreported
+        )
+        ttm_frame, _ = fin.build_concept_table(ttm_statements, schema)
+        if not ttm_frame.empty:
+            ttm_series = ttm_frame.iloc[-1]
+            ttm_label = str(ttm_frame.index[-1])
+    except simfin_client.SimFinError:
+        ttm_series, ttm_label = None, None
+
+    manual = fin.manual_ttm(quarterly, fin.FLOW_KEYS)
+
+    general = simfin_client.fetch_general(ticker)
+    prices = simfin_client.fetch_prices(
+        ticker,
+        start=(date.today() - timedelta(days=365 * BETA_HISTORY_YEARS + 10)).isoformat(),
+    )
+    common_shares = simfin_client.fetch_common_shares(ticker)
+    weighted_annual = simfin_client.fetch_weighted_shares(ticker, period="FY")
+    weighted_ttm = simfin_client.fetch_weighted_shares(
+        ticker, period="Q1,Q2,Q3,Q4", ttm=True
+    )
+    filings = simfin_client.fetch_filings(ticker)
+
+    dataset = CompanyDataset(
+        ticker=ticker,
+        name=annual_statements.name or ticker,
+        currency=annual_statements.currency,
+        template=annual_statements.template,
+        simfin_id=annual_statements.simfin_id,
+        listing=listing,
+        general=general,
+        schema=schema,
+        annual=annual,
+        annual_meta=annual_meta,
+        quarterly=quarterly,
+        quarterly_meta=quarterly_meta,
+        quarterly_all=quarterly_all,
+        ttm=ttm_series,
+        ttm_label=ttm_label,
+        manual_ttm=manual,
+        prices=prices,
+        common_shares=common_shares,
+        weighted_shares_annual=weighted_annual,
+        weighted_shares_ttm=weighted_ttm,
+        filings=filings,
+        statements_annual=annual_statements,
+        asreported=asreported,
+        fiscal_year_end_month=_fiscal_year_end_month(general),
+        capex_result=fin.capex(annual),
+        ratios=fin.driver_ratios(annual),
+    )
+
+    _attach_quote_and_shares(dataset)
+    return dataset
+
+
+def _fiscal_year_end_month(general: dict) -> int | None:
+    value = general.get("endFy")
+    if value is None or (isinstance(value, float) and np.isnan(value)):
+        return None
+    try:
+        month = int(value)
+    except (TypeError, ValueError):
+        return None
+    return month if 1 <= month <= 12 else None
+
+
+def _attach_quote_and_shares(dataset: CompanyDataset) -> None:
+    """Reads the current quote and all three share-count sources onto the dataset."""
+    prices = dataset.prices
+    if not prices.empty:
+        latest = prices.iloc[-1]
+        dataset.price_date = pd.Timestamp(latest["Date"]).date()
+        for column, target in (
+            ("Last Closing Price", "last_price"),
+            ("Market-Cap", "reported_market_cap"),
+            ("Common Shares Outstanding", "shares_from_prices"),
+        ):
+            if column in prices.columns and not pd.isna(latest.get(column)):
+                setattr(dataset, target, float(latest[column]))
+
+    if not dataset.common_shares.empty:
+        row = dataset.common_shares.iloc[-1]
+        dataset.shares_point_in_time = float(row["value"])
+        dataset.shares_point_in_time_date = pd.Timestamp(row["endDate"]).date()
+
+    if not dataset.weighted_shares_ttm.empty:
+        row = dataset.weighted_shares_ttm.iloc[-1]
+        dataset.shares_weighted_diluted = (
+            float(row["diluted"]) if not pd.isna(row.get("diluted")) else None
+        )
+        dataset.shares_weighted_basic = (
+            float(row["basic"]) if not pd.isna(row.get("basic")) else None
+        )
+        dataset.shares_weighted_label = f"TTM to FY{row['fyear']} {row['period']}"
+    elif not dataset.weighted_shares_annual.empty:
+        row = dataset.weighted_shares_annual.iloc[-1]
+        dataset.shares_weighted_diluted = (
+            float(row["diluted"]) if not pd.isna(row.get("diluted")) else None
+        )
+        dataset.shares_weighted_basic = (
+            float(row["basic"]) if not pd.isna(row.get("basic")) else None
+        )
+        dataset.shares_weighted_label = f"FY{row['fyear']}"
+
+    # A third, independent read on the share count, used only as a cross-check.
+    source = dataset.ttm if dataset.ttm is not None else (
+        dataset.annual.iloc[-1] if not dataset.annual.empty else None
+    )
+    net_income = _series_value(source, "net_income")
+    eps_diluted = _series_value(source, "eps_diluted")
+    if net_income is not None and eps_diluted:
+        dataset.shares_eps_implied = net_income / eps_diluted
+
+
+def base_period(dataset: CompanyDataset) -> BasePeriod:
+    """Picks the period the forecast starts from.
+
+    Prefers the API's trailing twelve months; falls back to the latest fiscal
+    year and says so.
+    """
+    stocks = dataset.quarterly.iloc[-1] if not dataset.quarterly.empty else (
+        dataset.annual.iloc[-1] if not dataset.annual.empty else pd.Series(dtype="float64")
+    )
+    stocks_as_of = None
+    if not dataset.quarterly_meta.empty:
+        raw = dataset.quarterly_meta["report_date"].iloc[-1]
+        stocks_as_of = None if pd.isna(raw) else pd.Timestamp(raw).date()
+    elif not dataset.annual_meta.empty:
+        raw = dataset.annual_meta["report_date"].iloc[-1]
+        stocks_as_of = None if pd.isna(raw) else pd.Timestamp(raw).date()
+
+    if dataset.ttm is not None:
+        return BasePeriod(
+            label=f"TTM to {dataset.ttm_label}",
+            flows=dataset.ttm,
+            stocks=stocks,
+            stocks_as_of=stocks_as_of,
+            is_ttm=True,
+            detail="Trailing twelve months, built natively by the SimFin API.",
+        )
+
+    latest = dataset.annual.iloc[-1] if not dataset.annual.empty else pd.Series(dtype="float64")
+    label = str(dataset.annual.index[-1]) if not dataset.annual.empty else "n/a"
+    return BasePeriod(
+        label=f"FY{label}",
+        flows=latest,
+        stocks=stocks,
+        stocks_as_of=stocks_as_of,
+        is_ttm=False,
+        detail="SimFin returned no trailing-twelve-month period, so the last "
+               "reported fiscal year is the base.",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Base-period FCFF, both ways
+# ---------------------------------------------------------------------------
+
+
+def base_period_delta_nwc(dataset: CompanyDataset, base: BasePeriod) -> tuple[float | None, str]:
+    """Change in net working capital over the same span as the base period.
+
+    A trailing-twelve-month cash flow has to be paired with a
+    trailing-twelve-month working capital movement. Differencing the last two
+    *annual* balance sheets against a TTM cash flow measures two different
+    spans and inflates the gap between the two FCFF builds — which then reads as
+    a data problem rather than as the wiring mistake it is.
+
+    Returns the change and a description of the span it covers.
+    """
+    if base.is_ttm and len(dataset.quarterly) >= 5:
+        nwc = fin.net_working_capital(dataset.quarterly).dropna()
+        if len(nwc) >= 5:
+            change = float(nwc.iloc[-1] - nwc.iloc[-5])
+            return change, (
+                f"Trailing twelve months: net working capital at {nwc.index[-1]} "
+                f"less {nwc.index[-5]}"
+            )
+
+    annual = fin.delta_nwc(dataset.annual).dropna()
+    if annual.empty:
+        return None, "No two consecutive balance sheets available."
+    span = (
+        f"Fiscal year {annual.index[-1]}"
+        + (f" less {dataset.annual.index[-2]}" if len(dataset.annual) > 1 else "")
+    )
+    if base.is_ttm:
+        span += " — annual basis, because fewer than five quarters are available"
+    return float(annual.iloc[-1]), span
+
+
+@dataclass
+class BaseFcff:
+    method_a: float | None
+    method_b: float | None
+    inputs: dict[str, float | None]
+    notes: list[str] = field(default_factory=list)
+
+    @property
+    def divergence(self) -> float | None:
+        if self.method_a is None or self.method_b is None:
+            return None
+        return dcf.divergence(self.method_a, self.method_b)
+
+
+def base_period_fcff(
+    dataset: CompanyDataset,
+    base: BasePeriod,
+    *,
+    tax_rate: float,
+    interest_basis: str = "net",
+    delta_nwc: float | None = None,
+) -> BaseFcff:
+    """Computes FCFF for the base period both ways, keeping every input.
+
+    Either method returns ``None`` when one of its inputs is not reported —
+    Apple, for instance, has no interest expense line at all, which makes method
+    A's add-back uncomputable rather than zero.
+    """
+    flows = base.flows
+    notes: list[str] = []
+
+    cfo = _series_value(flows, "cfo")
+    ebit = _series_value(flows, "ebit")
+    dna = _series_value(flows, "dna")
+
+    capex_series = fin.capex(pd.DataFrame([flows]))
+    capex_value = (
+        float(capex_series.values.iloc[0])
+        if not capex_series.values.empty and not pd.isna(capex_series.values.iloc[0])
+        else None
+    )
+    if capex_value is None:
+        notes.append("CapEx is not reported for the base period.")
+
+    interest = fin.interest_expense(pd.DataFrame([flows]), prefer=interest_basis)
+    interest_value = (
+        float(interest.iloc[0]) if not interest.empty and not pd.isna(interest.iloc[0]) else None
+    )
+    if interest_value is None:
+        notes.append(
+            "SimFin reports no interest expense for this company, so method A's "
+            "after-tax interest add-back cannot be computed."
+        )
+
+    if delta_nwc is None:
+        notes.append("No change in net working capital available for method B.")
+
+    method_a = None
+    if all(v is not None for v in (cfo, interest_value, capex_value)):
+        method_a = dcf.fcff_from_cash_flow(cfo, interest_value, tax_rate, capex_value)
+
+    method_b = None
+    if all(v is not None for v in (ebit, dna, capex_value, delta_nwc)):
+        method_b = dcf.fcff_from_income_statement(ebit, tax_rate, dna, capex_value, delta_nwc)
+
+    return BaseFcff(
+        method_a=method_a,
+        method_b=method_b,
+        inputs={
+            "CFO": cfo,
+            "EBIT": ebit,
+            "D&A": dna,
+            "CapEx": capex_value,
+            "Interest expense": interest_value,
+            "ΔNWC": delta_nwc,
+            "Tax rate": tax_rate,
+        },
+        notes=notes,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Beta
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class BetaOutcome:
+    result: wacc_lib.BetaResult | None
+    source: str
+    error: str | None = None
+    price_source_note: str = ""
+
+
+def regress_company_beta(
+    dataset: CompanyDataset,
+    *,
+    frequency: str = "monthly",
+    blume: bool = False,
+    index_ticker: str = "^GSPC",
+    years: int = BETA_HISTORY_YEARS,
+) -> BetaOutcome:
+    """Regresses the company's returns on the index's.
+
+    Company prices come from SimFin, index prices from yfinance. Measured over
+    five years of AAPL the two conventions agree to about 6e-05 on adjusted
+    closes with identical trading-date sets, so mixing them is safe — but the
+    check runs anyway, and if the date sets ever diverge materially the company
+    series is pulled from yfinance instead so both sides share one convention.
+    """
+    if dataset.prices.empty or "Adjusted Closing Price" not in dataset.prices.columns:
+        return BetaOutcome(None, "SimFin", "No adjusted price series available.")
+
+    start = (date.today() - timedelta(days=365 * years + 10)).isoformat()
+    end = (date.today() + timedelta(days=1)).isoformat()
+
+    company = (
+        dataset.prices.set_index("Date")["Adjusted Closing Price"].dropna().sort_index()
+    )
+    company = company[company.index >= pd.Timestamp(start)]
+    index_prices = market_data.fetch_index_prices(index_ticker, start, end)
+
+    source = "SimFin adjusted closes vs yfinance index"
+    note = ""
+    if not index_prices.empty and len(company) > 0:
+        shared = len(set(company.index) & set(index_prices.index))
+        coverage = shared / max(len(index_prices), 1)
+        if coverage < 0.9:
+            fallback = market_data.fetch_historical_data([dataset.ticker], start, end)
+            if not fallback.empty:
+                column = (
+                    dataset.ticker if dataset.ticker in fallback.columns else fallback.columns[0]
+                )
+                company = fallback[column].dropna()
+                source = "yfinance for both series"
+                note = (
+                    f"SimFin and yfinance shared only {coverage:.0%} of trading dates, "
+                    "so both series were taken from yfinance to keep one convention."
+                )
+
+    try:
+        result = wacc_lib.regress_beta(
+            company,
+            index_prices,
+            frequency=frequency,
+            blume=blume,
+            index_ticker=index_ticker,
+        )
+    except wacc_lib.InsufficientObservationsError as error:
+        return BetaOutcome(None, source, str(error), note)
+    except Exception as error:  # a malformed series should not take the page down
+        return BetaOutcome(None, source, f"Beta regression failed: {error}", note)
+
+    return BetaOutcome(result, source, None, note)
+
+
+# ---------------------------------------------------------------------------
+# Historical EV/EBITDA range, for the exit multiple default
+# ---------------------------------------------------------------------------
+
+
+def historical_ev_ebitda(dataset: CompanyDataset) -> Sourced:
+    """The company's own historical EV/EBITDA range, from SimFin's daily series."""
+    column = "EV/EBITDA - ttm"
+    if dataset.prices.empty or column not in dataset.prices.columns:
+        return Sourced.unavailable(
+            source="SimFin prices (EV/EBITDA - ttm)",
+            reason="SimFin returned no EV/EBITDA series for this company.",
+        )
+    series = pd.to_numeric(dataset.prices[column], errors="coerce").dropna()
+    series = series[(series > 0) & (series < 200)]
+    if series.empty:
+        return Sourced.unavailable(
+            source="SimFin prices (EV/EBITDA - ttm)",
+            reason="Every EV/EBITDA observation was missing or implausible.",
+        )
+    return Sourced.derived(
+        value=float(series.median()),
+        source="SimFin prices (EV/EBITDA - ttm)",
+        formula=(
+            f"Median of {len(series):,} daily observations "
+            f"(range {series.min():.1f}× – {series.max():.1f}×)"
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Model run
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ModelResult:
+    """One complete valuation, both terminal-value methods."""
+
+    projection: dcf.Projection
+    terminal_values: dict[str, dcf.TerminalValue]
+    bridges: dict[str, dcf.EquityBridge]
+    enterprise_values: dict[str, float]
+    wacc: wacc_lib.WaccResult
+    base: BasePeriod
+    base_fcff: BaseFcff
+    headline_method: str
+
+    @property
+    def headline_bridge(self) -> dcf.EquityBridge:
+        return self.bridges[self.headline_method]
+
+    @property
+    def headline_terminal(self) -> dcf.TerminalValue:
+        return self.terminal_values[self.headline_method]
+
+
+def run_model(
+    dataset: CompanyDataset,
+    base: BasePeriod,
+    *,
+    drivers: dcf.DriverPath,
+    wacc_result: wacc_lib.WaccResult,
+    terminal_growth: float,
+    exit_multiple: float,
+    stub: float,
+    mid_year: bool,
+    shares: float,
+    share_basis: str,
+    include_short_term_investments: bool,
+    operating_cash_floor: float,
+    non_operating_assets: float | None,
+    base_fcff: BaseFcff,
+    headline_method: str = "gordon",
+    sbc: float | None = None,
+    deduct_sbc: bool = False,
+) -> ModelResult:
+    """Projects, terminates both ways, and bridges each to a value per share."""
+    base_revenue = _series_value(base.flows, "revenue")
+    if base_revenue is None:
+        raise dcf.ProjectionError(
+            "The base period has no revenue figure to project from."
+        )
+
+    projection = dcf.project(
+        base_revenue,
+        drivers,
+        wacc=wacc_result.wacc,
+        stub=stub,
+        mid_year=mid_year,
+        sbc=sbc,
+        deduct_sbc=deduct_sbc,
+    )
+    terminal_values = dcf.build_terminal_values(
+        projection, terminal_growth=terminal_growth, exit_multiple=exit_multiple
+    )
+
+    stocks = base.stocks
+    total_debt = fin.total_debt(pd.DataFrame([stocks]))
+    debt_value = (
+        float(total_debt.iloc[0]) if not total_debt.empty and not pd.isna(total_debt.iloc[0])
+        else None
+    )
+
+    enterprise_values: dict[str, float] = {}
+    bridges: dict[str, dcf.EquityBridge] = {}
+    for key, terminal in terminal_values.items():
+        enterprise_value = projection.pv_explicit + terminal.present_value
+        enterprise_values[key] = enterprise_value
+        bridges[key] = dcf.build_equity_bridge(
+            enterprise_value=enterprise_value,
+            total_debt=debt_value,
+            minority_interest=_series_value(stocks, "minority_interest"),
+            preferred_equity=_series_value(stocks, "preferred_equity"),
+            cash=_series_value(stocks, "cash"),
+            short_term_investments=_series_value(stocks, "short_term_investments"),
+            non_operating_assets=non_operating_assets,
+            shares=shares,
+            share_basis=share_basis,
+            include_short_term_investments=include_short_term_investments,
+            operating_cash_floor=operating_cash_floor,
+        )
+
+    return ModelResult(
+        projection=projection,
+        terminal_values=terminal_values,
+        bridges=bridges,
+        enterprise_values=enterprise_values,
+        wacc=wacc_result,
+        base=base,
+        base_fcff=base_fcff,
+        headline_method=headline_method,
+    )
+
+
+def build_validation_context(
+    dataset: CompanyDataset,
+    *,
+    base: BasePeriod,
+    base_fcff: BaseFcff | None = None,
+    valuation_date: date | None = None,
+    effective_tax_rate: float | None = None,
+    beta: BetaOutcome | None = None,
+    equity_risk_premium: float | None = None,
+    result: ModelResult | None = None,
+    terminal_growth: float | None = None,
+    risk_free_rate: float | None = None,
+    sbc: float | None = None,
+) -> val.ValidationContext:
+    """Packs everything the checks need into one context."""
+    annual = dataset.annual
+    bs_delta = fin.delta_nwc(annual)
+    cf_delta = fin.cash_flow_delta_nwc(annual)
+
+    context = val.ValidationContext(
+        ticker=dataset.ticker,
+        company=dataset.name,
+        annual=annual,
+        annual_meta=dataset.annual_meta,
+        quarterly=dataset.quarterly_all,
+        api_ttm=dataset.ttm,
+        manual_ttm=dataset.manual_ttm,
+        currencies_seen=(dataset.currency,) if dataset.currency else (),
+        asreported_flags=(dataset.asreported,),
+        price_date=dataset.price_date,
+        last_price=dataset.last_price,
+        reported_market_cap=dataset.reported_market_cap,
+        valuation_date=valuation_date or date.today(),
+        shares_point_in_time=dataset.shares_point_in_time,
+        shares_point_in_time_date=dataset.shares_point_in_time_date,
+        shares_from_prices=dataset.shares_from_prices,
+        shares_weighted_diluted=dataset.shares_weighted_diluted,
+        shares_eps_implied=dataset.shares_eps_implied,
+        effective_tax_rate=effective_tax_rate,
+        equity_risk_premium=equity_risk_premium,
+        terminal_growth=terminal_growth,
+        risk_free_rate=risk_free_rate,
+        sbc=sbc,
+        latest_revenue=_series_value(base.flows, "revenue"),
+        balance_sheet_delta_nwc=(
+            float(bs_delta.iloc[-1]) if len(bs_delta) and not pd.isna(bs_delta.iloc[-1]) else None
+        ),
+        cash_flow_delta_nwc=(
+            float(cf_delta.iloc[-1]) if len(cf_delta) and not pd.isna(cf_delta.iloc[-1]) else None
+        ),
+    )
+
+    if base_fcff is not None:
+        context.fcff_method_a = base_fcff.method_a
+        context.fcff_method_b = base_fcff.method_b
+
+    if beta is not None and beta.result is not None:
+        context.beta_r_squared = beta.result.r_squared
+        context.beta_observations = beta.result.observations
+
+    if result is not None:
+        context.debt_weight = result.wacc.debt_weight
+        context.long_term_debt = _series_value(base.stocks, "long_term_debt")
+        terminal = result.headline_terminal
+        enterprise_value = result.enterprise_values[result.headline_method]
+        context.terminal_value_share = terminal.share_of(enterprise_value)
+
+    return context
