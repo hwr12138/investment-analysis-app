@@ -1,5 +1,4 @@
 import streamlit as st
-from app.views import black_scholes as bs_page
 from app.views import dcf_valuation as dcf_page
 from app.views import momentum_analysis as ma_page
 from app.views import portfolio_optimization as po_page
@@ -38,7 +37,6 @@ pg = st.navigation([
     st.Page(dcf_page.render_page, title="DCF Valuation", icon="💰", url_path="dcf_valuation"),
     st.Page(po_page.render_page, title="Portfolio Optimization", icon="📈", url_path="portfolio_optimization"),
     st.Page(ps_page.render_page, title="Portfolio Statistics", icon="📊", url_path="portfolio_statistics"),
-    st.Page(bs_page.render_page, title="Black-Scholes Model", icon="📉", url_path="black_scholes"),
     st.Page(ma_page.render_page, title="Momentum Analysis", icon="🚀", url_path="momentum_analysis"),
 ])
 pg.run()

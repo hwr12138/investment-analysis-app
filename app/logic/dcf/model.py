@@ -31,6 +31,11 @@ BETA_HISTORY_YEARS = 5
 #: SimFin sector codes beginning with this prefix are the financial sector.
 _FINANCIAL_SECTOR_PREFIX = 104
 
+#: Terminal value method driving the headline figure and the equity bridge.
+#: Both methods always compute and both are always displayed; this only decides
+#: which one the single headline number comes from.
+DEFAULT_HEADLINE_METHOD = "exit_multiple"
+
 
 @dataclass
 class BasePeriod:
@@ -609,7 +614,7 @@ def run_model(
     operating_cash_floor: float,
     non_operating_assets: float | None,
     base_fcff: BaseFcff,
-    headline_method: str = "gordon",
+    headline_method: str = DEFAULT_HEADLINE_METHOD,
     sbc: float | None = None,
     deduct_sbc: bool = False,
 ) -> ModelResult:

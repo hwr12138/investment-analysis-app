@@ -329,3 +329,34 @@ def test_upside_against_the_current_price():
     )
     assert bridge.upside_vs(80) == pytest.approx(0.25)
     assert bridge.upside_vs(0) is None
+
+
+def test_sbc_alone_is_a_no_op_until_it_is_deducted(drivers):
+    """Supplying an SBC figure changes nothing on its own — by construction.
+
+    Standard FCFF adds SBC back as a non-cash charge, which operating cash flow
+    has already done, so the "add back" case is arithmetically identical to not
+    supplying a figure at all. Only the deduct case moves the valuation. This
+    surprises people, so it is pinned here.
+    """
+    without = dcf.project(1000.0, drivers, wacc=0.08, mid_year=False)
+    supplied = dcf.project(
+        1000.0, drivers, wacc=0.08, mid_year=False, sbc=20.0, deduct_sbc=False
+    )
+    deducted = dcf.project(
+        1000.0, drivers, wacc=0.08, mid_year=False, sbc=20.0, deduct_sbc=True
+    )
+
+    assert supplied.pv_explicit == pytest.approx(without.pv_explicit)
+    assert all(row.sbc_deduction == 0.0 for row in supplied.rows)
+    assert deducted.pv_explicit < without.pv_explicit
+    assert deducted.rows[0].sbc_deduction > 0.0
+
+
+def test_deducted_sbc_grows_with_revenue(drivers):
+    projection = dcf.project(
+        1000.0, drivers, wacc=0.08, mid_year=False, sbc=20.0, deduct_sbc=True
+    )
+    first, second = projection.rows[0], projection.rows[1]
+    # Revenue compounds at 10%, so the deduction does too.
+    assert second.sbc_deduction / first.sbc_deduction == pytest.approx(1.10)

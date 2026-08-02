@@ -26,12 +26,16 @@ from app.logic.dcf import wacc as wacc_lib
 from app.logic.dcf.schema import SchemaResolutionError
 from app.provenance import Origin, Sourced
 
-COST_OF_DEBT_GUIDANCE = """
-**Where to find this:** FINRA's bond centre publishes TRACE-reported corporate bond trades and
-yields, free. Search by issuer name rather than CUSIP — CUSIPs are per-issue and a large issuer
-will have dozens, so name search is faster and less error-prone. The company's most recent 10-K
-debt footnote lists every outstanding issue with coupon and maturity, which tells you what to
-look for before you search.
+FINRA_FIXED_INCOME_URL = "https://www.finra.org/finra-data/fixed-income"
+
+COST_OF_DEBT_GUIDANCE = f"""
+**Where to find this:** FINRA publishes TRACE-reported corporate bond trades and yields, free, at
+<{FINRA_FIXED_INCOME_URL}>. Open **Corporate & Agency Bonds**, search by **issuer name** rather
+than CUSIP — CUSIPs are per-issue and a large issuer will have dozens, so name search is faster
+and less error-prone — then pick an issue **maturing about ten years out** and read its **Yield to
+Maturity** off the trade detail. That is the number to type in the field above. The company's most
+recent 10-K debt footnote lists every outstanding issue with coupon and maturity, which tells you
+what to look for before you search.
 
 **Which bond:** a **recently traded, senior unsecured** issue. Avoid secured, subordinated,
 convertible, and thinly-traded issues — none of them price the company's general cost of
@@ -77,6 +81,34 @@ _BANNER_CSS = """
 .dcf-prov { font-size: 0.78rem; opacity: 0.75; }
 </style>
 """
+
+#: Headline terminal value method, label to engine key. The first entry is what
+#: the radio selects by default, and it is ordered to match
+#: ``dcf_model.DEFAULT_HEADLINE_METHOD`` so the UI and the engine agree.
+_HEADLINE_METHODS = {
+    "Exit multiple": "exit_multiple",
+    "Gordon growth": "gordon",
+}
+
+#: Display scales for the historical figures table: divisor, header suffix, decimals.
+_UNITS = {
+    "As reported": (1.0, "", 0),
+    "Millions": (1e6, " (m)", 1),
+    "Billions": (1e9, " (bn)", 2),
+}
+
+_HISTORICAL_LABELS = {
+    "revenue": "Revenue",
+    "ebit": "EBIT",
+    "pretax_income": "Pretax income",
+    "net_income": "Net income",
+    "cfo": "Operating cash flow",
+    "dna": "D&A",
+    "total_assets": "Total assets",
+    "total_liabilities": "Total liabilities",
+    "total_equity": "Total equity",
+    "cash": "Cash & equivalents",
+}
 
 _BADGE_CLASS = {
     Origin.REPORTED: "dcf-reported",
@@ -147,10 +179,45 @@ def _load_company_cached(ticker: str, asreported: bool) -> dcf_model.CompanyData
     return dcf_model.load_company(ticker, asreported=asreported)
 
 
+def _assumption_fingerprint(inputs: dict) -> tuple:
+    """A hashable snapshot of every input the valuation depends on.
+
+    Used to tell whether the displayed results still correspond to what the
+    assumption panel currently shows. Widgets rerun the script on every change;
+    this is what stops the model, the checks and the workbook from being rebuilt
+    each time.
+    """
+    drivers = inputs["drivers"]
+    return (
+        drivers.revenue_growth,
+        drivers.operating_margin,
+        drivers.effective_tax_rate,
+        drivers.capex_pct_revenue,
+        drivers.dna_pct_revenue,
+        drivers.dnwc_pct_drevenue,
+        round(inputs["wacc"].wacc, 12),
+        inputs["terminal_growth"],
+        inputs["exit_multiple"],
+        inputs["stub"],
+        inputs["mid_year"],
+        inputs["shares"],
+        inputs["share_basis"],
+        inputs["include_sti"],
+        inputs["cash_floor"],
+        inputs["non_operating"],
+        inputs["headline_method"],
+        inputs["sbc"],
+        inputs["deduct_sbc"],
+        inputs["etr"],
+    )
+
+
 def _session_reset(ticker: str) -> None:
     """Clears per-company state. Acknowledgements never carry across companies."""
     for key in list(st.session_state.keys()):
-        if key.startswith("dcf_input_") or key in {"dcf_acks", "dcf_beta_override"}:
+        if key.startswith("dcf_input_") or key in {
+            "dcf_acks", "dcf_beta_override", "dcf_output"
+        }:
             del st.session_state[key]
     st.session_state["dcf_acks"] = {}
     st.session_state["dcf_loaded_ticker"] = ticker
@@ -257,10 +324,14 @@ def render_page() -> None:
         "market-data layer."
     )
 
-    control_left, control_right = st.columns([3, 2])
-    with control_left:
+    ticker_column, button_column, basis_column = st.columns(
+        [3, 1.2, 2], vertical_alignment="bottom"
+    )
+    with ticker_column:
         ticker = st.text_input("Ticker", value="AAPL", key="dcf_ticker_input").strip().upper()
-    with control_right:
+    with button_column:
+        compute = st.button("Compute", type="primary", width="stretch")
+    with basis_column:
         asreported = st.toggle(
             "Use as-reported (not restated) statements",
             value=False,
@@ -273,19 +344,35 @@ def render_page() -> None:
         )
 
     if not ticker:
-        st.info("Enter a US-listed ticker to begin.")
+        st.info("Enter a US-listed ticker and press **Compute**.")
         return
 
     state_key = f"{ticker}|{asreported}"
-    if st.session_state.get("dcf_loaded_ticker") != state_key:
-        _session_reset(state_key)
 
+    if compute:
+        # Loading a different company clears the previous one's acknowledgements
+        # and assumption overrides. Recomputing the same one keeps them.
+        if st.session_state.get("dcf_loaded_ticker") != state_key:
+            _session_reset(state_key)
+        st.session_state["dcf_run"] = True
+
+    if not st.session_state.get("dcf_run"):
+        st.info(
+            f"Press **Compute** to load {ticker} and value it. Nothing is fetched until "
+            "you do, and once loaded, changing an assumption will not re-run the model "
+            "until you press Compute again."
+        )
+        return
+
+    loaded_key = st.session_state.get("dcf_loaded_ticker", state_key)
+    loaded_ticker, loaded_basis = loaded_key.rsplit("|", 1)
+    pending_reload = loaded_key != state_key
     acknowledged: dict[str, str] = st.session_state.setdefault("dcf_acks", {})
 
     # --- Load ------------------------------------------------------------
     try:
-        with st.spinner(f"Loading {ticker} from SimFin…"):
-            dataset = _load_company_cached(ticker, asreported)
+        with st.spinner(f"Loading {loaded_ticker} from SimFin…"):
+            dataset = _load_company_cached(loaded_ticker, loaded_basis == "True")
     except val.UnsupportedSectorError as error:
         _render_blocking("Unsupported sector", str(error))
         return
@@ -326,6 +413,7 @@ def render_page() -> None:
     # header and above every number on the page. Page order follows the spec:
     # banners, validation panel, historicals, assumptions, projection,
     # valuation, export — the checks come before the answer on purpose.
+    notice_slot = st.container()
     banner_slot = st.container()
     validation_slot = st.container()
 
@@ -335,48 +423,73 @@ def render_page() -> None:
     if inputs is None:
         return
 
-    try:
-        result = dcf_model.run_model(
-            dataset,
-            inputs["base"],
-            drivers=inputs["drivers"],
-            wacc_result=inputs["wacc"],
-            terminal_growth=inputs["terminal_growth"],
-            exit_multiple=inputs["exit_multiple"],
-            stub=inputs["stub"],
-            mid_year=inputs["mid_year"],
-            shares=inputs["shares"],
-            share_basis=inputs["share_basis"],
-            include_short_term_investments=inputs["include_sti"],
-            operating_cash_floor=inputs["cash_floor"],
-            non_operating_assets=inputs["non_operating"],
-            base_fcff=inputs["base_fcff"],
-            headline_method=inputs["headline_method"],
-            sbc=inputs["sbc"],
-            deduct_sbc=inputs["deduct_sbc"],
-        )
-    except dcf.TerminalValueError as error:
-        st.error(f"**Terminal value cannot be computed.** {error}")
-        st.info("Lower the terminal growth rate below the WACC, or raise the WACC.")
-        return
-    except dcf.ProjectionError as error:
-        _render_blocking("The projection cannot be built", str(error))
-        return
+    fingerprint = _assumption_fingerprint(inputs)
+    output = st.session_state.get("dcf_output")
+    compute = compute or inputs["recompute"]
+    needs_run = compute or output is None or output["company"] != loaded_key
 
-    context = dcf_model.build_validation_context(
-        dataset,
-        base=inputs["base"],
-        base_fcff=inputs["base_fcff"],
-        valuation_date=valuation_date,
-        effective_tax_rate=inputs["etr"],
-        beta=inputs["beta_outcome"],
-        equity_risk_premium=inputs["erp"],
-        result=result,
-        terminal_growth=inputs["terminal_growth"],
-        risk_free_rate=inputs["risk_free"],
-        sbc=inputs["sbc"],
-    )
-    issues, check_results = val.run_all(context, inputs["tolerances"])
+    if needs_run:
+        try:
+            result = dcf_model.run_model(
+                dataset,
+                inputs["base"],
+                drivers=inputs["drivers"],
+                wacc_result=inputs["wacc"],
+                terminal_growth=inputs["terminal_growth"],
+                exit_multiple=inputs["exit_multiple"],
+                stub=inputs["stub"],
+                mid_year=inputs["mid_year"],
+                shares=inputs["shares"],
+                share_basis=inputs["share_basis"],
+                include_short_term_investments=inputs["include_sti"],
+                operating_cash_floor=inputs["cash_floor"],
+                non_operating_assets=inputs["non_operating"],
+                base_fcff=inputs["base_fcff"],
+                headline_method=inputs["headline_method"],
+                sbc=inputs["sbc"],
+                deduct_sbc=inputs["deduct_sbc"],
+            )
+        except dcf.TerminalValueError as error:
+            st.error(f"**Terminal value cannot be computed.** {error}")
+            st.info("Lower the terminal growth rate below the WACC, or raise the WACC.")
+            return
+        except dcf.ProjectionError as error:
+            _render_blocking("The projection cannot be built", str(error))
+            return
+
+        context = dcf_model.build_validation_context(
+            dataset,
+            base=inputs["base"],
+            base_fcff=inputs["base_fcff"],
+            valuation_date=valuation_date,
+            effective_tax_rate=inputs["etr"],
+            beta=inputs["beta_outcome"],
+            equity_risk_premium=inputs["erp"],
+            result=result,
+            terminal_growth=inputs["terminal_growth"],
+            risk_free_rate=inputs["risk_free"],
+            sbc=inputs["sbc"],
+        )
+        issues, check_results = val.run_all(context, inputs["tolerances"])
+
+        output = {
+            "company": loaded_key,
+            "fingerprint": fingerprint,
+            "computed_at": datetime.now(),
+            "result": result,
+            "issues": issues,
+            "check_results": check_results,
+            # The inputs are snapshotted alongside the results so the export and
+            # the provenance shown always describe the numbers on screen, not
+            # whatever the assumption widgets have since been changed to.
+            "inputs": inputs,
+        }
+        st.session_state["dcf_output"] = output
+
+    result = output["result"]
+    issues = output["issues"]
+    check_results = output["check_results"]
+    computed_inputs = output["inputs"]
 
     blocking = [i for i in issues if i.severity is val.Severity.BLOCKING]
     if blocking:
@@ -386,21 +499,71 @@ def render_page() -> None:
             ))
         return
 
+    stale_assumptions = output["fingerprint"] != fingerprint
+    with notice_slot:
+        _render_staleness_notice(
+            pending_reload=pending_reload,
+            requested_ticker=ticker,
+            loaded_ticker=loaded_ticker,
+            stale_assumptions=stale_assumptions,
+            computed_at=output["computed_at"],
+        )
+
     with banner_slot:
         _render_banners(issues, acknowledged)
 
     with validation_slot:
-        _render_validation_panel(dataset, check_results, inputs["tolerances"])
+        _render_validation_panel(dataset, check_results, computed_inputs["tolerances"])
 
     unacknowledged_critical = [
         i for i in issues if i.severity is val.Severity.CRITICAL and i.key not in acknowledged
     ]
 
     _render_projection(dataset, result)
-    _render_valuation(dataset, result, inputs, unacknowledged_critical)
-    _render_export(
-        dataset, result, inputs, issues, check_results, acknowledged, valuation_date
+    _render_valuation(
+        dataset,
+        result,
+        computed_inputs,
+        unacknowledged_critical,
+        stale=stale_assumptions or pending_reload,
+        computed_at=output["computed_at"],
     )
+    _render_export(
+        dataset, result, computed_inputs, issues, check_results, acknowledged, valuation_date
+    )
+
+
+def _render_staleness_notice(
+    *,
+    pending_reload: bool,
+    requested_ticker: str,
+    loaded_ticker: str,
+    stale_assumptions: bool,
+    computed_at: datetime,
+) -> None:
+    """Says plainly when what is on screen no longer matches the controls.
+
+    Results are never silently updated and never silently left to look current:
+    if the inputs have moved on, the page says so above every number.
+    """
+    if not (pending_reload or stale_assumptions):
+        return
+
+    lines = []
+    if pending_reload:
+        lines.append(
+            f"The ticker box says **{requested_ticker}**, but these results are for "
+            f"**{loaded_ticker}**."
+        )
+    if stale_assumptions:
+        lines.append(
+            "One or more assumptions have changed since these results were computed."
+        )
+    lines.append(
+        f"Everything below is the run from **{computed_at.strftime('%H:%M:%S')}**. "
+        "Press **Compute** to bring it up to date."
+    )
+    st.warning("  \n".join(lines), icon="⏳")
 
 
 # ---------------------------------------------------------------------------
@@ -761,6 +924,9 @@ def _collect_assumptions(
 
         with st.expander("Where to find a cost of debt", expanded=False):
             st.markdown(COST_OF_DEBT_GUIDANCE)
+            st.link_button(
+                "Open FINRA's fixed income data", FINRA_FIXED_INCOME_URL, width="stretch"
+            )
 
     # --- Capital structure ----------------------------------------------
     stocks = base.stocks
@@ -886,11 +1052,12 @@ def _collect_assumptions(
         with col_c:
             headline_label = st.radio(
                 "Headline method",
-                ["Gordon growth", "Exit multiple"],
+                list(_HEADLINE_METHODS),
                 key="dcf_input_headline",
-                help="Drives the headline value per share. Both methods always compute.",
+                help="Drives the headline value per share and the equity bridge. Both "
+                     "methods always compute and both are shown side by side.",
             )
-            headline_method = "gordon" if headline_label == "Gordon growth" else "exit_multiple"
+            headline_method = _HEADLINE_METHODS[headline_label]
             mid_year = st.toggle(
                 "Mid-year discounting", value=True, key="dcf_input_midyear",
                 help="Mid-year: DF = 1 ÷ (1 + WACC)^(t − 0.5). Applied to the terminal value too.",
@@ -1030,6 +1197,25 @@ def _collect_assumptions(
             revenue_base = base.flows.get("revenue")
             if sbc and revenue_base:
                 st.caption(f"SBC ÷ revenue: **{sbc / float(revenue_base):.2%}**")
+
+            # The number on its own is inert, and that surprises people. Standard
+            # FCFF already adds SBC back as a non-cash charge inside operating
+            # cash flow, so "add back" is a no-op — the figure only moves the
+            # valuation once it is being deducted.
+            if sbc is not None and not deduct_sbc:
+                st.info(
+                    "**This figure is not changing the valuation yet.** Standard FCFF adds "
+                    "SBC back as a non-cash charge, which operating cash flow has already "
+                    "done — so entering it alone is a no-op by construction. Turn on "
+                    "**Deduct SBC from FCFF** above to treat it as a real cost, then press "
+                    "**Compute**.",
+                    icon="ℹ️",
+                )
+            elif sbc is not None and deduct_sbc:
+                st.caption(
+                    f"Deducting {_money(sbc, dataset.currency)} from FCFF, grown with revenue "
+                    f"across the forecast."
+                )
             records.append(
                 dcf_export.AssumptionRecord(
                     "Cash flow", "Stock-based compensation", sbc, sbc_sourced,
@@ -1080,7 +1266,18 @@ def _collect_assumptions(
     )
     _render_fcff_panel(dataset, base, base_fcff, etr, etr_series, delta_nwc_span)
 
+    # A second Compute, at the bottom of a long assumptions panel. Without it the
+    # only way to apply a change is to scroll back to the top, which reads as
+    # "I changed it and nothing happened".
+    recompute = st.button(
+        "Compute with these assumptions",
+        type="primary",
+        width="stretch",
+        key="dcf_compute_bottom",
+    )
+
     return {
+        "recompute": recompute,
         "base": base,
         "drivers": drivers,
         "wacc": wacc_result,
@@ -1177,16 +1374,48 @@ def _render_fcff_panel(
 # ---------------------------------------------------------------------------
 
 
+def _cross_implied(terminal: dcf.TerminalValue) -> str:
+    """Restates one terminal value method in the other method's units.
+
+    Gordon growth produces a terminal value, which divided by terminal EBITDA is
+    an exit multiple. An exit multiple produces a terminal value, which inverted
+    through the Gordon formula is a perpetual growth rate. Each row therefore
+    reports a different quantity, and the label says which.
+    """
+    if terminal.implied_exit_multiple is not None:
+        return f"an exit multiple of {terminal.implied_exit_multiple:,.2f}×"
+    if terminal.implied_growth is not None:
+        return f"perpetual growth of {terminal.implied_growth:.2%}"
+    return "—"
+
+
 def _render_valuation(
     dataset: dcf_model.CompanyDataset,
     result: dcf_model.ModelResult,
     inputs: dict,
     unacknowledged_critical: list[val.Issue],
+    *,
+    stale: bool = False,
+    computed_at: datetime | None = None,
 ) -> None:
     st.divider()
     st.subheader("Valuation")
 
     marker = ""
+    # The staleness warning is repeated here, not just at the top of the page.
+    # An assumption is changed halfway down a long page, and the number the user
+    # is watching is here — a notice they have to scroll up to see is a notice
+    # that reads as "nothing happened".
+    if stale:
+        marker = " ⏳"
+        stamp = f" from {computed_at.strftime('%H:%M:%S')}" if computed_at else ""
+        st.warning(
+            f"**These figures are from the previous run{stamp} and do not reflect the "
+            f"assumptions currently shown above.** Press **Compute** — at the top of the "
+            f"page or at the end of the assumptions panel — to apply them.",
+            icon="⏳",
+        )
+
     if unacknowledged_critical:
         marker = " ⚠️"
         st.error(
@@ -1200,7 +1429,8 @@ def _render_valuation(
     columns[0].metric(
         f"Value per share{marker}",
         f"{bridge.value_per_share:,.2f}",
-        help=f"Headline method: {result.headline_terminal.method}",
+        help=f"Headline method: {result.headline_terminal.method}"
+        + (" · showing a previous run; press Compute to refresh" if stale else ""),
     )
     columns[1].metric("Current price", f"{dataset.last_price:,.2f}" if dataset.last_price else "n/a")
     columns[2].metric("Upside / downside", _pct(upside) if upside is not None else "n/a")
@@ -1220,24 +1450,29 @@ def _render_valuation(
                 "Equity value": _money(method_bridge.equity_value, dataset.currency),
                 "Value per share": f"{method_bridge.value_per_share:,.2f}",
                 "TV share of EV": _pct(terminal.share_of(enterprise_value), 1),
-                "Implied exit multiple": (
-                    f"{terminal.implied_exit_multiple:,.2f}×"
-                    if terminal.implied_exit_multiple is not None else "—"
-                ),
-                "Implied perpetuity growth": (
-                    _pct(terminal.implied_growth) if terminal.implied_growth is not None else "—"
-                ),
+                # Each method is cross-checked by restating it in the *other*
+                # method's units, so the two columns are deliberately different
+                # quantities rather than a like-for-like pair.
+                "This method implies": _cross_implied(terminal),
             }
         )
     st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+
+    st.caption(
+        "**Reading the cross-check.** Each method is restated in the other's terms, so the "
+        "last column is a different quantity on each row — that is the point of it, not a "
+        "misalignment. The Gordon growth row answers *“what exit multiple would my "
+        "perpetuity assumption have to be worth?”*, and the exit multiple row answers *“what "
+        "perpetual growth rate is my chosen multiple secretly assuming?”* If the exit "
+        "multiple row implies growth you would never underwrite, the multiple is too high."
+    )
 
     gordon_vps = result.bridges["gordon"].value_per_share
     exit_vps = result.bridges["exit_multiple"].value_per_share
     if gordon_vps:
         st.caption(
             f"The two methods differ by **{abs(exit_vps / gordon_vps - 1):.1%}** on value per "
-            f"share. A gap is informative, not an error — each method's implied version of "
-            f"the other is shown above."
+            f"share. A gap is informative, not an error."
         )
     st.caption(
         f"Terminal value discounted at exponent {result.headline_terminal.discount_exponent:.4f}, "
@@ -1360,16 +1595,44 @@ def _render_historicals(dataset: dcf_model.CompanyDataset) -> None:
     figure.update_yaxes(tickformat=".0%", row=2, col=1)
     st.plotly_chart(figure, width="stretch")
 
-    st.markdown("**Reported figures, with the filing behind each year**")
+    heading, units = st.columns([3, 2], vertical_alignment="bottom")
+    with heading:
+        st.markdown("**Reported figures, with the filing behind each year**")
+    with units:
+        unit = st.radio(
+            "Units",
+            list(_UNITS),
+            index=1,
+            horizontal=True,
+            key="dcf_hist_units",
+            help="Display only — the underlying figures and every calculation are "
+                 "unchanged, and the export always carries the full precision.",
+        )
+
+    divisor, suffix, decimals = _UNITS[unit]
+
     table = dataset.annual.copy()
     table.insert(0, "Fiscal year", table.index)
-    links = [dataset.filing_link(int(year)) for year in dataset.annual.index]
-    table["Source filing"] = links
+    table["Source filing"] = [
+        dataset.filing_link(int(year)) for year in dataset.annual.index
+    ]
     keep = [
         "Fiscal year", "revenue", "ebit", "pretax_income", "net_income", "cfo", "dna",
         "total_assets", "total_liabilities", "total_equity", "cash", "Source filing",
     ]
     table = table[[c for c in keep if c in table.columns]]
+
+    money_columns = [c for c in table.columns if c not in ("Fiscal year", "Source filing")]
+    for column in money_columns:
+        table[column] = table[column] / divisor
+    table = table.rename(
+        columns={
+            column: f"{_HISTORICAL_LABELS.get(column, column)}{suffix}"
+            for column in money_columns
+        }
+    )
+    table["Fiscal year"] = table["Fiscal year"].astype(str)
+
     st.dataframe(
         table,
         width="stretch",
@@ -1377,8 +1640,19 @@ def _render_historicals(dataset: dcf_model.CompanyDataset) -> None:
         column_config={
             "Source filing": st.column_config.LinkColumn(
                 "Source filing", display_text="View filing"
-            )
+            ),
+            **{
+                f"{_HISTORICAL_LABELS.get(c, c)}{suffix}": st.column_config.NumberColumn(
+                    format=f"%.{decimals}f"
+                )
+                for c in money_columns
+            },
         },
+    )
+    st.caption(
+        f"Figures in {unit.lower()} of {dataset.currency or 'reporting currency'}, "
+        f"as reported by SimFin. Blank cells are line items the company did not report — "
+        f"they are not zeros."
     )
 
 
@@ -1454,33 +1728,44 @@ def _render_export(
     st.subheader("Export")
     st.caption(
         "The workbook carries every assumption with its provenance, the projection line by "
-        "line, the equity bridge, all validation results, and which checks were acknowledged."
+        "line, the equity bridge, all validation results, and which checks were acknowledged. "
+        "It is built from the same snapshot the page is showing."
     )
 
-    try:
-        workbook = dcf_export.build_workbook(
+    # Acknowledgements change without a recompute, so the export is rebuilt when
+    # they move — but not on every unrelated widget interaction.
+    cache_key = (id(result), tuple(sorted(acknowledged.items())))
+    cached = st.session_state.get("dcf_export_cache")
+    if cached is None or cached["key"] != cache_key:
+        try:
+            workbook = dcf_export.build_workbook(
+                dataset=dataset,
+                result=result,
+                assumptions=inputs["records"],
+                issues=issues,
+                check_results=check_results,
+                acknowledged=acknowledged,
+                tolerances=inputs["tolerances"],
+                valuation_date=valuation_date,
+            )
+        except Exception as error:  # noqa: BLE001 - surfaced, never swallowed
+            st.error(f"The workbook could not be built: {error}")
+            return
+
+        csv_text = dcf_export.build_csv(
             dataset=dataset,
             result=result,
             assumptions=inputs["records"],
             issues=issues,
             check_results=check_results,
             acknowledged=acknowledged,
-            tolerances=inputs["tolerances"],
             valuation_date=valuation_date,
         )
-    except Exception as error:  # noqa: BLE001 - surfaced, never swallowed
-        st.error(f"The workbook could not be built: {error}")
-        return
+        cached = {"key": cache_key, "workbook": workbook, "csv": csv_text}
+        st.session_state["dcf_export_cache"] = cached
 
-    csv_text = dcf_export.build_csv(
-        dataset=dataset,
-        result=result,
-        assumptions=inputs["records"],
-        issues=issues,
-        check_results=check_results,
-        acknowledged=acknowledged,
-        valuation_date=valuation_date,
-    )
+    workbook = cached["workbook"]
+    csv_text = cached["csv"]
 
     stamp = valuation_date.isoformat()
     left, right = st.columns(2)
