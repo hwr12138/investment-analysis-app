@@ -22,7 +22,7 @@ Sign conventions, confirmed against live responses:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
 
 import numpy as np
@@ -504,6 +504,121 @@ def driver_default(ratios: pd.DataFrame, key: str, basis: str) -> DriverDefault:
         basis=basis,
         years_used=len(used),
         periods=tuple(str(p) for p in used.index),
+        detail=detail,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Realised growth, for benchmarking a forecast against
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class GrowthHistory:
+    """Realised revenue growth on the two bases that are not the same thing.
+
+    ``cagr`` is the single constant rate that, compounded across the span,
+    reproduces the endpoint. ``arithmetic_mean`` is the average of the
+    year-on-year rates. Both are returned because both get quoted, and the
+    difference between them is not a rounding detail — it is Jensen's
+    inequality, and it grows with how uneven the growth was.
+    """
+
+    cagr: float | None
+    arithmetic_mean: float | None
+    median: float | None
+    minimum: float | None
+    maximum: float | None
+    first_period: str
+    last_period: str
+    first_value: float | None
+    last_value: float | None
+    intervals: int      # compounding intervals across the span = periods - 1
+    observations: int   # usable year-on-year growth rates
+    detail: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.cagr is not None
+
+
+def revenue_growth_history(values: pd.DataFrame) -> GrowthHistory:
+    """Compound and arithmetic realised revenue growth.
+
+    A flat forecast is comparable to the **compound** rate: both are one
+    constant rate applied across every period. The arithmetic mean of yearly
+    rates is a different quantity, biased upward whenever growth was uneven, and
+    equal to the compound rate only when every year was identical — revenue of
+    100 → 200 → 100 averages +25% a year and compounds at 0%. Quoting the
+    average as what a company "has grown at" overstates it by that gap.
+
+    The span is the longest contiguous **trailing** run of periods with reported,
+    positive revenue. A gap ends the span rather than being bridged: a CAGR taken
+    across missing years silently asserts those years compounded like the
+    reported ones. Where no compound rate can be formed the value is ``None``
+    with a reason, never a substituted figure.
+    """
+    empty = GrowthHistory(
+        cagr=None, arithmetic_mean=None, median=None, minimum=None, maximum=None,
+        first_period="", last_period="", first_value=None, last_value=None,
+        intervals=0, observations=0,
+    )
+
+    if values.empty or "revenue" not in values.columns:
+        return replace(empty, detail="No revenue series was available.")
+
+    revenue = values["revenue"]
+    usable = revenue.notna() & (revenue > 0)
+    if not usable.any():
+        return replace(empty, detail="No period reported positive revenue.")
+
+    # Walk back from the most recent period until the run breaks. `usable` is in
+    # statement order, so the trailing run is the one ending at the last period.
+    start = len(usable) - 1
+    while start > 0 and bool(usable.iloc[start - 1]):
+        start -= 1
+    span = revenue.iloc[start:]
+
+    first_period, last_period = str(span.index[0]), str(span.index[-1])
+    first_value, last_value = float(span.iloc[0]), float(span.iloc[-1])
+    intervals = len(span) - 1
+
+    growth = span.pct_change().dropna()
+    observations = len(growth)
+
+    common = dict(
+        first_period=first_period,
+        last_period=last_period,
+        first_value=first_value,
+        last_value=last_value,
+        intervals=intervals,
+        observations=observations,
+        arithmetic_mean=float(growth.mean()) if observations else None,
+        median=float(growth.median()) if observations else None,
+        minimum=float(growth.min()) if observations else None,
+        maximum=float(growth.max()) if observations else None,
+    )
+
+    if intervals < 1:
+        return GrowthHistory(
+            cagr=None, **common,
+            detail=(
+                f"Only one period of positive revenue ({last_period}) was usable, "
+                "so there is no interval to compound across."
+            ),
+        )
+
+    detail = ""
+    excluded = len(revenue) - len(span)
+    if excluded:
+        detail = (
+            f"{excluded} earlier period(s) excluded: revenue was missing or not "
+            f"positive, and the span was cut there rather than bridged."
+        )
+
+    return GrowthHistory(
+        cagr=(last_value / first_value) ** (1.0 / intervals) - 1.0,
+        **common,
         detail=detail,
     )
 

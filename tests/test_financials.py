@@ -260,6 +260,85 @@ def test_nwc_ratio_skips_years_where_revenue_did_not_move():
 
 
 # ---------------------------------------------------------------------------
+# Realised growth
+# ---------------------------------------------------------------------------
+
+
+def _revenue(values, index=None) -> pd.DataFrame:
+    return pd.DataFrame(
+        {"revenue": values}, index=index if index is not None else range(2026 - len(values), 2026)
+    )
+
+
+def test_the_compound_and_arithmetic_rates_are_not_the_same_number(concept_table):
+    values, _, _ = concept_table
+    history = fin.revenue_growth_history(values)
+    assert history.ok
+    assert history.cagr == pytest.approx(0.09544511501033215)
+    assert history.arithmetic_mean == pytest.approx(0.09545454545454546)
+    assert history.cagr < history.arithmetic_mean
+    assert (history.first_period, history.last_period) == ("2023", "2025")
+    assert (history.intervals, history.observations) == (2, 2)
+
+
+def test_a_round_trip_series_compounds_at_zero_while_averaging_a_quarter():
+    """Why the benchmark is the CAGR: the average overstates by 25 points here.
+
+    Revenue ends exactly where it started, so the realised compound rate is zero.
+    Averaging +100% and -50% gives +25% — a number no reading of this history
+    supports, and the one a reverse DCF would be benchmarked against if the
+    driver panel's arithmetic basis were reused here.
+    """
+    history = fin.revenue_growth_history(_revenue([100.0, 200.0, 100.0]))
+    assert history.cagr == pytest.approx(0.0)
+    assert history.arithmetic_mean == pytest.approx(0.25)
+
+
+def test_a_gap_shortens_the_span_rather_than_bridging_it():
+    history = fin.revenue_growth_history(
+        _revenue([500.0, np.nan, 1000.0, 1100.0, 1200.0], index=[2021, 2022, 2023, 2024, 2025])
+    )
+    assert history.first_period == "2023"
+    assert history.intervals == 2
+    assert history.cagr == pytest.approx(0.09544511501033215)
+    assert "rather than bridged" in history.detail
+
+
+def test_a_non_positive_period_ends_the_span():
+    """A CAGR needs positive endpoints; a loss-making year cannot anchor one."""
+    history = fin.revenue_growth_history(
+        _revenue([-50.0, 0.0, 1000.0, 1100.0, 1200.0], index=[2021, 2022, 2023, 2024, 2025])
+    )
+    assert history.first_period == "2023"
+    assert history.first_value == 1000.0
+
+
+def test_a_single_period_yields_no_cagr_and_says_why():
+    history = fin.revenue_growth_history(_revenue([1200.0], index=[2025]))
+    assert not history.ok
+    assert history.cagr is None
+    assert history.intervals == 0
+    assert "no interval to compound across" in history.detail
+
+
+@pytest.mark.parametrize(
+    "frame",
+    [
+        pd.DataFrame(),
+        pd.DataFrame({"ebit": [1.0]}, index=[2025]),
+        pd.DataFrame({"revenue": [np.nan, np.nan]}, index=[2024, 2025]),
+    ],
+    ids=["empty", "no revenue column", "all missing"],
+)
+def test_nothing_is_substituted_when_no_growth_can_be_measured(frame):
+    history = fin.revenue_growth_history(frame)
+    assert not history.ok
+    assert history.cagr is None
+    assert history.arithmetic_mean is None
+    assert history.detail
+
+
+# ---------------------------------------------------------------------------
 # TTM
 # ---------------------------------------------------------------------------
 

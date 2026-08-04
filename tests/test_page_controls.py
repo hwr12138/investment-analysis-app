@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import numpy as np
+import pandas as pd
 import pytest
 
+from app.logic.dcf import reverse
 from app.logic.dcf import valuation as dcf
 from app.views import dcf_valuation as page
 
@@ -106,6 +109,89 @@ def test_display_only_state_is_not_in_the_fingerprint():
     assert "Billions" not in str(fingerprint)
 
 
+def test_the_reverse_dcf_is_not_in_the_fingerprint():
+    """It needs no entry of its own.
+
+    Every assumption it uses is listed already, and the market price reaches the
+    tuple through the WACC — which is what the market value of equity is
+    computed from. See `test_a_wacc_change_moves_the_fingerprint`.
+    """
+    baseline = page._assumption_fingerprint(_inputs())
+    assert page._assumption_fingerprint(_inputs(reverse="anything at all")) == baseline
+
+
+# ---------------------------------------------------------------------------
+# Reverse DCF messages
+# ---------------------------------------------------------------------------
+
+
+def _reverse(status, **overrides):
+    fields = dict(status=status, target=100.0, growth=None)
+    fields.update(overrides)
+    return reverse.ReverseDcfResult(**fields)
+
+
+def test_every_reverse_status_has_a_message():
+    """Adding a status without writing its message has to fail here."""
+    for status in reverse.Status:
+        result = _reverse(
+            status,
+            growth=0.12 if status is reverse.Status.SOLVED else None,
+            local_slope=5.0 if status is reverse.Status.SOLVED else None,
+            reason="measured detail",
+        )
+        level, message = page._reverse_message(result)
+        assert level in {"", "info", "warning", "error"}
+        if status is not reverse.Status.SOLVED:
+            assert message, f"{status} renders nothing"
+
+
+def test_an_ordinary_solved_rate_needs_no_banner():
+    result = _reverse(reverse.Status.SOLVED, growth=0.12, local_slope=5.0)
+    assert page._reverse_message(result) == ("", "")
+
+
+def test_a_value_destroying_solve_says_the_reading_is_inverted():
+    result = _reverse(reverse.Status.SOLVED, growth=0.12, local_slope=-5.0)
+    level, message = page._reverse_message(result)
+    assert level == "warning"
+    assert "destroys value" in message
+    assert "inverted" in message
+
+
+def test_an_extreme_solved_rate_is_flagged_rather_than_presented_as_a_forecast():
+    result = _reverse(reverse.Status.SOLVED, growth=0.90, local_slope=5.0)
+    level, message = page._reverse_message(result)
+    assert level == "warning"
+    assert "not explained by revenue growth" in message
+
+
+def test_the_precondition_message_says_it_is_not_a_failed_search():
+    result = _reverse(reverse.Status.NOT_EVALUABLE, reason="Terminal growth is not below WACC.")
+    level, message = page._reverse_message(result)
+    assert level == "error"
+    assert "not a failed search" in message
+
+
+def test_an_unwritten_status_is_a_loud_failure_not_a_blank_panel():
+    with pytest.raises(AssertionError):
+        page._reverse_message(_reverse("invented_status"))
+
+
+def test_the_out_of_range_reason_states_the_bounds_it_searched():
+    """So the copy cannot drift from GROWTH_BOUNDS."""
+    result = reverse.solve_growth(lambda g: g, 5.0)
+    assert result.status is reverse.Status.TARGET_ABOVE_RANGE
+    low, high = reverse.GROWTH_BOUNDS
+    assert f"{low:.2%}" in result.reason
+    assert f"{high:.2%}" in result.reason
+
+
+def test_an_implied_revenue_path_compounds_from_the_base():
+    path = page._implied_revenue_path(1000.0, 0.10, 3)
+    assert path == pytest.approx([1100.0, 1210.0, 1331.0])
+
+
 # ---------------------------------------------------------------------------
 # Units
 # ---------------------------------------------------------------------------
@@ -133,13 +219,101 @@ def test_millions_scaling_of_a_real_figure():
     assert round(416_161_000_000 / divisor, decimals) == 416161.0
 
 
-def test_every_exported_historical_column_has_a_readable_label():
-    for key in (
-        "revenue", "ebit", "pretax_income", "net_income", "cfo", "dna",
-        "total_assets", "total_liabilities", "total_equity", "cash",
-    ):
-        assert key in page._HISTORICAL_LABELS
-        assert page._HISTORICAL_LABELS[key][0].isupper()
+# ---------------------------------------------------------------------------
+# Reported figures
+# ---------------------------------------------------------------------------
+
+
+def test_the_three_statements_map_to_simfin_codes():
+    assert page._STATEMENTS == {
+        "Income statement": "PL", "Balance sheet": "BS", "Cash flow": "CF"
+    }
+
+
+def test_every_statement_offered_is_one_simfin_returns():
+    """A statement in the picker that SimFin never returns would render blank."""
+    for code in page._STATEMENTS.values():
+        assert code in {"PL", "BS", "CF", "DERIVED"}
+
+
+def test_statement_metadata_is_not_shown_as_a_line_item():
+    """Report dates and restatement flags describe the filing, not the business."""
+    for column in ("Fiscal Year", "Report Date", "Publish Date", "Restated", "Source"):
+        assert column in page._STATEMENT_META
+
+
+def _statement(frame) -> dict:
+    dataset = type("D", (), {
+        "statements_annual": type("S", (), {"frame": staticmethod(lambda code: frame)})()
+    })()
+    table, populated, empty = page._statement_frame(dataset, "PL")
+    return {"table": table, "populated": populated, "empty": empty}
+
+
+def test_a_statement_is_transposed_so_line_items_read_down_the_page():
+    frame = pd.DataFrame({
+        "Fiscal Year": [2024, 2025],
+        "Fiscal Period": ["FY", "FY"],
+        "Revenue": [100.0, 120.0],
+        "Gross Profit": [40.0, 50.0],
+    })
+    out = _statement(frame)
+    assert list(out["table"].index) == ["Revenue", "Gross Profit"]
+    assert list(out["table"].columns) == ["2024", "2025"]
+    assert out["table"].loc["Revenue", "2025"] == 120.0
+
+
+def test_simfins_own_line_item_order_is_preserved():
+    """SimFin's column order is the statement's order; reordering would misread it."""
+    frame = pd.DataFrame({
+        "Fiscal Year": [2025],
+        "Revenue": [100.0], "Cost of Revenue": [60.0], "Gross Profit": [40.0],
+    })
+    assert list(_statement(frame)["table"].index) == [
+        "Revenue", "Cost of Revenue", "Gross Profit"
+    ]
+
+
+def test_a_line_item_reported_in_any_year_counts_as_populated():
+    frame = pd.DataFrame({
+        "Fiscal Year": [2024, 2025],
+        "Revenue": [100.0, 120.0],
+        "Sometimes": [np.nan, 5.0],
+        "Never": [np.nan, np.nan],
+    })
+    out = _statement(frame)
+    assert out["populated"] == ["Revenue", "Sometimes"]
+    assert out["empty"] == ["Never"]
+
+
+def test_an_empty_line_item_is_kept_rather_than_dropped():
+    """That SimFin carries a field and left it blank is itself a finding."""
+    frame = pd.DataFrame({
+        "Fiscal Year": [2025], "Revenue": [100.0], "Short Term Debt": [np.nan],
+    })
+    out = _statement(frame)
+    assert "Short Term Debt" in out["table"].index
+    assert out["empty"] == ["Short Term Debt"]
+
+
+def test_non_numeric_columns_never_reach_the_numeric_table():
+    frame = pd.DataFrame({
+        "Fiscal Year": [2025], "Revenue": [100.0], "Currency": ["USD"],
+    })
+    assert list(_statement(frame)["table"].index) == ["Revenue"]
+
+
+def test_a_missing_statement_yields_nothing_rather_than_an_error():
+    for frame in (pd.DataFrame(), pd.DataFrame({"Revenue": [1.0]})):
+        out = _statement(frame)
+        assert out["table"].empty
+        assert out["populated"] == [] and out["empty"] == []
+
+
+def test_a_missing_date_renders_as_a_dash_not_a_fabricated_one():
+    assert page._date_text(None) == "—"
+    assert page._date_text(pd.NaT) == "—"
+    assert page._date_text(pd.Timestamp("2025-09-30")) == "2025-09-30"
 
 
 # ---------------------------------------------------------------------------

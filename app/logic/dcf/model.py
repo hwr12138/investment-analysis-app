@@ -10,7 +10,8 @@ Everything here is orchestration. The arithmetic lives in :mod:`valuation` and
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import math
+from dataclasses import dataclass, field, replace
 from datetime import date, timedelta
 
 import numpy as np
@@ -19,6 +20,7 @@ import pandas as pd
 from app.data import market_data, simfin_client
 from app.data.simfin_client import StatementSet
 from app.logic.dcf import financials as fin
+from app.logic.dcf import reverse
 from app.logic.dcf import validation as val
 from app.logic.dcf import valuation as dcf
 from app.logic.dcf import wacc as wacc_lib
@@ -673,6 +675,65 @@ def run_model(
         base=base,
         base_fcff=base_fcff,
         headline_method=headline_method,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Reverse model
+# ---------------------------------------------------------------------------
+
+
+def solve_implied_growth(
+    dataset: CompanyDataset,
+    base: BasePeriod,
+    *,
+    target_price: float | None,
+    drivers: dcf.DriverPath,
+    bounds: tuple[float, float] = reverse.GROWTH_BOUNDS,
+    grid: tuple[float, ...] = reverse.GROWTH_GRID,
+    **run_model_kwargs,
+) -> reverse.ReverseDcfResult:
+    """What flat revenue growth rate reproduces ``target_price`` per share.
+
+    The forward model asks what the shares are worth given a forecast. This asks
+    what forecast the market price already contains, by holding every other
+    assumption at the value the forward run used and solving the one remaining
+    unknown.
+
+    ``run_model_kwargs`` is a deliberate pass-through: the reverse model has to
+    invert *the model on screen*, and forwarding the arguments untouched is what
+    stops the two drifting apart when :func:`run_model` gains one.
+    """
+    if target_price is None or not math.isfinite(target_price) or target_price <= 0:
+        return reverse.ReverseDcfResult(
+            status=reverse.Status.NO_TARGET,
+            target=target_price,
+            growth=None,
+            bounds=bounds,
+            reason=(
+                f"No usable market price for {dataset.ticker} — the last close came back "
+                f"as {target_price!r}, so there is nothing to reverse-engineer. Nothing "
+                f"has been substituted."
+            ),
+        )
+
+    def value_per_share(growth: float) -> float:
+        # `replace`, never `DriverPath.flat`: only revenue growth may move. The
+        # other five drivers have to arrive byte-identical to the forward run,
+        # or this inverts a different model than the one being displayed.
+        path = replace(drivers, revenue_growth=(growth,) * drivers.years)
+        return run_model(
+            dataset, base, drivers=path, **run_model_kwargs
+        ).headline_bridge.value_per_share
+
+    return reverse.solve_growth(
+        value_per_share,
+        float(target_price),
+        bounds=bounds,
+        grid=grid,
+        # Probe where the forward model has just succeeded, so "not evaluable"
+        # means the model is broken rather than the probe being unlucky.
+        probe_at=drivers.revenue_growth[0],
     )
 
 

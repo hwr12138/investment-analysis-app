@@ -20,6 +20,7 @@ from app.data import market_data, simfin_client
 from app.logic.dcf import export as dcf_export
 from app.logic.dcf import financials as fin
 from app.logic.dcf import model as dcf_model
+from app.logic.dcf import reverse
 from app.logic.dcf import validation as val
 from app.logic.dcf import valuation as dcf
 from app.logic.dcf import wacc as wacc_lib
@@ -97,18 +98,20 @@ _UNITS = {
     "Billions": (1e9, " (bn)", 2),
 }
 
-_HISTORICAL_LABELS = {
-    "revenue": "Revenue",
-    "ebit": "EBIT",
-    "pretax_income": "Pretax income",
-    "net_income": "Net income",
-    "cfo": "Operating cash flow",
-    "dna": "D&A",
-    "total_assets": "Total assets",
-    "total_liabilities": "Total liabilities",
-    "total_equity": "Total equity",
-    "cash": "Cash & equivalents",
+#: The three statements SimFin returns, in the order an analyst reads them.
+_STATEMENTS = {
+    "Income statement": "PL",
+    "Balance sheet": "BS",
+    "Cash flow": "CF",
 }
+
+#: Per-period bookkeeping SimFin puts on every statement frame. These describe
+#: the filing rather than the business, so they are shown as provenance instead
+#: of being mixed in among the line items.
+_STATEMENT_META = (
+    "Fiscal Period", "Fiscal Year", "Report Date", "Publish Date",
+    "Restated", "Source", "TTM", "Value Check", "Data Model",
+)
 
 _BADGE_CLASS = {
     Origin.REPORTED: "dcf-reported",
@@ -186,6 +189,14 @@ def _assumption_fingerprint(inputs: dict) -> tuple:
     assumption panel currently shows. Widgets rerun the script on every change;
     this is what stops the model, the checks and the workbook from being rebuilt
     each time.
+
+    The reverse DCF adds nothing here. It depends only on assumptions already
+    listed plus the market price, and the price reaches this tuple already: it
+    is what the market value of equity is computed from, so it moves the WACC,
+    which is field seven. (If the point-in-time share count is missing, equity
+    value collapses to zero and that link breaks — but the price still cannot
+    change mid-session, because it arrives with the cached dataset and a change
+    of company forces a rerun outright.)
     """
     drivers = inputs["drivers"]
     return (
@@ -457,6 +468,31 @@ def render_page() -> None:
             _render_blocking("The projection cannot be built", str(error))
             return
 
+        # Solved here rather than at render time so it describes the same run as
+        # everything else on the page. Reading live widget values instead would
+        # let the implied rate invert a valuation that is not the one displayed.
+        # No try/except: every way this can fail is a status on the result.
+        reverse_result = dcf_model.solve_implied_growth(
+            dataset,
+            inputs["base"],
+            target_price=dataset.last_price,
+            drivers=inputs["drivers"],
+            wacc_result=inputs["wacc"],
+            terminal_growth=inputs["terminal_growth"],
+            exit_multiple=inputs["exit_multiple"],
+            stub=inputs["stub"],
+            mid_year=inputs["mid_year"],
+            shares=inputs["shares"],
+            share_basis=inputs["share_basis"],
+            include_short_term_investments=inputs["include_sti"],
+            operating_cash_floor=inputs["cash_floor"],
+            non_operating_assets=inputs["non_operating"],
+            base_fcff=inputs["base_fcff"],
+            headline_method=inputs["headline_method"],
+            sbc=inputs["sbc"],
+            deduct_sbc=inputs["deduct_sbc"],
+        )
+
         context = dcf_model.build_validation_context(
             dataset,
             base=inputs["base"],
@@ -477,6 +513,7 @@ def render_page() -> None:
             "fingerprint": fingerprint,
             "computed_at": datetime.now(),
             "result": result,
+            "reverse": reverse_result,
             "issues": issues,
             "check_results": check_results,
             # The inputs are snapshotted alongside the results so the export and
@@ -490,6 +527,9 @@ def render_page() -> None:
     issues = output["issues"]
     check_results = output["check_results"]
     computed_inputs = output["inputs"]
+    # `.get` rather than `[...]`: a session dict snapshotted before this section
+    # existed has no reverse result, and a stale session should not crash.
+    reverse_result = output.get("reverse")
 
     blocking = [i for i in issues if i.severity is val.Severity.BLOCKING]
     if blocking:
@@ -528,6 +568,15 @@ def render_page() -> None:
         stale=stale_assumptions or pending_reload,
         computed_at=output["computed_at"],
     )
+    if reverse_result is not None:
+        _render_reverse_dcf(
+            dataset,
+            result,
+            computed_inputs,
+            reverse_result,
+            fin.revenue_growth_history(dataset.annual),
+            stale=stale_assumptions or pending_reload,
+        )
     _render_export(
         dataset, result, computed_inputs, issues, check_results, acknowledged, valuation_date
     )
@@ -1545,6 +1594,342 @@ def _render_projection(
     )
 
 
+# ---------------------------------------------------------------------------
+# Reverse DCF
+# ---------------------------------------------------------------------------
+
+
+def _reverse_message(result: reverse.ReverseDcfResult) -> tuple[str, str]:
+    """The banner for a solve outcome, as ``(level, markdown)``.
+
+    Pure and separate from the rendering so every status can be checked without
+    a Streamlit runtime — and so adding a status without a message fails a test
+    rather than rendering blank.
+    """
+    status = result.status
+
+    if status is reverse.Status.SOLVED:
+        if result.growth_creates_value is False:
+            return "warning", (
+                f"**Growth destroys value in this model.** At the implied rate, one more "
+                f"percentage point of revenue growth *lowers* value per share by "
+                f"**{abs(result.value_per_growth_point):,.2f}**. A *higher* market price "
+                f"therefore implies a *lower* growth rate — the usual reading of this number "
+                f"is inverted. This happens when each incremental dollar of revenue consumes "
+                f"more working capital and capital expenditure than the margin it earns."
+            )
+        if result.plausible is False:
+            return "warning", (
+                f"**{_pct(result.growth)} a year is outside anything a company sustains for "
+                f"long.** Read this as *the price is not explained by revenue growth* rather "
+                f"than as a forecast — the difference is more likely to sit in the margin, "
+                f"the reinvestment rates, or the discount rate."
+            )
+        return "", ""
+
+    if status is reverse.Status.MULTIPLE_SOLUTIONS:
+        return "warning", f"**No single implied rate.** {result.reason}"
+
+    if status is reverse.Status.NOT_EVALUABLE:
+        return "error", (
+            f"{result.reason}\n\nThis is not a failed search. The terminal growth rate and "
+            f"the discount rate are held fixed while revenue growth is solved for, so this "
+            f"fails identically at every growth rate — on the first evaluation or not at all. "
+            f"Both terminal value methods are always computed, so a Gordon growth input can "
+            f"stop an exit-multiple model."
+        )
+
+    if status is reverse.Status.NO_TARGET:
+        return "info", f"**No market price to invert.** {result.reason}"
+
+    if status in {reverse.Status.TARGET_ABOVE_RANGE, reverse.Status.TARGET_BELOW_RANGE}:
+        return "info", f"**No growth rate reproduces this price.** {result.reason}"
+
+    if status is reverse.Status.DEGENERATE:
+        return "info", f"**Nothing to solve for.** {result.reason}"
+
+    if status is reverse.Status.RESIDUAL_TOO_LARGE:
+        return "error", f"**The solved rate did not check out.** {result.reason}"
+
+    if status is reverse.Status.SEARCH_BROKEN:
+        return "error", f"**The search could not complete.** {result.reason}"
+
+    raise AssertionError(f"No message written for reverse DCF status {status!r}.")
+
+
+def _implied_revenue_path(base_revenue: float, growth: float, years: int) -> list[float]:
+    return [base_revenue * (1.0 + growth) ** i for i in range(1, years + 1)]
+
+
+def _render_reverse_chart(
+    dataset: dcf_model.CompanyDataset,
+    result: dcf_model.ModelResult,
+    reverse_result: reverse.ReverseDcfResult,
+    history: fin.GrowthHistory,
+) -> None:
+    """Reported revenue, then the paths the price, the forecast, and history imply."""
+    if "revenue" not in dataset.annual.columns:
+        return
+
+    projected = [row.revenue for row in result.projection.rows]
+    years = len(projected)
+    base_revenue = result.projection.base_revenue
+
+    # Forecast years are labelled by offset, not by fiscal year: the first is a
+    # stub period, and a fiscal-year label would claim a precision the model
+    # does not have.
+    history_labels = [str(i) for i in dataset.annual.index]
+    forward_labels = [f"+{i}yr" for i in range(1, years + 1)]
+    anchor = result.base.label
+    axis = history_labels + [anchor] + forward_labels
+
+    figure = go.Figure()
+    figure.add_trace(
+        go.Bar(
+            x=history_labels, y=dataset.annual["revenue"], name="Reported revenue",
+            marker_color="rgba(130,150,180,0.55)",
+        )
+    )
+
+    def add_path(values: list[float], name: str, dash: str, width: float, color: str) -> None:
+        # Anchored at the base period so every path fans out from one point.
+        figure.add_trace(
+            go.Scatter(
+                x=[anchor] + forward_labels, y=[base_revenue] + values, name=name,
+                mode="lines+markers", line=dict(dash=dash, width=width, color=color),
+            )
+        )
+
+    if reverse_result.status is reverse.Status.SOLVED:
+        add_path(
+            _implied_revenue_path(base_revenue, reverse_result.growth, years),
+            f"Implied by the market price ({_pct(reverse_result.growth)})",
+            "dash", 3.5, "#f2a900",
+        )
+    else:
+        # Losing the market's line is the finding; losing the chart hides it.
+        for index, root in enumerate(reverse_result.roots):
+            add_path(
+                _implied_revenue_path(base_revenue, root, years),
+                f"Reproduces the price ({_pct(root)})",
+                "dash", 2.5, ["#f2a900", "#e06666"][index % 2],
+            )
+
+    add_path(projected, "Your forecast", "dot", 2.5, "#4fa3f7")
+
+    if history.ok:
+        add_path(
+            _implied_revenue_path(base_revenue, history.cagr, years),
+            f"History repeating ({_pct(history.cagr)} realised)",
+            "longdash", 1.5, "#8fd18f",
+        )
+
+    figure.update_layout(
+        height=420, template="plotly_dark", hovermode="x unified",
+        margin=dict(t=30, b=10, l=10, r=10),
+        yaxis_title=f"Revenue ({dataset.currency})" if dataset.currency else "Revenue",
+        legend=dict(orientation="h", y=-0.15),
+        xaxis=dict(categoryorder="array", categoryarray=axis),
+    )
+    figure.update_traces(
+        hovertemplate="%{fullData.name}<br>%{x}: %{y:,.0f}<extra></extra>"
+    )
+    st.plotly_chart(figure, width="stretch")
+
+    note = (
+        f"Forecast years are labelled by offset because the first is a stub period of "
+        f"{result.projection.stub_fraction:.2f} of a year. All three paths start from the "
+        f"base period, **{result.base.label}**."
+    )
+    if result.base.is_ttm:
+        note += (
+            " The base period is a trailing twelve months, so the step from the last "
+            "fiscal-year bar to the anchor is a real discontinuity, not a plotting artefact."
+        )
+    st.caption(note)
+
+
+def _render_reverse_dcf(
+    dataset: dcf_model.CompanyDataset,
+    result: dcf_model.ModelResult,
+    inputs: dict,
+    reverse_result: reverse.ReverseDcfResult,
+    history: fin.GrowthHistory,
+    *,
+    stale: bool = False,
+) -> None:
+    st.divider()
+    st.subheader("Reverse DCF — what the market price implies")
+
+    years = inputs["drivers"].years
+    st.caption(
+        f"Everything above holds the assumptions fixed and solves for value. This holds value "
+        f"fixed at the market price and solves for the one assumption that would justify it: "
+        f"a flat revenue growth rate across all {years} forecast years, with the other five "
+        f"drivers exactly as shown above."
+    )
+
+    # Repeated here for the same reason it is repeated in the valuation panel —
+    # the number being read is here, and a notice further up the page reads as
+    # nothing having happened.
+    if stale:
+        st.warning(
+            "**This is from the previous run and does not reflect the assumptions currently "
+            "shown above.** Press **Compute** to apply them.",
+            icon="⏳",
+        )
+
+    solved = reverse_result.status is reverse.Status.SOLVED
+    forecast = inputs["drivers"].revenue_growth[0]
+
+    columns = st.columns(4)
+    columns[0].metric(
+        "Implied revenue growth",
+        _pct(reverse_result.growth) if solved else
+        ("no single rate" if reverse_result.roots else "—"),
+        help="The flat rate that makes this model's value per share equal the market price.",
+    )
+    columns[1].metric("Your forecast", _pct(forecast))
+    columns[2].metric(
+        f"Realised CAGR ({history.first_period}–{history.last_period})"
+        if history.ok else "Realised CAGR",
+        _pct(history.cagr) if history.ok else "n/a",
+        help=history.detail or (
+            f"Compound annual growth over {history.intervals} interval(s) of reported revenue."
+        ),
+    )
+    columns[3].metric(
+        "Market price",
+        f"{dataset.last_price:,.2f}" if dataset.last_price else "n/a",
+        help=f"Last close as of {dataset.price_date}" if dataset.price_date else None,
+    )
+
+    if solved:
+        verdict = (
+            f"The market is pricing in **{_pct(reverse_result.growth)}** a year for {years} "
+            f"years. You are forecasting **{_pct(forecast)}**."
+        )
+        if history.ok:
+            gap = (reverse_result.growth - history.cagr) * 100
+            verdict += (
+                f" The company delivered **{_pct(history.cagr)}** over the "
+                f"{history.intervals} years to {history.last_period} — the market's number is "
+                f"**{gap:+.1f} points** {'above' if gap >= 0 else 'below'} what it has "
+                f"actually done."
+            )
+        st.markdown(verdict)
+        _provenance(
+            Sourced.derived(
+                value=reverse_result.growth,
+                source=(
+                    f"Solved against the last close of {dataset.last_price:,.2f}"
+                    + (f" ({dataset.price_date})" if dataset.price_date else "")
+                ),
+                formula=reverse_result.formula,
+            )
+        )
+
+    level, message = _reverse_message(reverse_result)
+    if message:
+        {"warning": st.warning, "error": st.error, "info": st.info}[level](message)
+
+    if history.ok and history.arithmetic_mean is not None:
+        st.caption(
+            f"**Two ways to state past growth, and they are not the same number.** The "
+            f"forecast driver above is pre-populated from the *arithmetic average* of yearly "
+            f"growth rates (**{_pct(history.arithmetic_mean)}**); the benchmark here is the "
+            f"*compound* rate (**{_pct(history.cagr)}**), which is the one comparable to a "
+            f"flat forecast. They diverge whenever growth was uneven. Yearly rates ranged "
+            f"{_pct(history.minimum)} to {_pct(history.maximum)}, median "
+            f"{_pct(history.median)}, over {history.observations} year(s)."
+            + (f" {history.detail}" if history.detail else "")
+        )
+
+    _render_reverse_chart(dataset, result, reverse_result, history)
+
+    if reverse_result.samples:
+        with st.expander("Value per share across the growth range", expanded=False):
+            st.caption(
+                "The scan the solver already ran, so this costs nothing extra. Every crossing "
+                "of the market price in this table is a rate the price is consistent with."
+            )
+            low, high = reverse.PLAUSIBLE_GROWTH
+            rows = [
+                {
+                    "Revenue growth": f"{growth:.2%}",
+                    "Value per share": f"{value:,.2f}",
+                    "vs market price": (
+                        _pct(value / dataset.last_price - 1) if dataset.last_price else "n/a"
+                    ),
+                }
+                for growth, value in reverse_result.samples
+                if low <= growth <= high
+            ]
+            st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+
+    _render_reverse_whatif(dataset, inputs, reverse_result)
+
+
+def _render_reverse_whatif(
+    dataset: dcf_model.CompanyDataset, inputs: dict, reverse_result: reverse.ReverseDcfResult
+) -> None:
+    """A live target price against snapshotted assumptions.
+
+    The assumptions still come from the computed snapshot — only the target may
+    be live, and its answer renders directly beneath the box it was typed into,
+    so there is no staleness ambiguity to create.
+    """
+    with st.expander("Solve for a different price", expanded=False):
+        st.caption(
+            "Answers *what growth would justify this price?* — using the assumptions from the "
+            "run above, not whatever the widgets currently show."
+        )
+        default = float(dataset.last_price or 0.0)
+        price = st.number_input(
+            "Price per share", value=default, min_value=0.0, step=1.0, key="dcf_reverse_price"
+        )
+        if price <= 0 or abs(price - default) < 1e-12:
+            return
+
+        what_if = dcf_model.solve_implied_growth(
+            dataset,
+            inputs["base"],
+            target_price=price,
+            drivers=inputs["drivers"],
+            wacc_result=inputs["wacc"],
+            terminal_growth=inputs["terminal_growth"],
+            exit_multiple=inputs["exit_multiple"],
+            stub=inputs["stub"],
+            mid_year=inputs["mid_year"],
+            shares=inputs["shares"],
+            share_basis=inputs["share_basis"],
+            include_short_term_investments=inputs["include_sti"],
+            operating_cash_floor=inputs["cash_floor"],
+            non_operating_assets=inputs["non_operating"],
+            base_fcff=inputs["base_fcff"],
+            headline_method=inputs["headline_method"],
+            sbc=inputs["sbc"],
+            deduct_sbc=inputs["deduct_sbc"],
+        )
+        if what_if.status is reverse.Status.SOLVED:
+            st.markdown(
+                f"A price of **{price:,.2f}** implies flat revenue growth of "
+                f"**{_pct(what_if.growth)}** a year."
+            )
+            _provenance(
+                Sourced.derived(
+                    value=what_if.growth,
+                    source=f"Solved against a hypothetical price of {price:,.2f}",
+                    formula=what_if.formula,
+                )
+            )
+        else:
+            level, message = _reverse_message(what_if)
+            {"warning": st.warning, "error": st.error, "info": st.info}[level or "info"](
+                message or what_if.reason
+            )
+
+
 def _render_historicals(dataset: dcf_model.CompanyDataset) -> None:
     st.divider()
     st.subheader("Historical financials")
@@ -1595,10 +1980,61 @@ def _render_historicals(dataset: dcf_model.CompanyDataset) -> None:
     figure.update_yaxes(tickformat=".0%", row=2, col=1)
     st.plotly_chart(figure, width="stretch")
 
-    heading, units = st.columns([3, 2], vertical_alignment="bottom")
-    with heading:
-        st.markdown("**Reported figures, with the filing behind each year**")
-    with units:
+    _render_reported_figures(dataset)
+
+
+def _statement_frame(
+    dataset: dcf_model.CompanyDataset, code: str
+) -> tuple[pd.DataFrame, list[str], list[str]]:
+    """One statement as line items × fiscal years, plus which items were reported.
+
+    Transposed against SimFin's own layout because a statement is read down the
+    line items, not across them — and with 85 balance-sheet rows, the wide form
+    is unreadable. SimFin's column order is the statement's own order, so
+    transposing preserves it.
+
+    Returns ``(frame, populated, empty)`` where the two lists partition the line
+    items into those the company reported and those SimFin carries in its
+    template but left blank for this company.
+    """
+    frame = dataset.statements_annual.frame(code)
+    if frame.empty or "Fiscal Year" not in frame.columns:
+        return pd.DataFrame(), [], []
+
+    items = [
+        column for column in frame.columns
+        if column not in _STATEMENT_META
+        and pd.api.types.is_numeric_dtype(frame[column])
+    ]
+    populated = [c for c in items if frame[c].notna().any()]
+    empty = [c for c in items if c not in populated]
+
+    table = frame.set_index("Fiscal Year")[items].T
+    table.columns = [str(int(year)) for year in table.columns]
+    return table, populated, empty
+
+
+def _render_reported_figures(dataset: dcf_model.CompanyDataset) -> None:
+    """Every line item SimFin returns, one statement at a time.
+
+    The model reads a handful of concepts out of these statements; showing only
+    those would leave the reader unable to tell a figure that was reported from
+    one that was resolved to a different column, or to see what else was on the
+    filing. This is the ground truth the whole page is built on, unedited.
+    """
+    st.markdown("**Reported figures — everything SimFin returns, unedited**")
+
+    statement_column, units_column = st.columns([2, 2], vertical_alignment="bottom")
+    with statement_column:
+        statement = st.radio(
+            "Statement",
+            list(_STATEMENTS),
+            horizontal=True,
+            key="dcf_hist_statement",
+            help="The three statements SimFin returns for this company, exactly as "
+                 "returned. Concepts the model uses are resolved out of these.",
+        )
+    with units_column:
         unit = st.radio(
             "Units",
             list(_UNITS),
@@ -1609,51 +2045,102 @@ def _render_historicals(dataset: dcf_model.CompanyDataset) -> None:
                  "unchanged, and the export always carries the full precision.",
         )
 
+    code = _STATEMENTS[statement]
     divisor, suffix, decimals = _UNITS[unit]
+    table, populated, empty = _statement_frame(dataset, code)
 
-    table = dataset.annual.copy()
-    table.insert(0, "Fiscal year", table.index)
-    table["Source filing"] = [
-        dataset.filing_link(int(year)) for year in dataset.annual.index
-    ]
-    keep = [
-        "Fiscal year", "revenue", "ebit", "pretax_income", "net_income", "cfo", "dna",
-        "total_assets", "total_liabilities", "total_equity", "cash", "Source filing",
-    ]
-    table = table[[c for c in keep if c in table.columns]]
+    if table.empty:
+        st.info(
+            f"SimFin returned no {statement.lower()} for {dataset.ticker}. Nothing has "
+            f"been substituted."
+        )
+        return
 
-    money_columns = [c for c in table.columns if c not in ("Fiscal year", "Source filing")]
-    for column in money_columns:
-        table[column] = table[column] / divisor
-    table = table.rename(
-        columns={
-            column: f"{_HISTORICAL_LABELS.get(column, column)}{suffix}"
-            for column in money_columns
-        }
+    show_empty = st.checkbox(
+        f"Show the {len(empty)} line item(s) SimFin left empty for {dataset.ticker}",
+        value=False,
+        key=f"dcf_hist_empty_{code}",
+        help="Line items SimFin carries in this statement template but reported no "
+             "value for. An empty row is not a zero — it means nothing was reported, "
+             "and which items are missing is itself worth knowing.",
     )
-    table["Fiscal year"] = table["Fiscal year"].astype(str)
+
+    rows = populated + empty if show_empty else populated
+    scaled = table.loc[rows] / divisor
+
+    # Rendered as text rather than left numeric. A figure that was never reported
+    # has to be visibly different from one that was reported as zero, and this
+    # Streamlit build prints a missing number as the word "None" in every numeric
+    # path tried — column_config, a Styler with na_rep, nullable Float64, and a
+    # bare frame alike. Formatting here is the only way to guarantee what a
+    # reader sees, which for a ground-truth table is the whole point.
+    display = scaled.map(
+        lambda value: "—" if pd.isna(value) else f"{value:,.{decimals}f}"
+    )
+    display.index.name = f"Line item{suffix}"
 
     st.dataframe(
-        table,
+        display.style.set_properties(**{"text-align": "right"}),
         width="stretch",
-        hide_index=True,
-        column_config={
-            "Source filing": st.column_config.LinkColumn(
-                "Source filing", display_text="View filing"
-            ),
-            **{
-                f"{_HISTORICAL_LABELS.get(c, c)}{suffix}": st.column_config.NumberColumn(
-                    format=f"%.{decimals}f"
-                )
-                for c in money_columns
-            },
-        },
+        height=min(36 * len(rows) + 44, 620),
     )
+
     st.caption(
-        f"Figures in {unit.lower()} of {dataset.currency or 'reporting currency'}, "
-        f"as reported by SimFin. Blank cells are line items the company did not report — "
-        f"they are not zeros."
+        f"**{statement}** · {len(populated)} of {len(populated) + len(empty)} line items "
+        f"reported, {len(empty)} left empty by SimFin · figures in {unit.lower()} of "
+        f"{dataset.currency or 'the reporting currency'} · "
+        f"{'as-reported' if dataset.asreported else 'restated (SimFin default)'}. "
+        f"A dash is a figure the company did not report — it is not a zero, and nothing "
+        f"is filled in for it anywhere in the model. A reported **0.0** is a real zero."
     )
+
+    _render_filing_provenance(dataset, code)
+
+
+def _render_filing_provenance(dataset: dcf_model.CompanyDataset, code: str) -> None:
+    """Which filing each fiscal year came from, and whether it was restated."""
+    frame = dataset.statements_annual.frame(code)
+    if frame.empty or "Fiscal Year" not in frame.columns:
+        return
+
+    with st.expander("The filing behind each year", expanded=False):
+        rows = []
+        for _, record in frame.iterrows():
+            year = record["Fiscal Year"]
+            if pd.isna(year):
+                continue
+            rows.append(
+                {
+                    "Fiscal year": str(int(year)),
+                    "Period": record.get("Fiscal Period", ""),
+                    "Report date": _date_text(record.get("Report Date")),
+                    "Publish date": _date_text(record.get("Publish Date")),
+                    "Restated": "yes" if record.get("Restated") else "no",
+                    "Source filing": dataset.filing_link(int(year)),
+                }
+            )
+        st.dataframe(
+            pd.DataFrame(rows),
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "Source filing": st.column_config.LinkColumn(
+                    "Source filing", display_text="View filing"
+                )
+            },
+        )
+        st.caption(
+            "Report date is the period end; publish date is when the filing reached "
+            "SimFin. A restated year is one the company later revised — the model uses "
+            "restated figures by default so the time series is consistent, which the "
+            "toggle at the top of the page switches off."
+        )
+
+
+def _date_text(value) -> str:
+    if value is None or pd.isna(value):
+        return "—"
+    return pd.Timestamp(value).date().isoformat()
 
 
 def _render_validation_panel(

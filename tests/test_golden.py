@@ -149,6 +149,10 @@ def build_model(statements_payload, monkeypatch) -> dict:
         "check_results": check_results,
         "stub": stub,
         "etr": etr,
+        # The run inputs, so a test can re-run the model with one of them moved.
+        "drivers": drivers,
+        "wacc_result": wacc_result,
+        "base_fcff": base_fcff,
     }
 
 
