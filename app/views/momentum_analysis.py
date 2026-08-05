@@ -1,10 +1,20 @@
 import streamlit as st
-import yfinance as yf
 import pandas as pd
 import plotly.graph_objects as go
+from datetime import date, timedelta
 from plotly.subplots import make_subplots
 
+from app.data import sharadar_client
 from app.logic import momentum_analysis as ma_models
+
+#: Lookback windows, in calendar days. Sharadar is queried by date range rather
+#: than by a named period, and MACD needs ~34 sessions of run-up before its
+#: first valid value, so the shortest windows deliberately over-fetch and the
+#: chart is trimmed afterwards.
+PERIOD_DAYS = {"5D": 7, "1M": 31, "3M": 92, "6M": 183, "1Y": 365, "5Y": 1826}
+
+#: Extra calendar days fetched purely to warm up the indicators.
+_INDICATOR_WARMUP_DAYS = 90
 
 # --- Main Dashboard Render ---
 
@@ -16,21 +26,38 @@ def render_page():
     with col1:
         ticker = st.text_input("Enter Stock Ticker", value="AAPL").upper()
     with col2:
-        period_map = {"5D": "5d", "1M": "1mo", "3M": "3mo", "6M": "6mo", "1Y": "1y", "5Y": "5y"}
-        period_selection = st.selectbox("Select Time Period", list(period_map.keys()), index=4)
+        period_selection = st.selectbox("Select Time Period", list(PERIOD_DAYS.keys()), index=4)
 
     # Fetch Data
     if ticker:
-        df = yf.download(ticker, period=period_map[period_selection], multi_level_index=False)
+        window_days = PERIOD_DAYS[period_selection]
+        end = date.today()
+        window_start = end - timedelta(days=window_days)
+        try:
+            df = sharadar_client.fetch_ohlcv(
+                ticker,
+                (window_start - timedelta(days=_INDICATOR_WARMUP_DAYS)).isoformat(),
+                end.isoformat(),
+            )
+        except sharadar_client.SharadarError as error:
+            st.error(str(error))
+            return
 
         if df.empty:
             st.error("No data found for this ticker.")
             return
 
-        # Calculate Indicators
+        # Calculate Indicators over the full fetched history, then trim to the
+        # window the user asked for — so the first plotted bar already has a
+        # settled RSI and MACD rather than a warm-up artefact.
         df['RSI'] = ma_models.calculate_rsi(df)
         df['MACD'], df['Signal'], df['MACD_Hist'] = ma_models.calculate_macd(df)
         df.dropna(inplace=True)
+        df = df.loc[pd.Timestamp(window_start):]
+
+        if df.empty:
+            st.error("Not enough price history for this ticker to compute indicators.")
+            return
 
         # --- Live Scanners UI ---
         st.subheader("Live Indicator Scanners")
@@ -55,7 +82,9 @@ def render_page():
         st.subheader("Manual Divergence Analysis")
         c1, c2, c3 = st.columns(3)
         with c1:
-            date1 = st.date_input("Anchor Date 1", value=df.index[-20])
+            # Short windows can hold fewer than 20 sessions, so clamp rather
+            # than index off the front of the frame.
+            date1 = st.date_input("Anchor Date 1", value=df.index[-min(20, len(df))])
         with c2:
             date2 = st.date_input("Anchor Date 2", value=df.index[-1])
         with c3:

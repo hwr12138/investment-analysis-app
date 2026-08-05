@@ -17,8 +17,8 @@ from .test_golden import build_model  # shared model builder
 
 
 @pytest.fixture
-def built(statements_payload, monkeypatch):
-    return build_model(statements_payload, monkeypatch)
+def built(statements_payload, tickers_response, monkeypatch):
+    return build_model(statements_payload, tickers_response, monkeypatch)
 
 
 @pytest.fixture
@@ -79,19 +79,19 @@ def test_assumption_records_carry_provenance():
         "Discount rate",
         "Beta",
         1.0716,
-        Sourced.derived(1.0716, "yfinance ^GSPC", "OLS slope, n=60", date(2026, 7, 30)),
+        Sourced.derived(1.0716, "Sharadar SEP vs SPY", "OLS slope, n=60", date(2026, 7, 30)),
     )
     row = record.as_row()
     assert row["Provenance"] == "DERIVED"
-    assert row["Source"] == "yfinance ^GSPC"
+    assert row["Source"] == "Sharadar SEP vs SPY"
     assert row["Formula / basis"] == "OLS slope, n=60"
     assert row["As of"] == "2026-07-30"
 
 
 def test_estimates_are_distinguishable_from_reported_figures():
-    reported = ex.AssumptionRecord("x", "SBC", 100.0, Sourced.reported(100.0, "SimFin CF"))
+    reported = ex.AssumptionRecord("x", "SBC", 100.0, Sourced.reported(100.0, "Sharadar CF"))
     estimate = ex.AssumptionRecord(
-        "x", "SBC", 138.0, Sourced.estimate(138.0, "SimFin CF: Non-Cash Items", "Upper bound")
+        "x", "SBC", 138.0, Sourced.estimate(138.0, "Sharadar CF: derived", "Upper bound")
     )
     assert reported.as_row()["Provenance"] == "REPORTED"
     assert estimate.as_row()["Provenance"] == "ESTIMATE"
@@ -99,7 +99,7 @@ def test_estimates_are_distinguishable_from_reported_figures():
 
 
 def test_unavailable_values_never_carry_a_number():
-    sourced = Sourced.unavailable("SimFin CF: Stock-Based Compensation", "Not reported")
+    sourced = Sourced.unavailable("Sharadar CF: Share Based Compensation", "Not reported")
     assert sourced.value is None
     assert not sourced.ok
     assert sourced.origin is Origin.UNAVAILABLE
@@ -193,4 +193,4 @@ def test_schema_map_is_exported_for_auditing(built):
     frame = built["dataset"].schema.as_frame()
     assert "Revenue" in set(frame["Concept"])
     resolved = frame[frame["Concept"] == "Revenue"].iloc[0]
-    assert resolved["Resolved column"] == "Revenue"
+    assert resolved["Resolved column"] == "Revenues"

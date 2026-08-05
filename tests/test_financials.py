@@ -8,15 +8,18 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from app.data import simfin_client as sc
+from app.data import sharadar_client as sc
 from app.logic.dcf import financials as fin
 from app.logic.dcf.schema import resolve_schema
 
 
 @pytest.fixture
-def concept_table(statements_payload, monkeypatch):
-    monkeypatch.setattr(sc, "_request", lambda *a, **k: statements_payload)
-    statements = sc._fetch_statements("TEST", period="FY")
+def concept_table(statements_payload, tickers_response, monkeypatch):
+    def _get(table, params, ticker=None):
+        return tickers_response if table == "TICKERS" else statements_payload
+
+    monkeypatch.setattr(sc, "_get", _get)
+    statements = sc._fetch_statements("TEST", annual=True)
     schema = resolve_schema(statements.frames, "TEST", statements.template)
     values, meta = fin.build_concept_table(statements, schema)
     return values, meta, schema
@@ -27,12 +30,14 @@ def concept_table(statements_payload, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_annual_merge_keys_on_fiscal_year_despite_the_bs_q4_label(concept_table):
-    """The balance sheet labels annual periods Q4; merging must not split years."""
+def test_all_four_statements_merge_into_one_row_per_year(concept_table):
+    """One row per fiscal year, carrying concepts from all four frames."""
     values, _, _ = concept_table
     assert list(values.index) == [2023, 2024, 2025]
-    assert values.loc[2025, "revenue"] == 1200
-    assert values.loc[2025, "total_assets"] == 1060  # from the BS, same row
+    assert values.loc[2025, "revenue"] == 1200            # PL
+    assert values.loc[2025, "total_assets"] == 1060       # BS
+    assert values.loc[2025, "cfo"] == 340                 # CF
+    assert values.loc[2025, "derived_fcf"] == 240         # DERIVED
 
 
 def test_metadata_carries_the_report_date_and_filing_link(concept_table):
@@ -41,10 +46,32 @@ def test_metadata_carries_the_report_date_and_filing_link(concept_table):
     assert "sec.gov" in meta.loc[2025, "source_link"]
 
 
-def test_unreported_line_items_stay_nan(concept_table):
+def test_a_column_absent_from_the_response_stays_nan(concept_table, statements_payload,
+                                                     tickers_response, monkeypatch):
+    """A dropped indicator must read as absent, never as a zero balance."""
+    from tests.conftest import SF1_COLUMNS
+
+    stripped = dict(statements_payload)
+    keep = [i for i, name in enumerate(SF1_COLUMNS) if name != "sbcomp"]
+    stripped["datatable"] = {
+        "columns": [{"name": SF1_COLUMNS[i]} for i in keep],
+        "data": [[row[i] for i in keep] for row in statements_payload["datatable"]["data"]],
+    }
+
+    def _get(table, params, ticker=None):
+        return tickers_response if table == "TICKERS" else stripped
+
+    monkeypatch.setattr(sc, "_get", _get)
+    statements = sc._fetch_statements("TEST", annual=True)
+    schema = resolve_schema(statements.frames, "TEST", statements.template)
+    values, _ = fin.build_concept_table(statements, schema)
+    assert "sbc" not in values.columns
+
+
+def test_a_derived_minority_interest_of_zero_is_a_real_zero(concept_table):
+    """The fixture company has no NCI, and the residual says so exactly."""
     values, _, _ = concept_table
-    assert values["sbc"].isna().all()
-    assert values["minority_interest"].isna().all()
+    assert values.loc[2025, "minority_interest"] == 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -88,57 +115,32 @@ def test_interest_falls_back_to_the_other_line_when_one_is_missing():
 # ---------------------------------------------------------------------------
 
 
-def test_capex_uses_the_gross_line_when_reported():
-    values = pd.DataFrame(
-        {
-            "capex_acquisition": [-2112.0],
-            "capex_net_change": [-2099.0],
-            "capex_disposals": [13.0],
-        },
-        index=[2025],
-    )
+def test_capex_negates_the_reported_outflow():
+    """Sharadar signs capex negative for cash spent; the model wants it positive."""
+    values = pd.DataFrame({"capex_acquisition": [-12715.0]}, index=[2025])
     result = fin.capex(values)
     assert result.origin == "reported"
-    assert result.values.loc[2025] == 2112.0
-
-
-def test_capex_reconstructs_the_gross_figure_from_disposals():
-    """KO FY2025: net -2,099 less disposals +13 gives the gross -2,112."""
-    values = pd.DataFrame(
-        {
-            "capex_acquisition": [np.nan],
-            "capex_net_change": [-2099.0],
-            "capex_disposals": [13.0],
-        },
-        index=[2025],
-    )
-    result = fin.capex(values)
-    assert result.origin == "derived"
-    assert result.values.loc[2025] == pytest.approx(2112.0)
-
-
-def test_capex_falls_back_to_the_net_line_as_a_labelled_estimate():
-    values = pd.DataFrame(
-        {
-            "capex_acquisition": [np.nan],
-            "capex_net_change": [-12715.0],
-            "capex_disposals": [np.nan],
-        },
-        index=[2025],
-    )
-    result = fin.capex(values)
-    assert result.origin == "estimate"
     assert result.values.loc[2025] == 12715.0
-    assert "net of asset disposals" in result.detail
+
+
+def test_capex_from_the_fixture_is_reported_not_estimated(concept_table):
+    values, _, _ = concept_table
+    result = fin.capex(values)
+    assert result.origin == "reported"
+    assert result.values.loc[2025] == 100.0
 
 
 def test_capex_is_nan_when_nothing_is_reported():
-    values = pd.DataFrame(
-        {"capex_acquisition": [np.nan], "capex_net_change": [np.nan]}, index=[2025]
-    )
+    values = pd.DataFrame({"capex_acquisition": [np.nan]}, index=[2025])
     result = fin.capex(values)
     assert result.values.isna().all()
+    assert result.origin == "estimate"
     assert "no capital expenditure line" in result.detail
+
+
+def test_capex_is_nan_when_the_column_is_absent_entirely():
+    result = fin.capex(pd.DataFrame({"revenue": [1200.0]}, index=[2025]))
+    assert result.values.isna().all()
 
 
 # ---------------------------------------------------------------------------
@@ -167,7 +169,8 @@ def test_total_debt_tolerates_one_missing_maturity():
 
 def test_effective_tax_rate(concept_table):
     values, _, _ = concept_table
-    assert fin.effective_tax_rate(values).loc[2025] == pytest.approx(60 / 300)
+    # Pretax is 1200 − 700 − 190 = 310; tax expense is 60.
+    assert fin.effective_tax_rate(values).loc[2025] == pytest.approx(60 / 310)
 
 
 def test_effective_tax_rate_is_undefined_on_a_pretax_loss():
@@ -190,11 +193,6 @@ def test_delta_nwc_first_period_is_nan_not_zero(concept_table):
     delta = fin.delta_nwc(values)
     assert pd.isna(delta.iloc[0])
     assert not pd.isna(delta.iloc[1])
-
-
-def test_cash_flow_delta_nwc_is_sign_flipped_to_match(concept_table):
-    values, _, _ = concept_table
-    assert fin.cash_flow_delta_nwc(values).loc[2025] == 1000.0  # reported as −1,000
 
 
 # ---------------------------------------------------------------------------

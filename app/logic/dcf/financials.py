@@ -1,34 +1,42 @@
 """Statement normalisation, TTM assembly, and historical ratio derivation.
 
-Turns the raw SimFin frames into a concept-keyed table the rest of the engine
-can read without knowing a single SimFin column name, and derives the driver
-ratios the forecast is pre-populated from.
+Turns the raw Sharadar frames into a concept-keyed table the rest of the engine
+can read without knowing a single Sharadar indicator name, and derives the
+driver ratios the forecast is pre-populated from.
 
 Missing data stays missing. Every series here can contain ``NaN``, and every
 consumer is expected to exclude those periods and report how many periods it
 actually used. Nothing is zero-filled, interpolated, or carried forward.
 
-Sign conventions, confirmed against live responses:
+Sign conventions. Costs and cash outflows are negative throughout this module.
+Sharadar publishes expense lines as positive magnitudes, so
+``sharadar_client.SIGN_FLIPPED`` negates them at ingest and this module sees the
+same convention it always has:
 
-* ``Income Tax (Expense) Benefit, net`` is negative for an expense and positive
-  for a benefit (Ford FY2025: +3,668M in a loss year). Tax expense is therefore
-  its negation, and a genuine benefit stays negative rather than being flipped
-  by an ``abs()``.
-* ``Interest Expense, net`` is negative (KO FY2025: -868M); interest expense is
-  its negation.
-* Capex lines are negative for cash spent (KO FY2025: acquisition -2,112M =
-  net change -2,099M less disposals +13M), so capex is their negation.
+* Income tax is negative for an expense and positive for a benefit. Tax expense
+  is therefore its negation, and a genuine benefit stays negative rather than
+  being flipped by an ``abs()``.
+* Interest expense is negative; interest expense as a positive number is its
+  negation.
+* Capex is negative for cash spent — Sharadar signs it that way natively, so it
+  is *not* among the flipped indicators.
+
+One caveat that does not exist upstream of a Sharadar feed: Sharadar writes 0,
+not null, for a line item absent from the filing. Those zeros arrive here as
+genuine zeros and cannot be told apart from a real nil, which is why
+``validation.check_zero_filled_indicators`` surfaces them to the user rather
+than this module guessing.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from datetime import date
 
 import numpy as np
 import pandas as pd
 
-from app.data.simfin_client import StatementSet
+from app.data.sharadar_client import StatementSet
 from app.logic.dcf.schema import SchemaMap
 
 #: Driver ratios pre-populated from history, in the order the UI shows them.
@@ -55,70 +63,17 @@ DRIVER_LABELS = {
 class CapexResult:
     """Capex plus how it had to be obtained.
 
-    SimFin frequently leaves the gross acquisition line empty and populates only
-    the net change in fixed assets, which nets out disposals. That is an
-    approximation, so it is labelled rather than passed off as reported.
+    Sharadar publishes a single capital expenditure line covering the
+    acquisition and disposal of long-lived assets, so there is no gross-versus-
+    net choice to label. The origin field is kept because a company can still
+    have no capex line at all, and because the UI treats an approximation
+    differently from a reported figure.
     """
 
     values: pd.Series
     origin: str  # "reported" | "derived" | "estimate"
     formula: str
     detail: str
-
-
-@dataclass
-class CompanyFinancials:
-    """Everything the model needs about one company, in concept space."""
-
-    ticker: str
-    name: str
-    currency: str
-    template: str
-    simfin_id: int
-    schema: SchemaMap
-    fiscal_year_end_month: int | None
-
-    annual: pd.DataFrame          # index: fiscal year, columns: concept keys
-    annual_meta: pd.DataFrame     # index: fiscal year, report/publish dates, filing link
-    quarterly: pd.DataFrame
-    quarterly_meta: pd.DataFrame
-    ttm: pd.Series | None = None
-    ttm_meta: dict = field(default_factory=dict)
-
-    asreported: bool = False
-    sector_name: str | None = None
-    industry_name: str | None = None
-    sector_code: int | None = None
-
-    @property
-    def years(self) -> list[int]:
-        return [int(y) for y in self.annual.index.tolist()]
-
-    @property
-    def latest_year(self) -> int | None:
-        return self.years[-1] if self.years else None
-
-    def latest_balance_sheet_date(self) -> date | None:
-        """Report date of the most recent balance sheet, quarterly if available."""
-        if not self.quarterly_meta.empty:
-            value = self.quarterly_meta["report_date"].iloc[-1]
-            return None if pd.isna(value) else pd.Timestamp(value).date()
-        if not self.annual_meta.empty:
-            value = self.annual_meta["report_date"].iloc[-1]
-            return None if pd.isna(value) else pd.Timestamp(value).date()
-        return None
-
-    def latest_stock_items(self) -> pd.Series:
-        """Most recent balance-sheet row — quarterly if we have one, else annual.
-
-        Balance-sheet items are stocks, not flows, so the newest observation is
-        used as-is and labelled with its as-of date rather than averaged.
-        """
-        if not self.quarterly.empty:
-            return self.quarterly.iloc[-1]
-        if not self.annual.empty:
-            return self.annual.iloc[-1]
-        return pd.Series(dtype="float64")
 
 
 # ---------------------------------------------------------------------------
@@ -132,11 +87,10 @@ _META_OUT = ("fiscal_period", "report_date", "publish_date", "source_link", "res
 def _join_key(frame: pd.DataFrame, annual: bool) -> pd.DataFrame:
     """Builds the key the four statements are merged on.
 
-    On an annual request the balance sheet labels its rows ``Q4`` while the
-    other three label them ``FY`` — the same period under two names, because a
-    balance sheet is a snapshot at the close of the fourth quarter. Merging on
-    the raw label would split every fiscal year into two half-populated rows, so
-    annual data keys on the fiscal year alone.
+    Annual data keys on the fiscal year alone rather than on the reported
+    period label, so a provider that labels an annual balance sheet ``Q4`` while
+    labelling the income statement ``FY`` still merges into one row instead of
+    two half-populated ones.
     """
     out = pd.DataFrame(index=pd.RangeIndex(len(frame)))
     out["fyear"] = pd.to_numeric(frame["Fiscal Year"], errors="coerce").astype("Int64").to_numpy()
@@ -259,10 +213,12 @@ def tax_expense(values: pd.DataFrame) -> pd.Series:
     return -values["tax_expense"]
 
 
-def interest_expense(values: pd.DataFrame, prefer: str = "net") -> pd.Series:
+def interest_expense(values: pd.DataFrame, prefer: str = "gross") -> pd.Series:
     """Interest expense as a positive number.
 
-    ``prefer`` picks the net or gross line where both are reported. Net interest
+    Sharadar publishes a single interest line rather than a gross/net pair, so
+    ``prefer`` no longer changes the answer; it is retained because the caller
+    passes it and a future provider may split the two again. Net interest
     income at a cash-rich company comes back negative, which is real and is
     surfaced rather than flattened by an ``abs()``.
     """
@@ -281,62 +237,40 @@ def interest_expense(values: pd.DataFrame, prefer: str = "net") -> pd.Series:
 def capex(values: pd.DataFrame) -> CapexResult:
     """Capital expenditure as a positive number, with its provenance.
 
-    Three ways down, most faithful first:
-
-    1. the gross acquisition line, used as reported;
-    2. the net change in fixed assets less the reported disposals, which
-       reconstructs the gross figure exactly (KO FY2025: -2,099 - 13 = -2,112);
-    3. the net change alone — an estimate, because it nets out disposals.
+    Sharadar's capital expenditure line is already net of disposals and already
+    signed negative for cash spent, so the only decision left is whether the
+    company has one at all.
     """
-    gross = values.get("capex_acquisition")
-    net = values.get("capex_net_change")
-    disposals = values.get("capex_disposals")
+    reported = values.get("capex_acquisition")
 
-    if gross is not None and gross.notna().any():
-        series = -gross
-        if series.notna().all():
-            return CapexResult(
-                series,
-                "reported",
-                "CapEx = −(Acquisition of Fixed Assets & Intangibles)",
-                "Gross acquisitions as reported by SimFin.",
-            )
-
-    if net is not None and disposals is not None and disposals.notna().any():
-        series = -(net - disposals)
+    if reported is not None and reported.notna().any():
         return CapexResult(
-            series,
-            "derived",
-            "CapEx = −(Change in Fixed Assets & Intangibles − Disposition of Fixed Assets & Intangibles)",
-            "Gross acquisitions reconstructed by adding reported disposals back to the net change.",
-        )
-
-    if net is not None and net.notna().any():
-        return CapexResult(
-            -net,
-            "estimate",
-            "CapEx ≈ −(Change in Fixed Assets & Intangibles)",
-            "SimFin reports no gross acquisition line for this company, so capex is "
-            "taken net of asset disposals. It understates gross capital spending by "
-            "whatever was sold.",
+            -reported,
+            "reported",
+            "CapEx = −(Capital Expenditure)",
+            "Acquisitions and disposals of fixed and intangible assets, as "
+            "reported by Sharadar.",
         )
 
     return CapexResult(
         pd.Series(np.nan, index=values.index),
         "estimate",
         "CapEx — not reported",
-        "SimFin reports no capital expenditure line for this company in any period.",
+        "Sharadar reports no capital expenditure line for this company in any "
+        "period.",
     )
 
 
 def total_debt(values: pd.DataFrame) -> pd.Series:
-    """Short-term debt + current portion of LTD + long-term debt.
+    """Current debt + non-current debt.
 
+    Sharadar folds short-term borrowings and the current portion of long-term
+    debt into one current-debt line, so two components rather than three.
     Companies that do not split the maturities leave one component null, so the
     components are added with a fill. A row where *every* component is null
     stays ``NaN`` — that is "not reported", not "no debt".
     """
-    components = ["short_term_debt", "current_portion_ltd", "long_term_debt"]
+    components = ["short_term_debt", "long_term_debt"]
     present = [c for c in components if c in values.columns]
     if not present:
         return pd.Series(np.nan, index=values.index)
@@ -361,7 +295,7 @@ def effective_tax_rate(values: pd.DataFrame) -> pd.Series:
 
 
 def net_working_capital(values: pd.DataFrame) -> pd.Series:
-    """(Current assets − cash − STI) − (current liabilities − short-term debt − CPLTD).
+    """(Current assets − cash − STI) − (current liabilities − current debt).
 
     Cash and debt are stripped out because they are financing, not operations.
     Components that were not reported are treated as absent from the subtraction
@@ -381,9 +315,7 @@ def net_working_capital(values: pd.DataFrame) -> pd.Series:
         values["total_current_assets"] - _optional("cash") - _optional("short_term_investments")
     )
     operating_liabilities = (
-        values["total_current_liabilities"]
-        - _optional("short_term_debt")
-        - _optional("current_portion_ltd")
+        values["total_current_liabilities"] - _optional("short_term_debt")
     )
     return operating_assets - operating_liabilities
 
@@ -396,19 +328,6 @@ def delta_nwc(values: pd.DataFrame) -> pd.Series:
     which is a different and false claim.
     """
     return net_working_capital(values).diff()
-
-
-def cash_flow_delta_nwc(values: pd.DataFrame) -> pd.Series:
-    """SimFin's own working-capital movement from the cash flow statement.
-
-    Reported as a cash impact (a build in working capital is negative), so it is
-    negated to line up with the balance-sheet delta. The two legitimately differ
-    — the cash flow version absorbs acquisitions and FX translation that a
-    balance-sheet difference does not — which is why both are shown.
-    """
-    if "cf_change_in_wc" not in values.columns:
-        return pd.Series(np.nan, index=values.index)
-    return -values["cf_change_in_wc"]
 
 
 # ---------------------------------------------------------------------------
@@ -650,19 +569,15 @@ FLOW_KEYS = (
     "gross_profit",
     "operating_expenses",
     "ebit",
+    "derived_ebit_reported",
     "interest_expense_gross",
-    "interest_expense_net",
     "pretax_income",
     "tax_expense",
     "net_income",
     "dna",
     "sbc",
-    "non_cash_items",
-    "cf_change_in_wc",
     "cfo",
     "capex_acquisition",
-    "capex_net_change",
-    "capex_disposals",
     "cfi",
     "cff",
     "fx_effect",
@@ -673,18 +588,15 @@ FLOW_KEYS = (
 STOCK_KEYS = (
     "cash",
     "short_term_investments",
-    "cash_aggregate",
     "total_current_assets",
     "total_current_liabilities",
     "short_term_debt",
-    "current_portion_ltd",
     "long_term_debt",
     "total_assets",
     "total_liabilities",
     "total_equity",
-    "total_liabilities_and_equity",
+    "derived_total_debt",
     "minority_interest",
-    "preferred_equity",
     "long_term_investments",
 )
 
@@ -699,10 +611,9 @@ def fiscal_year_end(
 ) -> date | None:
     """The next fiscal year end on or after ``reference``.
 
-    SimFin gives the fiscal year end as a *month* (``endFy``: 9 for Apple), so
-    the day comes from the most recent annual report date where we have one —
-    Apple's fiscal year ends on the Saturday nearest 30 September, not always on
-    the 30th.
+    The fiscal year end is carried as a *month* (9 for Apple), so the day comes
+    from the most recent annual report date where we have one — Apple's fiscal
+    year ends on the Saturday nearest 30 September, not always on the 30th.
     """
     if not fiscal_year_end_month:
         return None

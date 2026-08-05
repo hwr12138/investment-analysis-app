@@ -1,9 +1,10 @@
-"""Concept-to-column resolution against the live SimFin response.
+"""Concept-to-column resolution against the live Sharadar response.
 
-SimFin renames columns across versions and across statement templates, so no
-column name is hardcoded at a call site. Every line item the model needs is
-declared here as a :class:`Concept` with an ordered list of plausible column
-names, and resolved against the ``columns`` array that actually came back.
+Sharadar appends indicators over time and explicitly tells integrators not to
+assume a column order, so no column name is hardcoded at a call site. Every
+line item the model needs is declared here as a :class:`Concept` with an
+ordered list of plausible column names, and resolved against the columns that
+actually came back.
 
 Two failure modes are treated very differently:
 
@@ -14,10 +15,13 @@ Two failure modes are treated very differently:
   and displayed as such. It is never coerced to zero.
 
 When several aliases match, the first in the list wins and the alternates are
-recorded on the map so the validation panel can show them. That matters where
-the alternates disagree — AAPL reports both ``Interest Expense`` and
-``Interest Expense, net``, and which one feeds the FCFF interest add-back is a
-decision the user should see rather than one the resolver makes quietly.
+recorded on the map so the validation panel can show them.
+
+Note that resolution proves a *column* exists, not that it holds a value.
+Sharadar returns a fixed set of indicators for every company, so a firm that
+does not operate a classified balance sheet resolves ``Current Assets``
+successfully and then reports ``NaN`` in it — which is the honest answer and is
+handled downstream, not here.
 """
 
 from __future__ import annotations
@@ -52,7 +56,7 @@ class SchemaResolutionError(Exception):
         super().__init__(
             f"Could not resolve '{concept_label}' on the {statement} statement for "
             f"{ticker}"
-            + (f" (SimFin template: {template})" if template else "")
+            + (f" (classified as: {template})" if template else "")
             + f". Tried: {', '.join(aliases)}."
         )
 
@@ -66,116 +70,114 @@ class Concept:
     statement: str
     aliases: tuple[str, ...]
     required: bool = False
-    #: Concepts sharing a group satisfy the requirement collectively — capex
-    #: arrives as either a gross acquisition line or a net change line, and
-    #: exactly one of them being present is fine.
+    #: Concepts sharing a group satisfy the requirement collectively, for a
+    #: line item that can legitimately arrive under either of two forms.
+    #: Currently unused — Sharadar publishes exactly one column per concept.
     required_group: str | None = None
     note: str = ""
 
 
-# Alias lists are ordered by preference. The first name in each is one I
-# confirmed against a live AAPL/JPM response; the rest cover the other
-# statement templates and older column spellings.
+# Aliases are Sharadar's published indicator titles, confirmed against live
+# AAPL and JPM SF1 responses. Alternates cover spellings Sharadar has used
+# previously; the first name in each list is the current one.
 CONCEPTS: tuple[Concept, ...] = (
     # --- Income statement -------------------------------------------------
-    Concept("revenue", "Revenue", "PL",
-            ("Revenue", "Net Revenue", "Sales & Services Revenue", "Total Revenue"),
-            required=True),
-    Concept("cost_of_revenue", "Cost of Revenue", "PL",
-            ("Cost of revenue", "Cost of Revenue", "Cost of Goods & Services"),
-            note="SimFin spells this with a lowercase 'r'."),
+    Concept("revenue", "Revenue", "PL", ("Revenues", "Revenue"), required=True),
+    Concept("cost_of_revenue", "Cost of Revenue", "PL", ("Cost of Revenue",),
+            note="Sharadar reports this as a positive magnitude; the client "
+                 "negates it on ingest so costs stay negative."),
     Concept("gross_profit", "Gross Profit", "PL", ("Gross Profit",)),
-    Concept("operating_expenses", "Operating Expenses", "PL", ("Operating Expenses",)),
-    Concept("ebit", "Operating Income (EBIT)", "PL",
-            ("Operating Income (Loss)", "Operating Income"), required=True),
-    Concept("interest_expense_gross", "Interest Expense (gross)", "PL",
-            ("Interest Expense",), required_group="interest"),
-    Concept("interest_expense_net", "Interest Expense (net)", "PL",
-            ("Interest Expense, net", "Total Interest Expense"), required_group="interest"),
-    Concept("pretax_income", "Pretax Income", "PL",
-            ("Pretax Income (Loss)", "Pretax Income (Loss), Adjusted"), required=True),
-    Concept("tax_expense", "Income Tax Expense", "PL",
-            ("Income Tax (Expense) Benefit, net", "Income Tax (Expense) Benefit"),
+    Concept("operating_expenses", "Operating Expenses", "PL", ("Operating Expenses",),
+            note="Negated on ingest, like cost of revenue."),
+    Concept("ebit", "Operating Income (EBIT)", "PL", ("Operating Income",),
             required=True,
-            note="SimFin signs this as a benefit, so tax expense is its negation."),
-    Concept("net_income", "Net Income", "PL",
-            ("Net Income", "Net Income Available to Common Shareholders"), required=True),
+            note="Sharadar's `opinc` (gross profit less operating expenses), not "
+                 "its `ebit`, which adds back tax and interest to net income and "
+                 "so carries non-operating items. The latter is kept as a "
+                 "cross-check."),
+    Concept("interest_expense_gross", "Interest Expense", "PL", ("Interest Expense",),
+            required=True,
+            note="Negated on ingest. Sharadar reports 0 where a company does not "
+                 "disclose interest separately, which is not the same as nil."),
+    Concept("pretax_income", "Pretax Income", "PL", ("Earnings before Tax",),
+            required=True),
+    Concept("tax_expense", "Income Tax Expense", "PL", ("Income Tax Expense",),
+            required=True,
+            note="Negated on ingest, so a genuine tax benefit reads positive here "
+                 "and tax expense is its negation."),
+    Concept("net_income", "Net Income", "PL", ("Net Income",), required=True),
+    Concept("eps_basic", "Earnings Per Share, Basic", "PL",
+            ("Earnings per Basic Share",)),
+    Concept("eps_diluted", "Earnings Per Share, Diluted", "PL",
+            ("Earnings per Diluted Share",)),
+    Concept("derived_ebit_reported", "EBIT (Sharadar definition)", "PL",
+            ("Earning Before Interest & Taxes (EBIT)",),
+            note="Net income plus tax and interest. Differs from operating income "
+                 "by non-operating items; shown so the gap is visible."),
 
     # --- Balance sheet ----------------------------------------------------
-    Concept("cash", "Cash & Cash Equivalents", "BS", ("Cash & Cash Equivalents",),
+    Concept("cash", "Cash & Cash Equivalents", "BS", ("Cash and Equivalents",),
             required=True),
     Concept("short_term_investments", "Short-Term Investments", "BS",
-            ("Short Term Investments",)),
-    Concept("cash_aggregate", "Cash & Short-Term Investments (aggregate)", "BS",
-            ("Cash, Cash Equivalents & Short Term Investments",),
-            note="Cross-checked against the sum of its components."),
-    Concept("total_current_assets", "Total Current Assets", "BS",
-            ("Total Current Assets",), required=True),
+            ("Investments Current",)),
+    Concept("total_current_assets", "Total Current Assets", "BS", ("Current Assets",),
+            required=True,
+            note="Not reported by roughly a fifth of companies — mostly financial "
+                 "firms — which do not operate a classified balance sheet."),
     Concept("total_current_liabilities", "Total Current Liabilities", "BS",
-            ("Total Current Liabilities",), required=True),
-    Concept("short_term_debt", "Short-Term Debt", "BS",
-            ("Short Term Debt", "Short Term Borrowings")),
-    Concept("current_portion_ltd", "Current Portion of Long-Term Debt", "BS",
-            ("Current Portion of Long Term Debt",)),
-    Concept("long_term_debt", "Long-Term Debt", "BS",
-            ("Long Term Debt", "Long Term Borrowings")),
+            ("Current Liabilities",), required=True),
+    Concept("short_term_debt", "Short-Term Debt", "BS", ("Debt Current",),
+            note="Sharadar combines short-term borrowings and the current portion "
+                 "of long-term debt into one line."),
+    Concept("long_term_debt", "Long-Term Debt", "BS", ("Debt Non-Current",)),
     Concept("total_assets", "Total Assets", "BS", ("Total Assets",), required=True),
     Concept("total_liabilities", "Total Liabilities", "BS", ("Total Liabilities",),
             required=True),
-    Concept("total_equity", "Total Equity", "BS", ("Total Equity",), required=True),
-    Concept("total_liabilities_and_equity", "Total Liabilities & Equity", "BS",
-            ("Total Liabilities & Equity",)),
-    Concept("minority_interest", "Minority Interest", "BS", ("Minority Interest",)),
-    Concept("preferred_equity", "Preferred Equity", "BS", ("Preferred Equity",)),
+    Concept("total_equity", "Total Equity", "BS",
+            ("Shareholders Equity Attributable to Parent",), required=True),
+    Concept("minority_interest", "Minority Interest", "BS",
+            ("Minority Interest (derived)",),
+            note="Sharadar has no balance-sheet line for this, but its equity "
+                 "figure is attributable to the parent, so the client derives it "
+                 "as assets less liabilities less equity."),
     Concept("long_term_investments", "Long-Term Investments", "BS",
-            ("Long Term Investments", "Long Term Marketable Securities"),
+            ("Investments Non-Current",),
             note="Non-operating asset; only enters the bridge if the user opts in."),
+    Concept("derived_total_debt", "Total Debt (Sharadar aggregate)", "BS",
+            ("Total Debt",),
+            note="Cross-checked against the sum of the current and non-current "
+                 "components."),
 
     # --- Cash flow --------------------------------------------------------
-    Concept("cf_net_income", "Net Income (cash flow statement)", "CF",
-            ("Net Income", "Net Income/Starting Line")),
     Concept("dna", "Depreciation & Amortisation", "CF",
-            ("Depreciation & Amortization",), required=True),
-    Concept("sbc", "Stock-Based Compensation", "CF", ("Stock-Based Compensation",),
-            note="Frequently unpopulated by SimFin even for companies that report it."),
-    Concept("non_cash_items", "Non-Cash Items", "CF", ("Non-Cash Items",),
-            note="A superset of SBC; never an SBC figure on its own."),
-    Concept("cf_change_in_wc", "Change in Working Capital (cash flow statement)", "CF",
-            ("Change in Working Capital",)),
+            ("Depreciation Amortization & Accretion",), required=True),
+    Concept("sbc", "Stock-Based Compensation", "CF", ("Share Based Compensation",)),
     Concept("cfo", "Net Cash from Operating Activities", "CF",
-            ("Cash from Operating Activities",), required=True),
-    Concept("capex_acquisition", "Acquisition of Fixed Assets & Intangibles", "CF",
-            ("Acquisition of Fixed Assets & Intangibles", "Purchase of Fixed Assets",
-             "Capital Expenditures"),
-            required_group="capex"),
-    Concept("capex_net_change", "Change in Fixed Assets & Intangibles", "CF",
-            ("Change in Fixed Assets & Intangibles", "Change in Fixed Assets and Intangibles"),
-            required_group="capex",
-            note="Net of disposals — an approximation for capex, and labelled as one."),
-    Concept("capex_disposals", "Disposition of Fixed Assets & Intangibles", "CF",
-            ("Disposition of Fixed Assets & Intangibles",)),
+            ("Net Cash Flow from Operations",), required=True),
+    Concept("capex_acquisition", "Capital Expenditure", "CF",
+            ("Capital Expenditure",), required=True,
+            note="Already signed negative for cash spent, and already net of "
+                 "disposals, so there is no gross/net choice to make."),
     Concept("cfi", "Net Cash from Investing Activities", "CF",
-            ("Cash from Investing Activities",), required=True),
+            ("Net Cash Flow from Investing",), required=True),
     Concept("cff", "Net Cash from Financing Activities", "CF",
-            ("Cash from Financing Activities",), required=True),
+            ("Net Cash Flow from Financing",), required=True),
     Concept("fx_effect", "Effect of Foreign Exchange Rates", "CF",
-            ("Effect of Foreign Exchange Rates",)),
+            ("Effect of Exchange Rate Changes on Cash",)),
     Concept("net_change_in_cash", "Net Change in Cash", "CF",
-            ("Net Changes in Cash", "Net Change in Cash"), required=True),
+            ("Net Cash Flow / Change in Cash & Cash Equivalents",), required=True),
 
     # --- Derived (cross-checks only, never a primary source) --------------
-    Concept("ebitda", "EBITDA", "DERIVED", ("EBITDA",)),
-    Concept("eps_basic", "Earnings Per Share, Basic", "DERIVED",
-            ("Earnings Per Share, Basic",)),
-    Concept("eps_diluted", "Earnings Per Share, Diluted", "DERIVED",
-            ("Earnings Per Share, Diluted",)),
-    Concept("derived_total_debt", "Total Debt (SimFin derived)", "DERIVED", ("Total Debt",)),
-    Concept("derived_fcf", "Free Cash Flow (SimFin derived)", "DERIVED",
+    Concept("ebitda", "EBITDA", "DERIVED",
+            ("Earnings Before Interest Taxes & Depreciation Amortization (EBITDA)",)),
+    Concept("derived_fcf", "Free Cash Flow (Sharadar derived)", "DERIVED",
             ("Free Cash Flow",),
-            note="Observed to exceed operating cash flow for companies with positive "
-                 "capex. Reference only — never feeds the model."),
-    Concept("derived_operating_margin", "Operating Margin (SimFin derived)", "DERIVED",
-            ("Operating Margin",)),
+            note="Operating cash flow less capex, on Sharadar's own definition. "
+                 "Reference only — never feeds the model."),
+    Concept("derived_working_capital", "Working Capital (Sharadar derived)", "DERIVED",
+            ("Working Capital",),
+            note="Current assets less current liabilities, before the cash and "
+                 "debt exclusions the model applies."),
 )
 
 CONCEPTS_BY_KEY: dict[str, Concept] = {c.key: c for c in CONCEPTS}

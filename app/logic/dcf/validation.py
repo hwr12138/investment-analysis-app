@@ -59,19 +59,17 @@ class Tolerances:
     ttm_vs_manual: float = 0.005
     #: Revenue + cost of revenue + operating expenses vs reported EBIT.
     ebit_reconciliation: float = 0.001
-    #: Cash & STI aggregate vs the sum of its components.
-    cash_aggregate: float = 0.001
+    #: Reported total debt vs the sum of its current and non-current parts.
+    total_debt: float = 0.001
     #: Agreement between independent reads on the *same* share-count concept.
     share_count: float = 0.01
     #: Gap between the point-in-time and weighted-average bases, which measure
     #: different things and legitimately differ at any company buying back stock.
     share_basis_gap: float = 0.10
-    #: Model-implied market cap vs SimFin's reported market cap.
+    #: Model-implied market cap vs Sharadar's reported market cap.
     market_cap: float = 0.02
     #: FCFF method A vs method B.
     fcff_methods: float = 0.05
-    #: Balance-sheet ΔNWC vs the cash flow statement's own figure.
-    nwc_gap: float = 0.25
 
     #: Calendar days before a price is treated as stale.
     price_staleness_days: int = 5
@@ -103,11 +101,10 @@ class Tolerances:
             ("Quarters sum to fiscal year", f"{self.quarters_vs_fy:.3%}"),
             ("API TTM vs manual TTM", f"{self.ttm_vs_manual:.3%}"),
             ("EBIT reconciliation", f"{self.ebit_reconciliation:.3%}"),
-            ("Cash aggregate vs components", f"{self.cash_aggregate:.3%}"),
+            ("Total debt vs components", f"{self.total_debt:.3%}"),
             ("Share count agreement", f"{self.share_count:.2%}"),
             ("Market cap agreement", f"{self.market_cap:.2%}"),
             ("FCFF method A vs B", f"{self.fcff_methods:.2%}"),
-            ("Balance-sheet vs cash-flow ΔNWC", f"{self.nwc_gap:.2%}"),
             ("Price staleness", f"{self.price_staleness_days} days"),
             ("Share count staleness", f"{self.share_staleness_days} days"),
             ("Minimum history", f"{self.min_history_years} fiscal years"),
@@ -197,7 +194,7 @@ class UnsupportedSectorError(Exception):
         self.template = template
         super().__init__(
             f"{ticker} is a financial-sector company (sector: {sector or 'unknown'}, "
-            f"SimFin statement template: {template}). Banks and insurers do not have "
+            f"classified as: {template or 'unknown'}). Banks and insurers do not have "
             "the operating/financing split an unlevered FCFF model depends on — "
             "interest is revenue, not a financing cost, and capital structure is "
             "regulated rather than chosen. A DCF built this way would produce a "
@@ -297,7 +294,10 @@ class ValidationContext:
     long_term_debt: float | None = None
 
     balance_sheet_delta_nwc: float | None = None
-    cash_flow_delta_nwc: float | None = None
+
+    #: ``(concept label, resolved column)`` for base-period items reported as
+    #: exactly zero, which Sharadar also uses to mean "absent from the filing".
+    zero_filled: tuple[tuple[str, str], ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -308,7 +308,14 @@ class ValidationContext:
 def check_balance_sheet_balances(
     ctx: ValidationContext, tol: Tolerances
 ) -> tuple[list[Issue], CheckResult]:
-    """Total Assets = Total Liabilities + Total Equity, every period."""
+    """Total Assets = Total Liabilities + Total Equity + Minority Interest.
+
+    Sharadar's equity figure is attributable to the parent, so non-controlling
+    interests sit outside it and have to be added back for the identity to
+    hold. Because the client derives minority interest as exactly this residual,
+    the check can only fail when one of the three totals is itself wrong — which
+    is what it is for.
+    """
     name = "Balance sheet balances"
     frame = ctx.annual
     required = {"total_assets", "total_liabilities", "total_equity"}
@@ -325,21 +332,24 @@ def check_balance_sheet_balances(
         )
         if not all(_finite(v) for v in (assets, liabilities, equity)):
             continue
+        nci = row.get("minority_interest")
+        claims = float(liabilities) + float(equity) + (float(nci) if _finite(nci) else 0.0)
         checked += 1
-        if relative_gap(assets, liabilities + equity) > tol.balance_sheet:
+        if relative_gap(assets, claims) > tol.balance_sheet:
             issues.append(
                 ReconciliationIssue(
                     key=f"balance_sheet:{label}",
                     severity=Severity.CRITICAL,
                     check=name,
-                    concept="Total Assets = Total Liabilities + Total Equity",
+                    concept="Total Assets = Total Liabilities + Total Equity + Minority Interest",
                     company=ctx.ticker,
                     period=_fy(label),
                     message="The balance sheet does not balance for this period.",
                     values={
                         "Total assets": _money(assets),
-                        "Liabilities + equity": _money(liabilities + equity),
-                        "Difference": _money(assets - liabilities - equity),
+                        "Liabilities + equity + NCI": _money(claims),
+                        "Minority interest": _money(nci),
+                        "Difference": _money(float(assets) - claims),
                     },
                     tolerance=f"{tol.balance_sheet:.3%} of total assets",
                 )
@@ -515,7 +525,8 @@ def check_ebit_reconciles(
 ) -> tuple[list[Issue], CheckResult]:
     """Revenue + cost of revenue + operating expenses = reported operating income.
 
-    SimFin signs costs negative, so the identity is additive.
+    Costs arrive negative — Sharadar publishes them positive and the client
+    negates them — so the identity is additive.
     """
     name = "Computed EBIT reconciles to reported operating income"
     frame = ctx.annual
@@ -557,46 +568,50 @@ def check_ebit_reconciles(
     return issues, _result(name, issues, f"{checked} periods checked", Severity.CRITICAL)
 
 
-def check_cash_aggregate(
+def check_total_debt_reconciles(
     ctx: ValidationContext, tol: Tolerances
 ) -> tuple[list[Issue], CheckResult]:
-    """The combined cash-and-short-term-investments line equals its parts.
+    """The reported total debt line equals current plus non-current debt.
 
-    SimFin's issue tracker documents real cases where it does not.
+    The equity bridge deducts debt built from the two maturity components, so a
+    disagreement with the publisher's own aggregate changes the valuation
+    directly.
     """
-    name = "Cash aggregate equals sum of components"
+    name = "Total debt equals sum of components"
     frame = ctx.annual
-    if frame.empty or "cash_aggregate" not in frame.columns or "cash" not in frame.columns:
-        return [], CheckResult(name, "not evaluated", "No aggregate cash line reported.")
+    if frame.empty or "derived_total_debt" not in frame.columns:
+        return [], CheckResult(name, "not evaluated", "No aggregate debt line reported.")
 
     issues: list[Issue] = []
     checked = 0
     for label, row in frame.iterrows():
-        aggregate = row.get("cash_aggregate")
-        cash = row.get("cash")
-        sti = row.get("short_term_investments")
-        if not (_finite(aggregate) and _finite(cash)):
+        aggregate = row.get("derived_total_debt")
+        current = row.get("short_term_debt")
+        non_current = row.get("long_term_debt")
+        if not _finite(aggregate) or not (_finite(current) or _finite(non_current)):
             continue
-        components = float(cash) + (float(sti) if _finite(sti) else 0.0)
+        components = (float(current) if _finite(current) else 0.0) + (
+            float(non_current) if _finite(non_current) else 0.0
+        )
         checked += 1
-        if relative_gap(float(aggregate), components) > tol.cash_aggregate:
+        if relative_gap(float(aggregate), components) > tol.total_debt:
             issues.append(
                 ReconciliationIssue(
-                    key=f"cash_aggregate:{label}",
+                    key=f"total_debt:{label}",
                     severity=Severity.CRITICAL,
                     check=name,
-                    concept="Cash & STI aggregate = cash + short-term investments",
+                    concept="Total Debt = Debt Current + Debt Non-Current",
                     company=ctx.ticker,
                     period=_fy(label),
-                    message="The aggregate cash line does not equal the sum of its parts.",
+                    message="The total debt line does not equal the sum of its parts.",
                     values={
-                        "Reported aggregate": _money(aggregate),
-                        "Cash + short-term investments": _money(components),
-                        "Cash": _money(cash),
-                        "Short-term investments": _money(sti),
+                        "Reported total debt": _money(aggregate),
+                        "Current + non-current": _money(components),
+                        "Current debt": _money(current),
+                        "Non-current debt": _money(non_current),
                         "Difference": _money(float(aggregate) - components),
                     },
-                    tolerance=f"{tol.cash_aggregate:.3%}",
+                    tolerance=f"{tol.total_debt:.3%}",
                 )
             )
     if not checked:
@@ -651,10 +666,10 @@ def check_share_counts_agree(
 ) -> tuple[list[Issue], CheckResult]:
     """The three independent reads on *point-in-time* shares outstanding.
 
-    SimFin's prices endpoint has historically returned share counts off by
-    orders of magnitude, so the dedicated shares endpoint, the prices endpoint,
+    The filed cover-page count, the count backed out of the daily market cap,
     and the count implied by dividing reported market cap by price are all
-    compared.
+    compared. They measure the same thing by different routes, so a material
+    disagreement means one of the routes is wrong.
 
     Only like is compared with like. A point-in-time count and a weighted-average
     count *should* differ at any company buying back stock, so they are compared
@@ -757,7 +772,7 @@ def check_price_is_current(
 ) -> tuple[list[Issue], CheckResult]:
     """The price series reaches up to the valuation date.
 
-    A ticker change has terminated SimFin price series while fundamentals kept
+    A ticker change can terminate a price series while fundamentals keep
     updating. Valuing off a months-old price silently would be a serious
     failure.
     """
@@ -777,7 +792,7 @@ def check_price_is_current(
                 period=ctx.price_date.isoformat(),
                 message=(
                     "The most recent price is older than the staleness threshold. A "
-                    "ticker change can terminate a SimFin price series while the "
+                    "ticker change can terminate a price series while the "
                     "fundamentals keep updating."
                 ),
                 values={
@@ -796,7 +811,7 @@ def check_price_is_current(
 def check_market_cap_agrees(
     ctx: ValidationContext, tol: Tolerances
 ) -> tuple[list[Issue], CheckResult]:
-    """Price × shares against the market cap SimFin reports."""
+    """Price × shares against the market cap Sharadar reports."""
     name = "Model-implied market cap matches reported"
     if not (
         _finite(ctx.last_price)
@@ -1147,7 +1162,7 @@ def check_sbc_share(
     name = "Stock-based compensation share of revenue"
     if not (_finite(ctx.sbc) and _finite(ctx.latest_revenue)) or not ctx.latest_revenue:
         return [], CheckResult(
-            name, "not evaluated", "SimFin reports no stock-based compensation figure."
+            name, "not evaluated", "Sharadar reports no stock-based compensation figure."
         )
     share = float(ctx.sbc) / float(ctx.latest_revenue)
     if share > tol.sbc_share_of_revenue:
@@ -1175,43 +1190,44 @@ def check_sbc_share(
     return [], CheckResult(name, "pass", f"{share:.2%}")
 
 
-def check_nwc_sources_agree(
+def check_zero_filled_indicators(
     ctx: ValidationContext, tol: Tolerances
 ) -> tuple[list[Issue], CheckResult]:
-    """Balance-sheet ΔNWC against the cash flow statement's own figure.
+    """Base-period line items reported as exactly zero.
 
-    These legitimately differ — the cash flow version absorbs acquisitions and
-    FX translation that a balance-sheet difference does not — so a gap is a
-    warning, not an error.
+    Sharadar writes 0, not null, where a line item is absent from the filing, so
+    "the company reported nothing here" and "the company reported nil" are the
+    same value in the data. Neither this check nor anything upstream can tell
+    them apart, so rather than substitute a guess the affected items are named
+    and the user decides.
+
+    This is a warning, not an error: a debt-free company genuinely does report
+    zero interest expense, and most of these zeros are real.
     """
-    name = "Working capital movement agrees across statements"
-    if not (_finite(ctx.balance_sheet_delta_nwc) and _finite(ctx.cash_flow_delta_nwc)):
-        return [], CheckResult(name, "not evaluated", "One of the two figures is unavailable.")
+    name = "Zero-valued items may be undisclosed rather than nil"
+    if not ctx.zero_filled:
+        return [], CheckResult(name, "pass", "No base-period item is exactly zero.")
 
-    gap = relative_gap(float(ctx.balance_sheet_delta_nwc), float(ctx.cash_flow_delta_nwc))
-    if gap > tol.nwc_gap:
-        return [
-            ReconciliationIssue(
-                key="nwc_gap",
-                severity=Severity.WARNING,
-                check=name,
-                concept="Change in net working capital",
-                company=ctx.ticker,
-                period="Latest year",
-                message=(
-                    "The balance-sheet movement and the cash flow statement's own "
-                    "working capital line disagree. Acquisitions and FX translation "
-                    "explain part of this legitimately; a large gap is worth a look."
-                ),
-                values={
-                    "From the balance sheet": _money(ctx.balance_sheet_delta_nwc),
-                    "From the cash flow statement": _money(ctx.cash_flow_delta_nwc),
-                    "Divergence": f"{gap:.1%}",
-                },
-                tolerance=f"{tol.nwc_gap:.0%}",
-            )
-        ], CheckResult(name, "fail", f"{gap:.1%} apart", Severity.WARNING)
-    return [], CheckResult(name, "pass", f"{gap:.1%} apart")
+    labels = [label for label, _ in ctx.zero_filled]
+    return [
+        ReconciliationIssue(
+            key="zero_filled",
+            severity=Severity.WARNING,
+            check=name,
+            concept="Zero versus not reported",
+            company=ctx.ticker,
+            period="Base period",
+            message=(
+                "Sharadar reports these base-period items as 0. That is also how it "
+                "records a line item the filing does not contain, so check the "
+                "filing before reading any of them as a genuine nil."
+            ),
+            values={label: f"0 (column: {column})" for label, column in ctx.zero_filled},
+            tolerance="exact zero",
+        )
+    ], CheckResult(
+        name, "fail", f"{len(labels)} item(s): {', '.join(labels)}", Severity.WARNING
+    )
 
 
 def check_share_count_currency_of_date(
@@ -1307,7 +1323,7 @@ ALL_CHECKS = (
     check_quarters_sum_to_year,
     check_api_ttm_matches_manual,
     check_ebit_reconciles,
-    check_cash_aggregate,
+    check_total_debt_reconciles,
     check_share_counts_agree,
     check_weighted_share_counts_agree,
     check_share_basis_difference,
@@ -1323,7 +1339,7 @@ ALL_CHECKS = (
     check_terminal_value_share,
     check_terminal_growth_reasonable,
     check_sbc_share,
-    check_nwc_sources_agree,
+    check_zero_filled_indicators,
     check_share_count_currency_of_date,
     check_book_debt_proxy,
 )

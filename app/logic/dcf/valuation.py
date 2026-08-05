@@ -39,7 +39,7 @@ def fcff_from_cash_flow(
     The interest add-back assumes interest paid sits in operating cash flow.
     That holds under US GAAP; an IFRS filer may classify it in financing, in
     which case adding it back double-counts. Note also that interest *expense*
-    is an accrual and interest *paid* is cash — SimFin exposes only the former,
+    is an accrual and interest *paid* is cash — Sharadar exposes only the former,
     so that is what this uses and what the UI says it used.
     """
     _require_finite(cfo=cfo, interest_expense=interest_expense, tax_rate=tax_rate, capex=capex)
@@ -479,7 +479,7 @@ def build_equity_bridge(
         Equity = EV − debt − minority interest − preferred equity
                     + cash + short-term investments + non-operating assets
 
-    A component SimFin did not report enters as zero *with its own visible row*
+    A component Sharadar did not report enters as zero *with its own visible row*
     saying so, rather than being folded silently into the total — the user can
     see that Apple reports no minority interest and judge whether that is right.
 
@@ -510,7 +510,7 @@ def build_equity_bridge(
                 label,
                 -amount,
                 reported,
-                note if reported else "Not reported by SimFin — treated as nil",
+                note if reported else "Not reported by Sharadar — treated as nil",
             )
         )
         return amount
@@ -523,7 +523,7 @@ def build_equity_bridge(
                 label,
                 amount,
                 reported,
-                note if reported else "Not reported by SimFin — treated as nil",
+                note if reported else "Not reported by Sharadar — treated as nil",
             )
         )
         return amount

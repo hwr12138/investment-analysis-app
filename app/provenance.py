@@ -20,7 +20,7 @@ from enum import Enum
 class Origin(str, Enum):
     """Where a number came from. Drives the badge rendered beside it."""
 
-    REPORTED = "reported"      # read straight off a SimFin statement line
+    REPORTED = "reported"      # read straight off a reported statement line
     DERIVED = "derived"        # arithmetic over reported figures, formula shown
     ESTIMATE = "estimate"      # an approximation; opt-in and always labelled
     USER = "user"              # typed or overridden by the user

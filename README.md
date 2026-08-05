@@ -8,11 +8,11 @@ An interactive Streamlit web application designed for financial engineering, tec
 
 The application is organized into five analytical modules:
 
-* **DCF Valuation:** An unlevered free-cash-flow-to-the-firm model producing an intrinsic value per share for a US-listed equity, built on the SimFin v3 API. Resolves every financial concept against the columns the API actually returns rather than hardcoding names, builds FCFF two independent ways and reconciles them, regresses beta against the S&P 500 with its R², and computes both Gordon growth and exit multiple terminal values side by side with each method's implied version of the other. Every displayed number carries a provenance badge (reported / derived / estimated / user) and, where computed, its formula. Twenty-two validation checks run on load and surface as a persistent red (critical) or amber (warning) banner with per-check acknowledgement; banks and insurers are rejected outright rather than valued with a model that does not fit them. The full model exports to a multi-sheet workbook that reproduces value per share outside the app.
+* **DCF Valuation:** An unlevered free-cash-flow-to-the-firm model producing an intrinsic value per share for a US-listed equity, built on Sharadar Core US Fundamentals via the Nasdaq Data Link Tables API. Resolves every financial concept against the columns the API actually returns rather than hardcoding names, builds FCFF two independent ways and reconciles them, regresses beta against SPY with its R², and computes both Gordon growth and exit multiple terminal values side by side with each method's implied version of the other. Every displayed number carries a provenance badge (reported / derived / estimated / user) and, where computed, its formula. Twenty-four validation checks run on load and surface as a persistent red (critical) or amber (warning) banner with per-check acknowledgement; banks and insurers are rejected outright rather than valued with a model that does not fit them. The full model exports to a multi-sheet workbook that reproduces value per share outside the app.
 * **Portfolio Optimization:** Allocates capital across multiple assets from historical data using four methodologies: Maximum Traditional Sharpe, Maximum Geometric Sharpe, Volatility Targeting, and the Fractional Kelly Criterion. Outputs include expected CAGR, volatility metrics, and visualized yearly returns.
 * **Portfolio Statistics:** Computes comprehensive risk and return metrics (Mean Annual Return, CAGR, Standard Deviation, Alpha, Beta, Sharpe, Geometric Sharpe, Sortino, and Treynor) for a custom-weighted portfolio across trailing 1/3/5/10-year and custom periods, alongside correlation and annualized covariance matrices.
 * **Black-Scholes Model:** Calculates Call and Put option prices alongside their respective Greeks (Delta, Gamma, Theta, Vega, Rho). Features interactive heatmaps to visualize pricing and PnL across varying spot prices and volatilities.
-* **Momentum Analysis:** Fetches live market data to compute MACD and RSI indicators. It includes live indicator scanners (crossovers, trend detection, failure swings) and an interactive Plotly candlestick chart for manual divergence analysis.
+* **Momentum Analysis:** Fetches end-of-day price history to compute MACD and RSI indicators. It includes live indicator scanners (crossovers, trend detection, failure swings) and an interactive Plotly candlestick chart for manual divergence analysis.
 
 ## Project structure
 
@@ -23,7 +23,7 @@ investment-analysis-app/
 │   ├── views/             # Streamlit UI for each page (render_page functions)
 │   ├── logic/             # Pure calculations, one module per feature
 │   │   └── dcf/           # The DCF engine (see below)
-│   ├── data/              # Shared data access (yfinance, FMP, ERP, SimFin)
+│   ├── data/              # Shared data access (Sharadar, FMP Treasury rates, ERP)
 │   ├── provenance.py      # Origin/Sourced types shared by the data and logic layers
 │   └── charts.py          # Reusable Plotly chart helpers
 ├── assets/style.css       # Custom CSS
@@ -51,7 +51,7 @@ need to be testable on their own:
 
 | Module | Responsibility |
 |---|---|
-| `app/data/simfin_client.py` | SimFin v3 auth, retry, caching, columnar parsing |
+| `app/data/sharadar_client.py` | Nasdaq Data Link auth, retry, pagination, caching, datatable parsing |
 | `app/logic/dcf/schema.py` | Concept alias table and runtime column resolution |
 | `app/logic/dcf/financials.py` | Statement normalisation, TTM, ratio derivation |
 | `app/logic/dcf/wacc.py` | Beta regression and discount rate — **pure** |
@@ -66,10 +66,11 @@ lives in one `Tolerances` dataclass in `validation.py`.
 
 ### API keys
 
-`FMP_API_KEY` (Treasury rates) and `SIMFIN_API_KEY` (fundamentals) are read from
-`.streamlit/secrets.toml`, which is gitignored. The SimFin key is sent as a
-header with a literal `api-key ` prefix — not a bearer token — and never appears
-in a URL, a log line, an error message, or an export.
+`FMP_API_KEY` (Treasury rates) and `SHARADAR_API_KEY` (fundamentals and prices)
+are read from `.streamlit/secrets.toml`, which is gitignored. Nasdaq Data Link
+only accepts its key as a query parameter, so no exception raised by the client
+carries the request params or URL — the key never appears in a log line, an
+error message, or an export.
 
 ## Running the tests
 
@@ -78,7 +79,7 @@ $ pip install -r requirements-dev.txt
 $ python -m pytest tests/ -v
 ```
 
-No test touches the network; the SimFin fixtures are recorded responses.
+No test touches the network; the fixtures mirror real Sharadar datatable responses.
 
 ## How to run it on your own machine
 

@@ -4,7 +4,6 @@ scipy
 numpy
 matplotlib
 seaborn
-yfinance
 plotly
 requests
 openpyxl

@@ -1,8 +1,8 @@
-"""Shared market-data access layer.
+"""Rates and the equity risk premium.
 
-Centralizes every external API call (Yahoo Finance, Financial Modeling Prep,
-and the ERP scrape) so that caching and API keys live in one place and fetchers
-can be reused across pages. SimFin lives in its sibling ``simfin_client``.
+The two market inputs that do not come from a securities feed: Treasury yields
+from Financial Modeling Prep, and the implied equity risk premium scraped from
+Damodaran. Prices and fundamentals live in the sibling ``sharadar_client``.
 
 Two of the fetchers here return :class:`~app.provenance.Sourced` rather than a
 bare float: a scrape or a third-party rate can fail, and the DCF page must be
@@ -14,10 +14,8 @@ float substitutes a hardcoded default on failure and says so in its docstring.
 import re
 from datetime import date, datetime
 
-import pandas as pd
 import requests
 import streamlit as st
-import yfinance as yf
 
 from app.provenance import Sourced
 
@@ -26,30 +24,6 @@ from app.provenance import Sourced
 ERP_PLAUSIBLE_BAND = (0.02, 0.10)
 
 DAMODARAN_URL = "https://pages.stern.nyu.edu/~adamodar/New_Home_Page/home.htm"
-
-# --- Price History ---
-
-
-@st.cache_data(show_spinner=False, ttl=3600)
-def fetch_historical_data(tickers: list, start_date: str, end_date: str) -> pd.DataFrame:
-    """
-    Fetches historical adjusted close prices for a list of tickers.
-    Cached to prevent redundant API calls when UI parameters change.
-    """
-    if not tickers:
-        return pd.DataFrame()
-
-    df = yf.download(tickers, start=start_date, end=end_date, auto_adjust=False, progress=False)
-
-    if df.empty:
-        return pd.DataFrame()
-
-    # Handle multi-index columns vs single ticker series
-    data = df['Adj Close']
-    if isinstance(data, pd.Series):
-        data = data.to_frame(name=tickers[0])
-
-    return data.dropna(how='all')
 
 
 # --- Treasury Rates (Financial Modeling Prep) ---
@@ -224,19 +198,3 @@ def fetch_erp() -> Sourced:
         source="Damodaran — Implied Equity Risk Premium (S&P 500)",
         as_of=as_of,
     )
-
-
-# --- Index prices (for beta regression) ---
-
-
-def fetch_index_prices(index_ticker: str, start_date: str, end_date: str) -> pd.Series:
-    """Adjusted closes for a market index, as a Series.
-
-    A thin named wrapper over :func:`fetch_historical_data` so the beta
-    regression has an obvious entry point without a second yfinance fetcher.
-    """
-    frame = fetch_historical_data([index_ticker], start_date, end_date)
-    if frame.empty:
-        return pd.Series(dtype="float64", name=index_ticker)
-    series = frame[index_ticker] if index_ticker in frame.columns else frame.iloc[:, 0]
-    return series.dropna().rename(index_ticker)

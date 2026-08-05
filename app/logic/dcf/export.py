@@ -95,7 +95,7 @@ def bridge_frame(result: ModelResult) -> pd.DataFrame:
                     "Line": line.label,
                     "Amount": line.amount,
                     "Kind": line.kind,
-                    "Reported by SimFin": "yes" if line.reported else "no",
+                    "Reported by Sharadar": "yes" if line.reported else "no",
                     "Note": line.note,
                 }
             )
@@ -105,7 +105,7 @@ def bridge_frame(result: ModelResult) -> pd.DataFrame:
                 "Line": f"Shares ({bridge.share_basis})",
                 "Amount": bridge.shares,
                 "Kind": "divisor",
-                "Reported by SimFin": "yes",
+                "Reported by Sharadar": "yes",
                 "Note": "Equity value ÷ shares = value per share",
             }
         )
@@ -115,7 +115,7 @@ def bridge_frame(result: ModelResult) -> pd.DataFrame:
                 "Line": "Value per share",
                 "Amount": bridge.value_per_share,
                 "Kind": "result",
-                "Reported by SimFin": "no",
+                "Reported by Sharadar": "no",
                 "Note": "Derived",
             }
         )
@@ -161,8 +161,8 @@ def summary_frame(
         ("Ticker", dataset.ticker),
         ("Company", dataset.name),
         ("Reporting currency", dataset.currency),
-        ("SimFin statement template", dataset.template),
-        ("Sector (SimFin)", dataset.sector_name or "not reported"),
+        ("Sector classification", dataset.template),
+        ("Sector (Sharadar)", dataset.sector_name or "not reported"),
         ("Valuation date", valuation_date.isoformat()),
         ("Exported at", datetime.now().isoformat(timespec="seconds")),
         ("Statement basis", "as-reported" if dataset.asreported else "restated (default)"),

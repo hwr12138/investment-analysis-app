@@ -44,7 +44,6 @@ def _annual(years: int = BASELINE_YEARS, **overrides) -> pd.DataFrame:
         "net_income": _s(192.0),
         "cash": _s(100.0),
         "short_term_investments": _s(50.0),
-        "cash_aggregate": _s(150.0),
         "total_current_assets": _s(400.0),
         "total_current_liabilities": _s(300.0),
         "short_term_debt": _s(40.0),
@@ -58,8 +57,9 @@ def _annual(years: int = BASELINE_YEARS, **overrides) -> pd.DataFrame:
         "fx_effect": _s(0.0),
         "net_change_in_cash": _s(20.0),
         "dna": _s(60.0),
-        "capex_net_change": _s(-80.0),
-        "cf_change_in_wc": _s(-10.0),
+        "capex_acquisition": _s(-80.0),
+        "derived_total_debt": _s(240.0),
+        "minority_interest": _s(0.0),
     }
     for key, value in overrides.items():
         base[key] = value if isinstance(value, list) else _s(value)
@@ -101,7 +101,6 @@ def _context(**overrides) -> val.ValidationContext:
         latest_revenue=1200.0,
         debt_weight=0.05,
         balance_sheet_delta_nwc=10.0,
-        cash_flow_delta_nwc=10.5,
     )
     defaults.update(overrides)
     return val.ValidationContext(**defaults)
@@ -136,7 +135,7 @@ def test_balance_sheet_imbalance_is_critical():
     assert issues[0].period == "FY2025"
     assert issues[0].issue_type == "ReconciliationIssue"
     assert "Total assets" in issues[0].values
-    assert "Liabilities + equity" in issues[0].values
+    assert "Liabilities + equity + NCI" in issues[0].values
     assert result.status == "fail"
 
 
@@ -208,12 +207,24 @@ def test_ebit_that_does_not_reconcile_is_critical():
     assert issues[0].severity is val.Severity.CRITICAL
 
 
-def test_cash_aggregate_mismatch_is_critical():
-    context = _context(annual=_annual(cash_aggregate=_poison("cash_aggregate", 99999.0)))
-    issues, _ = val.check_cash_aggregate(context, TOL)
+def test_non_controlling_interest_is_included_in_the_balancing_identity():
+    """Sharadar's equity is parent-only, so NCI has to be added back."""
+    annual = _annual()
+    annual["total_equity"] = annual["total_equity"] - 25.0
+    annual["minority_interest"] = 25.0
+    issues, result = val.check_balance_sheet_balances(_context(annual=annual), TOL)
+    assert issues == []
+    assert result.status == "pass"
+
+
+def test_total_debt_mismatch_is_critical():
+    context = _context(
+        annual=_annual(derived_total_debt=_poison("derived_total_debt", 99999.0))
+    )
+    issues, _ = val.check_total_debt_reconciles(context, TOL)
     assert len(issues) == 1
     assert issues[0].severity is val.Severity.CRITICAL
-    assert issues[0].values["Cash"] == "210"
+    assert issues[0].values["Current debt"] == "84"
 
 
 def test_share_count_scaling_error_is_critical():
@@ -387,12 +398,21 @@ def test_absent_sbc_is_not_evaluated_rather_than_passed():
     assert "no stock-based compensation" in result.detail
 
 
-def test_nwc_source_gap_is_a_warning():
-    issues, _ = val.check_nwc_sources_agree(
-        _context(balance_sheet_delta_nwc=10.0, cash_flow_delta_nwc=40.0), TOL
+def test_a_zero_valued_line_item_is_a_warning():
+    """Sharadar writes 0 both for a genuine nil and for an undisclosed line."""
+    issues, result = val.check_zero_filled_indicators(
+        _context(zero_filled=(("Interest Expense", "Interest Expense"),)), TOL
     )
     assert len(issues) == 1
     assert issues[0].severity is val.Severity.WARNING
+    assert "Interest Expense" in issues[0].values
+    assert result.status == "fail"
+
+
+def test_no_zero_valued_line_items_passes():
+    issues, result = val.check_zero_filled_indicators(_context(zero_filled=()), TOL)
+    assert issues == []
+    assert result.status == "pass"
 
 
 def test_stale_share_count_is_a_warning():

@@ -3,15 +3,19 @@ import pandas as pd
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 
-from app.data import market_data
+from app.data import sharadar_client
 
 TRADING_DAYS = 251
 
+#: Benchmark for alpha, beta and Treynor. Sharadar carries no index levels, so
+#: this is the S&P 500 tracker rather than the index itself.
+MARKET_TICKER = "SPY"
+
 # --- Data Fetching ---
 
-def fetch_data_and_market(tickers: list, start_date: str, end_date: str, market_ticker="^GSPC"):
-    all_tickers = list(set(tickers + [market_ticker]))
-    data = market_data.fetch_historical_data(all_tickers, start_date, end_date)
+def fetch_data_and_market(tickers: list, start_date: str, end_date: str, market_ticker=MARKET_TICKER):
+    all_tickers = tuple(dict.fromkeys(list(tickers) + [market_ticker]))
+    data = sharadar_client.fetch_price_history(all_tickers, start_date, end_date)
     return data
 
 # --- Metric Calculations ---
@@ -80,7 +84,7 @@ def calculate_all_metrics(portfolio_returns: pd.Series, market_returns: pd.Serie
         "Treynor Ratio": treynor
     }
 
-def get_comprehensive_metrics(data: pd.DataFrame, allocations: dict, custom_start: str, end_date: str, risk_free_rate: float, market_ticker="^GSPC") -> pd.DataFrame:
+def get_comprehensive_metrics(data: pd.DataFrame, allocations: dict, custom_start: str, end_date: str, risk_free_rate: float, market_ticker=MARKET_TICKER) -> pd.DataFrame:
     try:
         end = datetime.strptime(end_date, '%Y-%m-%d')
     except ValueError:

@@ -16,7 +16,7 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
-from app.data import market_data, simfin_client
+from app.data import market_data, sharadar_client
 from app.logic.dcf import export as dcf_export
 from app.logic.dcf import financials as fin
 from app.logic.dcf import model as dcf_model
@@ -98,19 +98,20 @@ _UNITS = {
     "Billions": (1e9, " (bn)", 2),
 }
 
-#: The three statements SimFin returns, in the order an analyst reads them.
+#: The three statements, in the order an analyst reads them.
 _STATEMENTS = {
     "Income statement": "PL",
     "Balance sheet": "BS",
     "Cash flow": "CF",
 }
 
-#: Per-period bookkeeping SimFin puts on every statement frame. These describe
-#: the filing rather than the business, so they are shown as provenance instead
-#: of being mixed in among the line items.
+#: Per-period bookkeeping carried on every statement frame. These describe the
+#: filing rather than the business, so they are shown as provenance instead of
+#: being mixed in among the line items.
 _STATEMENT_META = (
     "Fiscal Period", "Fiscal Year", "Report Date", "Publish Date",
-    "Restated", "Source", "TTM", "Value Check", "Data Model",
+    "Calendar Date", "Dimension", "Restated", "Source", "TTM", "Value Check",
+    "Data Model",
 )
 
 _BADGE_CLASS = {
@@ -331,8 +332,8 @@ def render_page() -> None:
     st.header("DCF Valuation")
     st.write(
         "Unlevered free cash flow to the firm, discounted to an intrinsic value per share. "
-        "Fundamentals from SimFin; index data and the equity risk premium from the shared "
-        "market-data layer."
+        "Fundamentals and prices from Nasdaq Data Link (Sharadar); Treasury yields and the "
+        "equity risk premium from the shared market-data layer."
     )
 
     ticker_column, button_column, basis_column = st.columns(
@@ -382,7 +383,7 @@ def render_page() -> None:
 
     # --- Load ------------------------------------------------------------
     try:
-        with st.spinner(f"Loading {loaded_ticker} from SimFin…"):
+        with st.spinner(f"Loading {loaded_ticker} from Sharadar…"):
             dataset = _load_company_cached(loaded_ticker, loaded_basis == "True")
     except val.UnsupportedSectorError as error:
         _render_blocking("Unsupported sector", str(error))
@@ -391,25 +392,25 @@ def render_page() -> None:
         _render_blocking(
             "Could not resolve a required financial concept",
             str(error),
-            f"Columns SimFin did return on the {error.statement} statement: "
+            f"Columns Sharadar did return on the {error.statement} statement: "
             f"{', '.join(error.available[:40])}",
         )
         return
-    except simfin_client.TickerNotFoundError as error:
+    except sharadar_client.TickerNotFoundError as error:
         _render_blocking(
             "Ticker not found",
             f"{error.message} Check the symbol — this page covers US-listed equities "
-            "that SimFin carries.",
+            "that Sharadar's fundamentals database carries.",
         )
         return
-    except simfin_client.SimFinError as error:
-        _render_blocking("Could not load data from SimFin", str(error))
+    except sharadar_client.SharadarError as error:
+        _render_blocking("Could not load data from Nasdaq Data Link", str(error))
         return
 
     if dataset.annual.empty:
         _render_blocking(
             "No usable statements",
-            f"SimFin returned no annual statements for {ticker}, so there is no history "
+            f"Sharadar returned no annual fundamentals for {ticker}, so there is no history "
             "to build a forecast on.",
         )
         return
@@ -624,7 +625,7 @@ def _render_header(dataset: dcf_model.CompanyDataset, valuation_date: date) -> N
     with st.container(border=True):
         st.subheader(f"{dataset.name} ({dataset.ticker})")
         columns = st.columns(5)
-        columns[0].metric("Sector (SimFin)", dataset.sector_name or "not reported")
+        columns[0].metric("Sector (Sharadar)", dataset.sector_name or "not reported")
         columns[1].metric("Currency", dataset.currency or "not reported")
 
         fye_month = dataset.fiscal_year_end_month
@@ -646,8 +647,8 @@ def _render_header(dataset: dcf_model.CompanyDataset, valuation_date: date) -> N
         st.caption(
             f"Price as of {dataset.price_date} · share count as of "
             f"{dataset.shares_point_in_time_date} · statements "
-            f"{'as-reported' if dataset.asreported else 'restated (SimFin default)'} · "
-            f"SimFin template {dataset.template} · "
+            f"{'as-reported' if dataset.asreported else 'restated (default)'} · "
+            f"{dataset.template or 'sector not classified'} · "
             f"{len(dataset.annual)} fiscal years retrieved"
         )
 
@@ -914,7 +915,7 @@ def _collect_assumptions(
             )
             cost_of_debt = cost_of_debt_pct / 100.0
             kd_sourced = Sourced.user(
-                cost_of_debt, "Manual yield-to-maturity input — SimFin carries no bond data."
+                cost_of_debt, "Manual yield-to-maturity input — Sharadar carries no bond data."
             )
             _provenance(kd_sourced)
             records.append(
@@ -946,7 +947,7 @@ def _collect_assumptions(
                 )
             else:
                 st.info(
-                    "The implied cost of debt cross-check is unavailable: SimFin reports no "
+                    "The implied cost of debt cross-check is unavailable: Sharadar reports no "
                     "interest expense for this company."
                 )
 
@@ -1006,14 +1007,14 @@ def _collect_assumptions(
     else:
         _render_blocking(
             "No share count available",
-            f"SimFin returned no share count for {dataset.ticker}, so equity value cannot "
+            f"Sharadar returned no share count for {dataset.ticker}, so equity value cannot "
             "be divided into a per-share figure.",
         )
         return None
 
     st.caption(
         f"Using **{shares:,.0f}** shares — {share_basis}. "
-        f"SimFin provides no treasury-stock-method calculation for outstanding options and "
+        f"Sharadar provides no treasury-stock-method calculation for outstanding options and "
         f"RSUs, so even the diluted count is not fully loaded."
     )
     records.append(
@@ -1123,7 +1124,7 @@ def _collect_assumptions(
         if fye is None:
             stub = 1.0
             st.warning(
-                "SimFin reports no fiscal year end month, so the stub period cannot be "
+                "No fiscal year end could be read from the reported periods, so the stub "
                 "computed and the first forecast year is treated as a full year."
             )
         else:
@@ -1141,7 +1142,7 @@ def _collect_assumptions(
                 stub,
                 Sourced.derived(
                     stub,
-                    "Fiscal year end from SimFin `endFy` plus the latest annual report date",
+                    "Fiscal year end derived from the latest annual report period",
                     f"days to {fye} ÷ 365" if fye else "no fiscal year end available",
                 ),
             )
@@ -1181,27 +1182,14 @@ def _collect_assumptions(
             st.markdown("**Stock-based compensation**")
             sbc_reported = stocks.get("sbc")
             base_sbc = base.flows.get("sbc")
-            non_cash = base.flows.get("non_cash_items")
             sbc_available = base_sbc is not None and not pd.isna(base_sbc)
 
             if not sbc_available:
                 st.warning(
-                    "**SimFin reports no stock-based compensation for this company.** The "
+                    "**Sharadar reports no stock-based compensation for this company.** The "
                     "field is empty and nothing has been inferred. Enter the figure from the "
-                    "cash flow statement in the latest 10-K, or use the upper-bound estimate."
+                    "cash flow statement in the latest 10-K."
                 )
-                if non_cash is not None and not pd.isna(non_cash):
-                    st.caption(
-                        f"For context, total **Non-Cash Items** for the base period is "
-                        f"{_money(non_cash, dataset.currency)}. That is a superset of SBC — it "
-                        f"also contains impairments, FX and deferred items — so it is **not** "
-                        f"an SBC figure."
-                    )
-                    if st.button(
-                        "Use Non-Cash Items as an upper-bound estimate", key="dcf_sbc_proxy"
-                    ):
-                        st.session_state["dcf_input_sbc"] = float(non_cash)
-                        st.rerun()
 
             sbc_input = st.number_input(
                 "Stock-based compensation",
@@ -1215,19 +1203,12 @@ def _collect_assumptions(
             sbc = sbc_input if sbc_input else None
 
             if sbc_available:
-                sbc_sourced = Sourced.reported(sbc_input, "SimFin CF: Stock-Based Compensation")
-            elif sbc_input and non_cash is not None and abs(sbc_input - float(non_cash)) < 1:
-                sbc_sourced = Sourced.estimate(
-                    sbc_input,
-                    "SimFin CF: Non-Cash Items",
-                    "Upper bound — Non-Cash Items also contains impairments, FX and deferred "
-                    "items, so true SBC is lower by an unknown amount.",
-                )
+                sbc_sourced = Sourced.reported(sbc_input, "Sharadar CF: Share Based Compensation")
             elif sbc_input:
                 sbc_sourced = Sourced.user(sbc_input, "Entered manually from the filing.")
             else:
                 sbc_sourced = Sourced.unavailable(
-                    "SimFin CF: Stock-Based Compensation",
+                    "Sharadar CF: Share Based Compensation",
                     "Not reported and not supplied.",
                 )
             _provenance(sbc_sourced)
@@ -1290,16 +1271,12 @@ def _collect_assumptions(
             )
             if lt_investments is None or pd.isna(lt_investments):
                 st.caption(
-                    "SimFin reports no long-term investments line for this company, so this "
+                    "Sharadar reports no non-current investments line for this company, so this "
                     "starts at zero by absence rather than by measurement."
                 )
-            interest_basis = st.radio(
-                "Interest expense line for FCFF method A",
-                ["net", "gross"],
-                horizontal=True,
-                key="dcf_input_interest_basis",
-                help="Where SimFin reports both, which to use for the after-tax add-back.",
-            )
+            # Sharadar publishes a single interest expense line rather than the
+            # gross/net pair, so there is no basis to choose between.
+            interest_basis = "gross"
 
     # --- Effective tax rate for FCFF -------------------------------------
     etr_series = fin.effective_tax_rate(dataset.annual).dropna()
@@ -1410,7 +1387,7 @@ def _render_fcff_panel(
 
         st.caption(
             "Method A assumes interest paid sits in operating cash flow, which holds under "
-            "US GAAP; an IFRS filer may classify it in financing. SimFin exposes interest "
+            "US GAAP; an IFRS filer may classify it in financing. Sharadar exposes interest "
             "*expense* (accrual), not interest *paid* (cash), so that is what is used. "
             "The two builds legitimately differ where working capital moves a lot: method B "
             "subtracts the balance-sheet movement, while method A picks up whatever the cash "
@@ -1532,7 +1509,7 @@ def _render_valuation(
     st.markdown("#### Equity bridge")
     st.caption(
         f"Every bridge item is taken from the balance sheet as of "
-        f"**{result.base.stocks_as_of}**. SimFin provides no treasury-stock-method calculation "
+        f"**{result.base.stocks_as_of}**. Sharadar provides no treasury-stock-method calculation "
         f"for outstanding options and RSUs, so the diluted count is not fully loaded."
     )
     bridge_rows = [
@@ -1988,14 +1965,13 @@ def _statement_frame(
 ) -> tuple[pd.DataFrame, list[str], list[str]]:
     """One statement as line items × fiscal years, plus which items were reported.
 
-    Transposed against SimFin's own layout because a statement is read down the
-    line items, not across them — and with 85 balance-sheet rows, the wide form
-    is unreadable. SimFin's column order is the statement's own order, so
-    transposing preserves it.
+    Transposed against the wire layout because a statement is read down the line
+    items, not across them. The client emits indicators in statement order, so
+    transposing preserves that order.
 
     Returns ``(frame, populated, empty)`` where the two lists partition the line
-    items into those the company reported and those SimFin carries in its
-    template but left blank for this company.
+    items into those the company reported and those Sharadar carries as an
+    indicator but left blank for this company.
     """
     frame = dataset.statements_annual.frame(code)
     if frame.empty or "Fiscal Year" not in frame.columns:
@@ -2015,14 +1991,14 @@ def _statement_frame(
 
 
 def _render_reported_figures(dataset: dcf_model.CompanyDataset) -> None:
-    """Every line item SimFin returns, one statement at a time.
+    """Every line item Sharadar returns, one statement at a time.
 
     The model reads a handful of concepts out of these statements; showing only
     those would leave the reader unable to tell a figure that was reported from
     one that was resolved to a different column, or to see what else was on the
     filing. This is the ground truth the whole page is built on, unedited.
     """
-    st.markdown("**Reported figures — everything SimFin returns, unedited**")
+    st.markdown("**Reported figures — everything Sharadar returns, unedited**")
 
     statement_column, units_column = st.columns([2, 2], vertical_alignment="bottom")
     with statement_column:
@@ -2031,7 +2007,7 @@ def _render_reported_figures(dataset: dcf_model.CompanyDataset) -> None:
             list(_STATEMENTS),
             horizontal=True,
             key="dcf_hist_statement",
-            help="The three statements SimFin returns for this company, exactly as "
+            help="The three statements Sharadar returns for this company, exactly as "
                  "returned. Concepts the model uses are resolved out of these.",
         )
     with units_column:
@@ -2051,16 +2027,16 @@ def _render_reported_figures(dataset: dcf_model.CompanyDataset) -> None:
 
     if table.empty:
         st.info(
-            f"SimFin returned no {statement.lower()} for {dataset.ticker}. Nothing has "
+            f"Sharadar returned no {statement.lower()} for {dataset.ticker}. Nothing has "
             f"been substituted."
         )
         return
 
     show_empty = st.checkbox(
-        f"Show the {len(empty)} line item(s) SimFin left empty for {dataset.ticker}",
+        f"Show the {len(empty)} line item(s) Sharadar left empty for {dataset.ticker}",
         value=False,
         key=f"dcf_hist_empty_{code}",
-        help="Line items SimFin carries in this statement template but reported no "
+        help="Indicators Sharadar carries for every company but reported no "
              "value for. An empty row is not a zero — it means nothing was reported, "
              "and which items are missing is itself worth knowing.",
     )
@@ -2087,11 +2063,13 @@ def _render_reported_figures(dataset: dcf_model.CompanyDataset) -> None:
 
     st.caption(
         f"**{statement}** · {len(populated)} of {len(populated) + len(empty)} line items "
-        f"reported, {len(empty)} left empty by SimFin · figures in {unit.lower()} of "
+        f"reported, {len(empty)} left empty by Sharadar · figures in {unit.lower()} of "
         f"{dataset.currency or 'the reporting currency'} · "
-        f"{'as-reported' if dataset.asreported else 'restated (SimFin default)'}. "
-        f"A dash is a figure the company did not report — it is not a zero, and nothing "
-        f"is filled in for it anywhere in the model. A reported **0.0** is a real zero."
+        f"{'as-reported' if dataset.asreported else 'restated (default)'}. "
+        f"A dash is a figure Sharadar carries no value for at all. A **0.0** is "
+        f"ambiguous: Sharadar writes 0 both for a genuine nil and for a line item "
+        f"absent from the filing, and the two cannot be told apart here — the "
+        f"validation panel lists the ones that affect this valuation."
     )
 
     _render_filing_provenance(dataset, code)
@@ -2131,7 +2109,7 @@ def _render_filing_provenance(dataset: dcf_model.CompanyDataset, code: str) -> N
         )
         st.caption(
             "Report date is the period end; publish date is when the filing reached "
-            "SimFin. A restated year is one the company later revised — the model uses "
+            "Sharadar. A restated year is one the company later revised — the model uses "
             "restated figures by default so the time series is consistent, which the "
             "toggle at the top of the page switches off."
         )
@@ -2168,7 +2146,7 @@ def _render_validation_panel(
 
     with st.expander("Resolved schema mappings", expanded=False):
         st.caption(
-            "Concept-to-column resolution against the columns SimFin actually returned for "
+            "Concept-to-column resolution against the columns Sharadar actually returned for "
             "this company. Nothing here is hardcoded at a call site."
         )
         st.dataframe(dataset.schema.as_frame(), width="stretch", hide_index=True)
@@ -2181,20 +2159,20 @@ def _render_validation_panel(
     with st.expander("Tolerances in use", expanded=False):
         st.dataframe(tolerances.describe(), width="stretch", hide_index=True)
 
-    with st.expander("SimFin's own integrity flags and derived figures", expanded=False):
+    with st.expander("Sharadar's own derived figures", expanded=False):
         if "value_check" in dataset.annual_meta.columns:
             flags = dataset.annual_meta[["value_check"]].copy()
             flags.insert(0, "Fiscal year", flags.index)
             st.dataframe(flags, width="stretch", hide_index=True)
         if "derived_fcf" in dataset.annual.columns:
             st.caption(
-                "SimFin's DERIVED `Free Cash Flow` is shown for reference only and drives "
+                "Sharadar's derived `Free Cash Flow` is shown for reference only and drives "
                 "nothing. It has been observed to exceed operating cash flow for companies "
                 "with positive capex, which is not possible, so it is not wired to a check."
             )
             comparison = pd.DataFrame(
                 {
-                    "SimFin derived FCF": dataset.annual.get("derived_fcf"),
+                    "Sharadar derived FCF": dataset.annual.get("derived_fcf"),
                     "CFO": dataset.annual.get("cfo"),
                     "CFO − CapEx": dataset.annual.get("cfo") - fin.capex(dataset.annual).values,
                 }

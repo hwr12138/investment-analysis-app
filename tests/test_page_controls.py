@@ -224,14 +224,14 @@ def test_millions_scaling_of_a_real_figure():
 # ---------------------------------------------------------------------------
 
 
-def test_the_three_statements_map_to_simfin_codes():
+def test_the_three_statements_map_to_frame_codes():
     assert page._STATEMENTS == {
         "Income statement": "PL", "Balance sheet": "BS", "Cash flow": "CF"
     }
 
 
-def test_every_statement_offered_is_one_simfin_returns():
-    """A statement in the picker that SimFin never returns would render blank."""
+def test_every_statement_offered_is_one_the_client_builds():
+    """A statement in the picker the client never builds would render blank."""
     for code in page._STATEMENTS.values():
         assert code in {"PL", "BS", "CF", "DERIVED"}
 
@@ -263,8 +263,8 @@ def test_a_statement_is_transposed_so_line_items_read_down_the_page():
     assert out["table"].loc["Revenue", "2025"] == 120.0
 
 
-def test_simfins_own_line_item_order_is_preserved():
-    """SimFin's column order is the statement's order; reordering would misread it."""
+def test_the_published_line_item_order_is_preserved():
+    """Column order is the statement's own order; reordering would misread it."""
     frame = pd.DataFrame({
         "Fiscal Year": [2025],
         "Revenue": [100.0], "Cost of Revenue": [60.0], "Gross Profit": [40.0],
@@ -287,7 +287,7 @@ def test_a_line_item_reported_in_any_year_counts_as_populated():
 
 
 def test_an_empty_line_item_is_kept_rather_than_dropped():
-    """That SimFin carries a field and left it blank is itself a finding."""
+    """That the provider carries a field and left it blank is itself a finding."""
     frame = pd.DataFrame({
         "Fiscal Year": [2025], "Revenue": [100.0], "Short Term Debt": [np.nan],
     })

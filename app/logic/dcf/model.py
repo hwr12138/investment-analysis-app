@@ -17,21 +17,22 @@ from datetime import date, timedelta
 import numpy as np
 import pandas as pd
 
-from app.data import market_data, simfin_client
-from app.data.simfin_client import StatementSet
+from app.data import sharadar_client
+from app.data.sharadar_client import StatementSet
 from app.logic.dcf import financials as fin
 from app.logic.dcf import reverse
 from app.logic.dcf import validation as val
 from app.logic.dcf import valuation as dcf
 from app.logic.dcf import wacc as wacc_lib
 from app.logic.dcf.schema import SchemaMap, resolve_schema
-from app.provenance import Origin, Sourced
+from app.provenance import Sourced
 
 #: Years of daily prices pulled for the beta regression.
 BETA_HISTORY_YEARS = 5
 
-#: SimFin sector codes beginning with this prefix are the financial sector.
-_FINANCIAL_SECTOR_PREFIX = 104
+#: Benchmark for the beta regression. Sharadar carries no index levels, so this
+#: is an ETF from the fund-prices table rather than an index level.
+DEFAULT_BENCHMARK = "SPY"
 
 #: Terminal value method driving the headline figure and the equity bridge.
 #: Both methods always compute and both are always displayed; this only decides
@@ -43,7 +44,7 @@ DEFAULT_HEADLINE_METHOD = "exit_multiple"
 class BasePeriod:
     """The period the forecast starts from.
 
-    Flows come from the trailing twelve months where SimFin has four quarters,
+    Flows come from the trailing twelve months where Sharadar has four quarters,
     because a valuation struck today should not project off figures that stop at
     the last fiscal year end. Stock items always come from the most recent
     balance sheet and are labelled with its date.
@@ -65,16 +66,15 @@ class CompanyDataset:
     name: str
     currency: str
     template: str
-    simfin_id: int
+    permaticker: int
     listing: dict | None
-    general: dict
     schema: SchemaMap
 
     annual: pd.DataFrame
     annual_meta: pd.DataFrame
     quarterly: pd.DataFrame
     quarterly_meta: pd.DataFrame
-    #: Every quarter SimFin returned, used by the quarters-sum check.
+    #: Every quarter Sharadar returned, used by the quarters-sum check.
     quarterly_all: pd.DataFrame
     ttm: pd.Series | None
     ttm_label: str | None
@@ -98,9 +98,10 @@ class CompanyDataset:
     reported_market_cap: float | None = None
     shares_point_in_time: float | None = None
     shares_point_in_time_date: date | None = None
-    #: The prices endpoint's own share count — a second, independent read on
-    #: the same point-in-time concept, and the one SimFin has historically got
-    #: wrong by orders of magnitude.
+    #: A second, independent read on the same point-in-time concept, backed out
+    #: of the daily market cap. It disagrees with the filed count whenever the
+    #: share factor is not 1, which is exactly when the disagreement is worth
+    #: seeing.
     shares_from_prices: float | None = None
     shares_weighted_diluted: float | None = None
     shares_weighted_basic: float | None = None
@@ -109,11 +110,11 @@ class CompanyDataset:
 
     @property
     def sector_name(self) -> str | None:
-        return (self.listing or {}).get("sectorName")
+        return (self.listing or {}).get("sector")
 
     @property
     def industry_name(self) -> str | None:
-        return (self.listing or {}).get("industryName")
+        return (self.listing or {}).get("industry")
 
     def filing_link(self, fiscal_year: int) -> str | None:
         """Source filing for a fiscal year, preferring the annual filing index."""
@@ -135,19 +136,15 @@ def _reject_financial_sector(
 ) -> None:
     """Banks and insurers get rejected before anything is computed.
 
-    The statement template is authoritative: ``sectorCode`` and ``sectorName``
-    are null for a good number of SimFin's companies, but every company that
-    returns statements has a template.
+    The SIC code is authoritative — division H, codes 6000-6999, is Finance,
+    Insurance and Real Estate. Sharadar's own ``sector`` label is a vendor
+    classification that can be null, so it is only a fallback. The two agree on
+    JPM (SIC 6021, sector "Financial Services").
     """
-    sector = (listing or {}).get("sectorName") or ""
-    sector_code = (listing or {}).get("sectorCode")
+    sector = (listing or {}).get("sector") or statements.sector or ""
 
     if statements.is_financial_template:
         raise val.UnsupportedSectorError(ticker, sector, statements.template)
-
-    if sector_code is not None and not pd.isna(sector_code):
-        if int(sector_code) // 1000 == _FINANCIAL_SECTOR_PREFIX:
-            raise val.UnsupportedSectorError(ticker, sector, statements.template)
 
 
 def _series_value(series: pd.Series | None, key: str) -> float | None:
@@ -165,14 +162,19 @@ def load_company(ticker: str, *, asreported: bool = False) -> CompanyDataset:
     Raises :class:`~app.logic.dcf.validation.UnsupportedSectorError` for banks
     and insurers, :class:`~app.logic.dcf.schema.SchemaResolutionError` when a
     required concept cannot be resolved, and
-    :class:`~app.data.simfin_client.TickerNotFoundError` when SimFin has no data
-    — all BLOCKING, all before a single number is displayed.
+    :class:`~app.data.sharadar_client.TickerNotFoundError` when Sharadar has no
+    data — all BLOCKING, all before a single number is displayed.
+
+    ``asreported`` selects Sharadar's ``AR`` dimensions, which exclude
+    restatements and index to the SEC filing date. The default uses ``MR``,
+    which includes restatements and gives the consistent time series that ratio
+    derivation needs.
     """
     ticker = ticker.strip().upper()
-    listing = simfin_client.lookup_company(ticker)
+    listing = sharadar_client.fetch_ticker_meta(ticker)
 
-    annual_statements = simfin_client.fetch_statements(
-        ticker, period="FY", asreported=asreported
+    annual_statements = sharadar_client.fetch_statements(
+        ticker, annual=True, asreported=asreported
     )
     _reject_financial_sector(ticker, annual_statements, listing)
 
@@ -181,10 +183,23 @@ def load_company(ticker: str, *, asreported: bool = False) -> CompanyDataset:
     )
     annual, annual_meta = fin.build_concept_table(annual_statements, schema)
 
-    quarterly_statements = simfin_client.fetch_statements(
-        ticker, period="Q1,Q2,Q3,Q4", asreported=asreported
-    )
-    quarterly_all, quarterly_meta_all = fin.build_concept_table(quarterly_statements, schema)
+    # Sharadar publishes quarterly figures only for US domestic filers — foreign
+    # issuers and ADRs have annual and trailing-twelve-month dimensions but no
+    # quarterly one. That is a supported company, not a failure, so the model
+    # falls back to annual-only and the base period says so.
+    quarterly_statements: StatementSet | None = None
+    quarterly_all = pd.DataFrame()
+    quarterly_meta_all = pd.DataFrame()
+    try:
+        quarterly_statements = sharadar_client.fetch_statements(
+            ticker, annual=False, asreported=asreported
+        )
+        quarterly_all, quarterly_meta_all = fin.build_concept_table(
+            quarterly_statements, schema
+        )
+    except sharadar_client.SharadarError:
+        quarterly_statements = None
+
     # Eight quarters is enough for a TTM plus a prior-year comparison, and is
     # what the page displays. The full series is kept for the quarters-sum
     # check, which gets far stronger coverage from it at no extra network cost.
@@ -193,39 +208,43 @@ def load_company(ticker: str, *, asreported: bool = False) -> CompanyDataset:
 
     ttm_series: pd.Series | None = None
     ttm_label: str | None = None
+    ttm_statements: StatementSet | None = None
     try:
-        ttm_statements = simfin_client.fetch_statements(
-            ticker, period="Q1,Q2,Q3,Q4", ttm=True, asreported=asreported
+        ttm_statements = sharadar_client.fetch_statements(
+            ticker, annual=False, ttm=True, asreported=asreported
         )
         ttm_frame, _ = fin.build_concept_table(ttm_statements, schema)
         if not ttm_frame.empty:
             ttm_series = ttm_frame.iloc[-1]
             ttm_label = str(ttm_frame.index[-1])
-    except simfin_client.SimFinError:
-        ttm_series, ttm_label = None, None
+    except sharadar_client.SharadarError:
+        ttm_series, ttm_label, ttm_statements = None, None, None
 
     manual = fin.manual_ttm(quarterly, fin.FLOW_KEYS)
 
-    general = simfin_client.fetch_general(ticker)
-    prices = simfin_client.fetch_prices(
+    prices = sharadar_client.fetch_prices(
         ticker,
         start=(date.today() - timedelta(days=365 * BETA_HISTORY_YEARS + 10)).isoformat(),
     )
-    common_shares = simfin_client.fetch_common_shares(ticker)
-    weighted_annual = simfin_client.fetch_weighted_shares(ticker, period="FY")
-    weighted_ttm = simfin_client.fetch_weighted_shares(
-        ticker, period="Q1,Q2,Q3,Q4", ttm=True
+
+    # Share counts and the filing index ride along on the SF1 rows rather than
+    # coming from dedicated endpoints, so these are projections of frames
+    # already fetched. The trailing-twelve-month weighted counts come from the
+    # TTM statements where we have them, since those are the counts that pair
+    # with the TTM earnings the base period uses.
+    weighted_ttm = (
+        sharadar_client.weighted_shares_frame(ttm_statements)
+        if ttm_statements is not None
+        else pd.DataFrame(columns=["endDate", "fyear", "period", "basic", "diluted"])
     )
-    filings = simfin_client.fetch_filings(ticker)
 
     dataset = CompanyDataset(
         ticker=ticker,
         name=annual_statements.name or ticker,
         currency=annual_statements.currency,
         template=annual_statements.template,
-        simfin_id=annual_statements.simfin_id,
+        permaticker=annual_statements.permaticker,
         listing=listing,
-        general=general,
         schema=schema,
         annual=annual,
         annual_meta=annual_meta,
@@ -236,30 +255,23 @@ def load_company(ticker: str, *, asreported: bool = False) -> CompanyDataset:
         ttm_label=ttm_label,
         manual_ttm=manual,
         prices=prices,
-        common_shares=common_shares,
-        weighted_shares_annual=weighted_annual,
+        # Point-in-time shares come off the newest filing we have, which is the
+        # latest quarter where the company files one.
+        common_shares=sharadar_client.common_shares_frame(
+            quarterly_statements if quarterly_statements is not None else annual_statements
+        ),
+        weighted_shares_annual=sharadar_client.weighted_shares_frame(annual_statements),
         weighted_shares_ttm=weighted_ttm,
-        filings=filings,
+        filings=sharadar_client.filings_frame(annual_statements),
         statements_annual=annual_statements,
         asreported=asreported,
-        fiscal_year_end_month=_fiscal_year_end_month(general),
+        fiscal_year_end_month=sharadar_client.fiscal_year_end_month(annual_statements),
         capex_result=fin.capex(annual),
         ratios=fin.driver_ratios(annual),
     )
 
     _attach_quote_and_shares(dataset)
     return dataset
-
-
-def _fiscal_year_end_month(general: dict) -> int | None:
-    value = general.get("endFy")
-    if value is None or (isinstance(value, float) and np.isnan(value)):
-        return None
-    try:
-        month = int(value)
-    except (TypeError, ValueError):
-        return None
-    return month if 1 <= month <= 12 else None
 
 
 def _attach_quote_and_shares(dataset: CompanyDataset) -> None:
@@ -334,7 +346,8 @@ def base_period(dataset: CompanyDataset) -> BasePeriod:
             stocks=stocks,
             stocks_as_of=stocks_as_of,
             is_ttm=True,
-            detail="Trailing twelve months, built natively by the SimFin API.",
+            detail="Trailing twelve months, as published by Sharadar under its "
+                   "trailing-twelve-month dimension.",
         )
 
     latest = dataset.annual.iloc[-1] if not dataset.annual.empty else pd.Series(dtype="float64")
@@ -345,7 +358,7 @@ def base_period(dataset: CompanyDataset) -> BasePeriod:
         stocks=stocks,
         stocks_as_of=stocks_as_of,
         is_ttm=False,
-        detail="SimFin returned no trailing-twelve-month period, so the last "
+        detail="Sharadar returned no trailing-twelve-month period, so the last "
                "reported fiscal year is the base.",
     )
 
@@ -437,8 +450,15 @@ def base_period_fcff(
     )
     if interest_value is None:
         notes.append(
-            "SimFin reports no interest expense for this company, so method A's "
+            "Sharadar reports no interest expense for this company, so method A's "
             "after-tax interest add-back cannot be computed."
+        )
+    elif interest_value == 0.0:
+        notes.append(
+            "Sharadar reports interest expense as 0 for this company. That is how "
+            "it records a line item absent from the filing, so it may mean not "
+            "disclosed rather than nil — in which case method A understates FCFF "
+            "by the after-tax interest."
         )
 
     if delta_nwc is None:
@@ -486,19 +506,23 @@ def regress_company_beta(
     *,
     frequency: str = "monthly",
     blume: bool = False,
-    index_ticker: str = "^GSPC",
+    index_ticker: str = DEFAULT_BENCHMARK,
     years: int = BETA_HISTORY_YEARS,
 ) -> BetaOutcome:
-    """Regresses the company's returns on the index's.
+    """Regresses the company's returns on the benchmark's.
 
-    Company prices come from SimFin, index prices from yfinance. Measured over
-    five years of AAPL the two conventions agree to about 6e-05 on adjusted
-    closes with identical trading-date sets, so mixing them is safe — but the
-    check runs anyway, and if the date sets ever diverge materially the company
-    series is pulled from yfinance instead so both sides share one convention.
+    Both sides are Sharadar total-return closes — the company from SEP, the
+    benchmark ETF from SFP — so they share one adjustment convention and one
+    trading calendar, and no date-set reconciliation is needed.
+
+    The benchmark is an ETF rather than an index level because Sharadar carries
+    no index levels. SPY's adjusted close includes reinvested distributions,
+    where the S&P 500 index level does not, so betas differ slightly from a
+    regression against the bare index — the dividend-inclusive pairing is the
+    more defensible one, since the company side includes dividends too.
     """
     if dataset.prices.empty or "Adjusted Closing Price" not in dataset.prices.columns:
-        return BetaOutcome(None, "SimFin", "No adjusted price series available.")
+        return BetaOutcome(None, "Sharadar", "No adjusted price series available.")
 
     start = (date.today() - timedelta(days=365 * years + 10)).isoformat()
     end = (date.today() + timedelta(days=1)).isoformat()
@@ -507,25 +531,10 @@ def regress_company_beta(
         dataset.prices.set_index("Date")["Adjusted Closing Price"].dropna().sort_index()
     )
     company = company[company.index >= pd.Timestamp(start)]
-    index_prices = market_data.fetch_index_prices(index_ticker, start, end)
+    index_prices = sharadar_client.fetch_index_prices(index_ticker, start, end)
 
-    source = "SimFin adjusted closes vs yfinance index"
+    source = f"Sharadar adjusted closes (SEP) vs {index_ticker} (SFP)"
     note = ""
-    if not index_prices.empty and len(company) > 0:
-        shared = len(set(company.index) & set(index_prices.index))
-        coverage = shared / max(len(index_prices), 1)
-        if coverage < 0.9:
-            fallback = market_data.fetch_historical_data([dataset.ticker], start, end)
-            if not fallback.empty:
-                column = (
-                    dataset.ticker if dataset.ticker in fallback.columns else fallback.columns[0]
-                )
-                company = fallback[column].dropna()
-                source = "yfinance for both series"
-                note = (
-                    f"SimFin and yfinance shared only {coverage:.0%} of trading dates, "
-                    "so both series were taken from yfinance to keep one convention."
-                )
 
     try:
         result = wacc_lib.regress_beta(
@@ -549,23 +558,24 @@ def regress_company_beta(
 
 
 def historical_ev_ebitda(dataset: CompanyDataset) -> Sourced:
-    """The company's own historical EV/EBITDA range, from SimFin's daily series."""
+    """The company's own historical EV/EBITDA range, from Sharadar's daily series."""
     column = "EV/EBITDA - ttm"
+    source = "Sharadar DAILY (EV/EBITDA)"
     if dataset.prices.empty or column not in dataset.prices.columns:
         return Sourced.unavailable(
-            source="SimFin prices (EV/EBITDA - ttm)",
-            reason="SimFin returned no EV/EBITDA series for this company.",
+            source=source,
+            reason="Sharadar returned no EV/EBITDA series for this company.",
         )
     series = pd.to_numeric(dataset.prices[column], errors="coerce").dropna()
     series = series[(series > 0) & (series < 200)]
     if series.empty:
         return Sourced.unavailable(
-            source="SimFin prices (EV/EBITDA - ttm)",
+            source=source,
             reason="Every EV/EBITDA observation was missing or implausible.",
         )
     return Sourced.derived(
         value=float(series.median()),
-        source="SimFin prices (EV/EBITDA - ttm)",
+        source=source,
         formula=(
             f"Median of {len(series):,} daily observations "
             f"(range {series.min():.1f}× – {series.max():.1f}×)"
@@ -737,6 +747,35 @@ def solve_implied_growth(
     )
 
 
+def _zero_filled_base_items(
+    dataset: CompanyDataset, base: BasePeriod
+) -> tuple[tuple[str, str], ...]:
+    """Base-period line items that are exactly 0 and might mean "not disclosed".
+
+    Sharadar writes 0, not null, for a line item absent from a filing, so the
+    two are indistinguishable in the data. Rather than guess, the ones that
+    could plausibly be either are collected here and shown to the user as
+    ``(concept label, resolved column)`` pairs.
+    """
+    from app.logic.dcf.schema import CONCEPTS_BY_KEY
+
+    found: list[tuple[str, str]] = []
+    for series in (base.flows, base.stocks):
+        if series is None:
+            continue
+        for key, value in series.items():
+            column = dataset.schema.column(str(key))
+            if column is None or not sharadar_client.is_zero_filled(column):
+                continue
+            if value is None or pd.isna(value) or float(value) != 0.0:
+                continue
+            concept = CONCEPTS_BY_KEY.get(str(key))
+            label = concept.label if concept else str(key)
+            if (label, column) not in found:
+                found.append((label, column))
+    return tuple(found)
+
+
 def build_validation_context(
     dataset: CompanyDataset,
     *,
@@ -754,7 +793,6 @@ def build_validation_context(
     """Packs everything the checks need into one context."""
     annual = dataset.annual
     bs_delta = fin.delta_nwc(annual)
-    cf_delta = fin.cash_flow_delta_nwc(annual)
 
     context = val.ValidationContext(
         ticker=dataset.ticker,
@@ -784,9 +822,7 @@ def build_validation_context(
         balance_sheet_delta_nwc=(
             float(bs_delta.iloc[-1]) if len(bs_delta) and not pd.isna(bs_delta.iloc[-1]) else None
         ),
-        cash_flow_delta_nwc=(
-            float(cf_delta.iloc[-1]) if len(cf_delta) and not pd.isna(cf_delta.iloc[-1]) else None
-        ),
+        zero_filled=_zero_filled_base_items(dataset, base),
     )
 
     if base_fcff is not None:

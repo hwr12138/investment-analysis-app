@@ -165,6 +165,3 @@ cython_debug/
 
 # Claude
 .claude
-
-# SimFin
-simfin_doc.md

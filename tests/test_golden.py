@@ -13,7 +13,7 @@ from datetime import date
 import pandas as pd
 import pytest
 
-from app.data import market_data, simfin_client as sc
+from app.data import market_data, sharadar_client as sc
 from app.logic.dcf import financials as fin
 from app.logic.dcf import model as dcf_model
 from app.logic.dcf import validation as val
@@ -23,60 +23,43 @@ from app.logic.dcf import wacc as wl
 VALUATION_DATE = date(2026, 7, 31)
 
 
-def build_model(statements_payload, monkeypatch) -> dict:
+def build_model(statements_payload, tickers_response, monkeypatch) -> dict:
     """Runs the whole pipeline against recorded fixtures.
 
-    Shared with the export tests so both exercise the same assembled model.
+    Shared with the export and reverse tests so all three exercise the same
+    assembled model.
     """
     prices = pd.DataFrame(
         {
             "Date": pd.date_range("2026-07-01", periods=20, freq="B"),
             "Last Closing Price": [50.0] * 20,
             "Adjusted Closing Price": [50.0] * 20,
+            "Split-Adjusted Close": [50.0] * 20,
             "Common Shares Outstanding": [1_000.0] * 20,
             "Market-Cap": [50_000.0] * 20,
             "EV/EBITDA - ttm": [12.0] * 20,
         }
     )
-    common_shares = pd.DataFrame(
-        {"endDate": [pd.Timestamp("2026-06-30")], "value": [1_000.0]}
-    )
-    weighted = pd.DataFrame(
-        {
-            "endDate": [pd.Timestamp("2025-09-30")],
-            "fyear": [2025],
-            "period": ["FY"],
-            "basic": [1_000.0],
-            "diluted": [1_010.0],
-        }
-    )
 
-    def _statements(ticker, statements="PL,BS,CF,DERIVED", period="FY", **kwargs):
-        """Annual data only — this company has no quarterly history at SimFin.
+    def _get(table, params, ticker=None):
+        return tickers_response if table == "TICKERS" else statements_payload
+
+    def _statements(ticker, *, annual=True, ttm=False, asreported=False):
+        """Annual data only — this company has no quarterly history at Sharadar.
 
         That is a real situation, and it is what makes the model fall back to
         the latest fiscal year as its base period.
         """
-        if period.strip().upper() != "FY":
-            return sc.StatementSet(
-                ticker=ticker, simfin_id=999, name="TESTCO INC", currency="USD",
-                template="GENERAL", isin="", period=period, ttm=kwargs.get("ttm", False),
-                asreported=False, frames={},
+        if not annual or ttm:
+            raise sc.TickerNotFoundError(
+                "No quarterly history.", table="SF1", ticker=ticker
             )
-        return sc._fetch_statements(ticker, statements, period, **kwargs)
+        return sc._fetch_statements(ticker, annual=True, asreported=asreported)
 
-    monkeypatch.setattr(sc, "_request", lambda *a, **k: statements_payload)
-    monkeypatch.setattr(sc, "lookup_company", lambda ticker: {
-        "id": 999, "ticker": "TEST", "name": "TESTCO INC",
-        "sectorCode": 101001, "sectorName": "Computer Hardware",
-        "industryName": "Technology",
-    })
+    monkeypatch.setattr(sc, "_get", _get)
+    monkeypatch.setattr(sc, "fetch_ticker_meta", lambda ticker: sc._fetch_ticker_meta(ticker))
     monkeypatch.setattr(sc, "fetch_statements", _statements)
-    monkeypatch.setattr(sc, "fetch_general", lambda ticker: {"endFy": 9, "ticker": "TEST"})
     monkeypatch.setattr(sc, "fetch_prices", lambda *a, **k: prices)
-    monkeypatch.setattr(sc, "fetch_common_shares", lambda *a, **k: common_shares)
-    monkeypatch.setattr(sc, "fetch_weighted_shares", lambda *a, **k: weighted)
-    monkeypatch.setattr(sc, "fetch_filings", lambda *a, **k: pd.DataFrame())
 
     dataset = dcf_model.load_company("TEST")
     base = dcf_model.base_period(dataset)
@@ -157,23 +140,27 @@ def build_model(statements_payload, monkeypatch) -> dict:
 
 
 @pytest.fixture
-def built(statements_payload, monkeypatch):
-    return build_model(statements_payload, monkeypatch)
+def built(statements_payload, tickers_response, monkeypatch):
+    return build_model(statements_payload, tickers_response, monkeypatch)
 
 
 # --- The snapshot ----------------------------------------------------------
 
+# Re-baselined for the Sharadar feed. The fixture's pretax income is now
+# operating income less interest (310) rather than a separately stated 300,
+# which moves the effective tax rate and everything downstream of it.
 GOLDEN = {
     "fiscal_years": 3,
     "base_label": "FY2025",
     "stub": 0.16712328767123288,
-    "effective_tax_rate": 0.2,
+    "effective_tax_rate": 0.19285714285714287,
     "wacc": 0.08923145016908693,
-    "fcff_method_b": 235.0,
-    "enterprise_value_gordon": 5412.386011417202,
-    "value_per_share_gordon": 5.2993920905120815,
-    "enterprise_value_exit": 6329.902849731228,
-    "value_per_share_exit": 6.207824603694285,
+    "fcff_method_a": 240.0,
+    "fcff_method_b": 237.21428571428572,
+    "enterprise_value_gordon": 5463.246764785289,
+    "value_per_share_gordon": 5.349749272064643,
+    "enterprise_value_exit": 6340.346933503249,
+    "value_per_share_exit": 6.218165280696286,
 }
 
 
@@ -184,6 +171,7 @@ def test_golden_scalars(built):
     assert built["stub"] == pytest.approx(GOLDEN["stub"])
     assert built["etr"] == pytest.approx(GOLDEN["effective_tax_rate"])
     assert result.wacc.wacc == pytest.approx(GOLDEN["wacc"])
+    assert result.base_fcff.method_a == pytest.approx(GOLDEN["fcff_method_a"])
     assert result.base_fcff.method_b == pytest.approx(GOLDEN["fcff_method_b"])
 
 
@@ -220,47 +208,64 @@ def test_golden_fixture_ties_out_and_raises_no_critical_issue(built):
     assert "Sufficient usable history" in warnings
 
 
-def test_method_a_is_uncomputable_without_an_interest_line(built):
-    """The fixture reports no interest expense, exactly like AAPL."""
-    assert built["result"].base_fcff.method_a is None
-    assert any("interest expense" in note for note in built["result"].base_fcff.notes)
+def test_a_zero_interest_line_is_flagged_rather_than_absorbed(built):
+    """The fixture reports interest expense as 0, exactly like AAPL.
+
+    Sharadar writes 0 both for a genuine nil and for a line item absent from
+    the filing. Method A still computes — the add-back is just zero — but the
+    ambiguity has to reach the user rather than being silently absorbed.
+    """
+    fcff = built["result"].base_fcff
+    assert fcff.method_a is not None
+    assert any("0" in note and "not disclosed" in note for note in fcff.notes)
+
+    flagged = [i for i in built["issues"] if i.key == "zero_filled"]
+    assert flagged, "the zero-fill check did not fire"
+    assert "Interest Expense" in flagged[0].values
 
 
 def test_financial_sector_is_rejected_before_anything_is_computed(
-    statements_payload, monkeypatch
+    statements_payload, financial_tickers_response, monkeypatch
 ):
-    payload = [dict(statements_payload[0], template="BANKS")]
-    monkeypatch.setattr(sc, "_request", lambda *a, **k: payload)
-    monkeypatch.setattr(sc, "lookup_company", lambda ticker: {
-        "id": 1, "ticker": "JPM", "name": "JPMORGAN", "sectorCode": 104002,
-        "sectorName": "Banks", "industryName": "Financial Services",
-    })
+    def _get(table, params, ticker=None):
+        return financial_tickers_response if table == "TICKERS" else statements_payload
+
+    monkeypatch.setattr(sc, "_get", _get)
+    monkeypatch.setattr(sc, "fetch_ticker_meta", sc._fetch_ticker_meta)
     monkeypatch.setattr(sc, "fetch_statements", sc._fetch_statements)
 
     with pytest.raises(val.UnsupportedSectorError) as caught:
         dcf_model.load_company("JPM")
-    assert caught.value.template == "BANKS"
+    assert caught.value.template == "Financial Services"
 
 
-def test_null_sector_alone_does_not_reject(statements_payload, monkeypatch):
-    """SimFin leaves sectorCode null for some companies; the template rules."""
-    monkeypatch.setattr(sc, "_request", lambda *a, **k: statements_payload)
-    monkeypatch.setattr(sc, "lookup_company", lambda ticker: {
-        "id": 1, "ticker": "TEST", "name": "TESTCO",
-        "sectorCode": None, "sectorName": None, "industryName": None,
-    })
+def test_a_null_vendor_sector_alone_does_not_reject(
+    statements_payload, tickers_response, monkeypatch
+):
+    """Sharadar's `sector` is a vendor label and can be null; SIC decides."""
+    from tests.conftest import TICKERS_COLUMNS
+
+    row = list(tickers_response["datatable"]["data"][0])
+    row[TICKERS_COLUMNS.index("sector")] = None
+    row[TICKERS_COLUMNS.index("sicsector")] = None
+    payload = {
+        "datatable": dict(tickers_response["datatable"], data=[row]),
+        "meta": {"next_cursor_id": None},
+    }
+
+    def _get(table, params, ticker=None):
+        return payload if table == "TICKERS" else statements_payload
+
+    monkeypatch.setattr(sc, "_get", _get)
+    monkeypatch.setattr(sc, "fetch_ticker_meta", sc._fetch_ticker_meta)
     monkeypatch.setattr(sc, "fetch_statements", sc._fetch_statements)
-    monkeypatch.setattr(sc, "fetch_general", lambda ticker: {"endFy": 9})
     monkeypatch.setattr(sc, "fetch_prices", lambda *a, **k: pd.DataFrame(
         {"Date": pd.date_range("2026-07-01", periods=5, freq="B"),
          "Last Closing Price": [50.0] * 5}
     ))
-    monkeypatch.setattr(sc, "fetch_common_shares", lambda *a, **k: pd.DataFrame())
-    monkeypatch.setattr(sc, "fetch_weighted_shares", lambda *a, **k: pd.DataFrame())
-    monkeypatch.setattr(sc, "fetch_filings", lambda *a, **k: pd.DataFrame())
 
     dataset = dcf_model.load_company("TEST")
-    assert dataset.template == "GENERAL"
+    assert dataset.template == ""
 
 
 def test_erp_scrape_failure_returns_no_value(monkeypatch):

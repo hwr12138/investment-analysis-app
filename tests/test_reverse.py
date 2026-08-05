@@ -17,12 +17,12 @@ from app.logic.dcf import model as dcf_model
 from app.logic.dcf import reverse
 from app.logic.dcf.reverse import Shape, Status
 from app.logic.dcf.valuation import ProjectionError, TerminalValueError
-from tests.test_golden import build_model
+from tests.test_golden import GOLDEN, build_model
 
 
 @pytest.fixture
-def built(statements_payload, monkeypatch):
-    return build_model(statements_payload, monkeypatch)
+def built(statements_payload, tickers_response, monkeypatch):
+    return build_model(statements_payload, tickers_response, monkeypatch)
 
 
 def counting(function):
@@ -380,8 +380,8 @@ def test_a_forward_run_round_trips_back_through_the_solver(built, solve, growth,
 def test_the_golden_value_per_share_implies_the_golden_growth_rate(built, solve):
     """Ties the reverse model to the frozen forward snapshot."""
     for method, price in [
-        ("gordon", 5.2993920905120815),
-        ("exit_multiple", 6.207824603694285),
+        ("gordon", GOLDEN["value_per_share_gordon"]),
+        ("exit_multiple", GOLDEN["value_per_share_exit"]),
     ]:
         result = solve(price, headline_method=method)
         assert result.status is Status.SOLVED
@@ -410,7 +410,7 @@ def test_the_fixture_price_implies_an_implausible_rate_and_says_so(built, solve)
     """The fixture trades at 50.00 — reachable, but only on heroic growth."""
     result = solve(built["dataset"].last_price)
     assert result.status is Status.SOLVED
-    assert result.growth == pytest.approx(0.676942, abs=1e-5)
+    assert result.growth == pytest.approx(0.676601, abs=1e-5)
     assert result.plausible is False
     assert result.growth_creates_value is True
 

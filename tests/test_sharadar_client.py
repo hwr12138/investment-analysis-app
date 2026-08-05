@@ -1,0 +1,422 @@
+"""Datatable parsing, sign and unit normalisation, and the API key never leaking."""
+
+from __future__ import annotations
+
+import pandas as pd
+import pytest
+
+from app.data import sharadar_client as sc
+from tests.conftest import SF1_COLUMNS, sf1_payload, tickers_payload
+
+
+# ---------------------------------------------------------------------------
+# Parsing
+# ---------------------------------------------------------------------------
+
+
+def test_parses_the_datatable_envelope():
+    payload = {
+        "datatable": {
+            "columns": [{"name": "ticker"}, {"name": "revenue"}],
+            "data": [["AAPL", 100], ["MSFT", 120]],
+        },
+        "meta": {"next_cursor_id": None},
+    }
+    frame = sc.parse_datatable(payload)
+    assert list(frame.columns) == ["ticker", "revenue"]
+    assert frame["revenue"].tolist() == [100, 120]
+
+
+def test_column_order_may_differ_between_calls():
+    """Sharadar appends indicators over time, so nothing may depend on position."""
+    first = sc.parse_datatable(
+        {"datatable": {"columns": [{"name": n} for n in ("ticker", "revenue", "netinc")],
+                       "data": [["TEST", 1200, 240]]}}
+    )
+    second = sc.parse_datatable(
+        {"datatable": {"columns": [{"name": n} for n in ("netinc", "ticker", "revenue")],
+                       "data": [[240, "TEST", 1200]]}}
+    )
+    for column in ("ticker", "revenue", "netinc"):
+        assert first[column].iloc[0] == second[column].iloc[0]
+
+
+def test_empty_payload_yields_an_empty_frame():
+    assert sc.parse_datatable({}).empty
+    assert sc.parse_datatable({"datatable": {"columns": [], "data": []}}).empty
+
+
+def test_rows_are_sorted_chronologically(monkeypatch, statements_payload, tickers_response):
+    """The fixture rows arrive 2025, 2023, 2024 — the client must reorder them."""
+    _stub_tables(monkeypatch, sf1=statements_payload, tickers=tickers_response)
+    statements = sc._fetch_statements("TEST")
+    years = statements.frame("PL")["Fiscal Year"].tolist()
+    assert years == [2023, 2024, 2025]
+
+
+def test_duplicate_period_keeps_the_later_filing(monkeypatch, annual_rows, tickers_response):
+    """AR dimensions can emit two rows for one period when a company refiles."""
+    restated = list(annual_rows[0])
+    restated[SF1_COLUMNS.index("datekey")] = "2026-02-01"
+    restated[SF1_COLUMNS.index("revenue")] = 1250
+    _stub_tables(
+        monkeypatch,
+        sf1=sf1_payload(annual_rows + [restated]),
+        tickers=tickers_response,
+    )
+    frame = sc._fetch_statements("TEST").frame("PL")
+    assert len(frame) == 3
+    assert frame["Revenues"].iloc[-1] == 1250
+
+
+# ---------------------------------------------------------------------------
+# Normalisation the engine depends on
+# ---------------------------------------------------------------------------
+
+
+def test_expense_lines_are_negated_on_ingest(monkeypatch, statements_payload, tickers_response):
+    """Sharadar publishes expenses positive; the engine's contract is negative."""
+    _stub_tables(monkeypatch, sf1=statements_payload, tickers=tickers_response)
+    pl = sc._fetch_statements("TEST").frame("PL")
+    latest = pl.iloc[-1]
+    assert latest["Cost of Revenue"] == -700
+    assert latest["Operating Expenses"] == -190
+    assert latest["Income Tax Expense"] == -60
+
+
+def test_capex_is_not_negated(monkeypatch, statements_payload, tickers_response):
+    """Sharadar already signs capex negative — flipping it would invert FCFF."""
+    _stub_tables(monkeypatch, sf1=statements_payload, tickers=tickers_response)
+    cf = sc._fetch_statements("TEST").frame("CF")
+    assert cf["Capital Expenditure"].iloc[-1] == -100
+
+
+def test_income_statement_identity_holds_after_sign_flips(
+    monkeypatch, statements_payload, tickers_response
+):
+    """Revenue + cost of revenue + operating expenses = operating income."""
+    _stub_tables(monkeypatch, sf1=statements_payload, tickers=tickers_response)
+    row = sc._fetch_statements("TEST").frame("PL").iloc[-1]
+    computed = row["Revenues"] + row["Cost of Revenue"] + row["Operating Expenses"]
+    assert computed == pytest.approx(row["Operating Income"])
+
+
+def test_minority_interest_is_derived_as_the_equity_residual(
+    monkeypatch, annual_rows, tickers_response
+):
+    """Sharadar's equity is parent-only, so NCI is assets − liabilities − equity."""
+    row = list(annual_rows[0])
+    # Push equity below the residual so a non-zero NCI has to appear.
+    row[SF1_COLUMNS.index("equity")] = 300.0  # assets 1060 − liabilities 700 = 360
+    _stub_tables(monkeypatch, sf1=sf1_payload([row]), tickers=tickers_response)
+    bs = sc._fetch_statements("TEST").frame("BS")
+    assert bs[sc.MINORITY_INTEREST_CAPTION].iloc[-1] == pytest.approx(60.0)
+
+
+def test_fiscal_period_is_split_into_year_and_period(
+    monkeypatch, statements_payload, tickers_response
+):
+    _stub_tables(monkeypatch, sf1=statements_payload, tickers=tickers_response)
+    pl = sc._fetch_statements("TEST").frame("PL")
+    assert pl["Fiscal Year"].tolist() == [2023, 2024, 2025]
+    assert set(pl["Fiscal Period"]) == {"FY"}
+
+
+def test_every_statement_frame_carries_the_same_metadata(
+    monkeypatch, statements_payload, tickers_response
+):
+    """All four frames come off one SF1 row, so the merge key is identical."""
+    _stub_tables(monkeypatch, sf1=statements_payload, tickers=tickers_response)
+    statements = sc._fetch_statements("TEST")
+    reference = statements.frame("PL")[["Fiscal Year", "Fiscal Period", "Report Date"]]
+    for code in ("BS", "CF", "DERIVED"):
+        other = statements.frame(code)[["Fiscal Year", "Fiscal Period", "Report Date"]]
+        pd.testing.assert_frame_equal(reference, other)
+
+
+def test_daily_market_cap_and_ev_are_rescaled_to_raw_units(monkeypatch):
+    """DAILY publishes millions; SF1 and everything downstream use raw units."""
+    payload = {
+        "datatable": {
+            "columns": [{"name": n} for n in ("ticker", "date", "marketcap", "ev", "evebitda")],
+            "data": [["AAPL", "2026-08-03", 4428166.1, 4472966.1, 26.5]],
+        },
+        "meta": {"next_cursor_id": None},
+    }
+    monkeypatch.setattr(sc, "_get", lambda *a, **k: payload)
+    frame = sc._fetch_daily_metrics("AAPL")
+    assert frame["marketcap"].iloc[0] == pytest.approx(4.4281661e12)
+    assert frame["ev"].iloc[0] == pytest.approx(4.4729661e12)
+    # Ratios are dimensionless and must not be touched.
+    assert frame["evebitda"].iloc[0] == pytest.approx(26.5)
+
+
+# ---------------------------------------------------------------------------
+# Zero-versus-missing
+# ---------------------------------------------------------------------------
+
+
+def test_zero_filled_indicators_are_recognised_by_caption():
+    assert sc.is_zero_filled("Interest Expense")
+    assert sc.is_zero_filled("Capital Expenditure")
+    # Not a zero-filled indicator: Sharadar always computes it.
+    assert not sc.is_zero_filled("Operating Income")
+    # Not a Sharadar indicator at all.
+    assert not sc.is_zero_filled("Nonsense Line")
+
+
+def test_zeros_are_passed_through_rather_than_blanked(
+    monkeypatch, statements_payload, tickers_response
+):
+    """The client must not guess; a 0 stays a 0 and the validation layer flags it."""
+    _stub_tables(monkeypatch, sf1=statements_payload, tickers=tickers_response)
+    pl = sc._fetch_statements("TEST").frame("PL")
+    assert pl["Interest Expense"].iloc[-1] == 0.0
+    assert pl["Interest Expense"].notna().all()
+
+
+# ---------------------------------------------------------------------------
+# Sector gate
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "sic_code, sector, expected",
+    [
+        (6021, "Financial Services", True),      # bank
+        (6311, "Financial Services", True),      # life insurance
+        (6999, "Anything", True),                # top of SIC division H
+        (5999, "Retail", False),                 # just below
+        (7000, "Services", False),               # just above
+        (3571, "Technology", False),             # AAPL
+        (None, "Financial Services", True),      # no SIC, vendor label catches it
+        (None, "Technology", False),
+    ],
+)
+def test_financial_sector_detection(sic_code, sector, expected):
+    statements = sc.StatementSet(
+        ticker="X", permaticker=1, name="X", currency="USD", template=sector,
+        dimension="MRY", period="FY", ttm=False, asreported=False,
+        sic_code=sic_code, frames={},
+    )
+    assert statements.is_financial_template is expected
+
+
+# ---------------------------------------------------------------------------
+# Dimensions
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "annual, ttm, asreported, expected",
+    [
+        (True, False, False, "MRY"),
+        (False, False, False, "MRQ"),
+        (False, True, False, "MRT"),
+        (True, False, True, "ARY"),
+        (False, False, True, "ARQ"),
+        (False, True, True, "ART"),
+    ],
+)
+def test_dimension_codes(annual, ttm, asreported, expected):
+    assert sc.dimension_for(annual=annual, ttm=ttm, asreported=asreported) == expected
+
+
+def test_as_reported_and_restated_are_labelled_distinctly(
+    monkeypatch, statements_payload, tickers_response
+):
+    _stub_tables(monkeypatch, sf1=statements_payload, tickers=tickers_response)
+    assert sc._fetch_statements("TEST").frame("PL")["Restated"].iloc[0] == "Yes"
+    assert (
+        sc._fetch_statements("TEST", asreported=True).frame("PL")["Restated"].iloc[0]
+        == "No"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Views over a StatementSet
+# ---------------------------------------------------------------------------
+
+
+def test_share_frames_are_projected_off_the_statements(
+    monkeypatch, statements_payload, tickers_response
+):
+    _stub_tables(monkeypatch, sf1=statements_payload, tickers=tickers_response)
+    statements = sc._fetch_statements("TEST")
+
+    common = sc.common_shares_frame(statements)
+    assert list(common.columns) == ["endDate", "value"]
+    assert common["value"].iloc[-1] == 1000.0
+
+    weighted = sc.weighted_shares_frame(statements)
+    assert weighted["basic"].iloc[-1] == 1000.0
+    assert weighted["diluted"].iloc[-1] == 1010.0
+    assert weighted["endDate"].iloc[-1] == pd.Timestamp("2025-09-30")
+
+
+def test_share_factor_is_applied_to_the_point_in_time_count(
+    monkeypatch, annual_rows, tickers_response
+):
+    """ADRs and multi-class structures need the factor Sharadar applies itself."""
+    row = list(annual_rows[0])
+    row[SF1_COLUMNS.index("sharefactor")] = 0.5
+    _stub_tables(monkeypatch, sf1=sf1_payload([row]), tickers=tickers_response)
+    common = sc.common_shares_frame(sc._fetch_statements("TEST"))
+    assert common["value"].iloc[-1] == 500.0
+
+
+def test_filings_frame_labels_annual_rows_as_10k(
+    monkeypatch, statements_payload, tickers_response
+):
+    _stub_tables(monkeypatch, sf1=statements_payload, tickers=tickers_response)
+    filings = sc.filings_frame(sc._fetch_statements("TEST"))
+    assert filings["filingType"].tolist() == ["10-K", "10-K", "10-K"]
+    assert filings["sourceLink"].iloc[-1].startswith("https://www.sec.gov/")
+
+
+def test_fiscal_year_end_month_is_read_off_the_report_period(
+    monkeypatch, statements_payload, tickers_response
+):
+    _stub_tables(monkeypatch, sf1=statements_payload, tickers=tickers_response)
+    assert sc.fiscal_year_end_month(sc._fetch_statements("TEST")) == 9
+
+
+# ---------------------------------------------------------------------------
+# Transport
+# ---------------------------------------------------------------------------
+
+
+class _FakeResponse:
+    def __init__(self, status_code: int, payload=None):
+        self.status_code = status_code
+        self._payload = payload if payload is not None else {}
+
+    def json(self):
+        return self._payload
+
+
+def test_error_never_carries_the_api_key(monkeypatch):
+    """Nasdaq only takes the key as a query param, so no surface may echo params."""
+    secret = "SUPERSECRETKEY123"
+    monkeypatch.setattr(sc, "_api_key", lambda: secret)
+    monkeypatch.setattr(sc.requests, "get", lambda *a, **k: _FakeResponse(403))
+
+    with pytest.raises(sc.SharadarError) as caught:
+        sc._get("SF1", {"ticker": "AAPL"})
+
+    rendered = f"{caught.value} {caught.value.args!r} {caught.value.__dict__!r}"
+    assert secret not in rendered
+    assert "api_key" not in rendered
+    assert caught.value.status == 403
+
+
+@pytest.mark.parametrize("status", [400, 403, 404])
+def test_each_status_gets_a_distinct_message(monkeypatch, status):
+    monkeypatch.setattr(sc, "_api_key", lambda: "k")
+    monkeypatch.setattr(sc.requests, "get", lambda *a, **k: _FakeResponse(status))
+    with pytest.raises(sc.SharadarError) as caught:
+        sc._get("SF1", {})
+    assert str(status) in caught.value.message
+
+
+def test_rate_limit_is_retried_then_raised(monkeypatch):
+    calls = {"n": 0}
+
+    def _get(*args, **kwargs):
+        calls["n"] += 1
+        return _FakeResponse(429)
+
+    monkeypatch.setattr(sc, "_api_key", lambda: "k")
+    monkeypatch.setattr(sc.requests, "get", _get)
+    monkeypatch.setattr(sc.time, "sleep", lambda *_: None)
+
+    with pytest.raises(sc.SharadarError) as caught:
+        sc._get("SF1", {})
+    assert calls["n"] == sc._MAX_ATTEMPTS
+    assert caught.value.status == 429
+
+
+def test_rate_limit_recovers_on_retry(monkeypatch):
+    responses = [_FakeResponse(429), _FakeResponse(200, {"ok": True})]
+    monkeypatch.setattr(sc, "_api_key", lambda: "k")
+    monkeypatch.setattr(sc.requests, "get", lambda *a, **k: responses.pop(0))
+    monkeypatch.setattr(sc.time, "sleep", lambda *_: None)
+    assert sc._get("SF1", {}) == {"ok": True}
+
+
+def test_missing_key_raises_before_any_request(monkeypatch):
+    monkeypatch.setattr(sc.st, "secrets", {})
+
+    def _fail(*args, **kwargs):
+        raise AssertionError("a request was made without an API key")
+
+    monkeypatch.setattr(sc.requests, "get", _fail)
+    with pytest.raises(sc.SharadarError, match="SHARADAR_API_KEY"):
+        sc._get("SF1", {})
+
+
+def test_pagination_follows_the_cursor_until_exhausted(monkeypatch, annual_rows):
+    """Responses truncate at 10,000 rows; silently dropping the rest loses history."""
+    pages = [
+        sf1_payload(annual_rows[:1], cursor="abc"),
+        sf1_payload(annual_rows[1:], cursor=None),
+    ]
+    seen: list[dict] = []
+
+    def _get(table, params, ticker=None):
+        seen.append(dict(params))
+        return pages[len(seen) - 1]
+
+    monkeypatch.setattr(sc, "_get", _get)
+    frame = sc._request_all("SF1", {"ticker": "TEST"})
+
+    assert len(frame) == 3
+    assert len(seen) == 2
+    assert "qopts.cursor_id" not in seen[0]
+    assert seen[1]["qopts.cursor_id"] == "abc"
+
+
+def test_pagination_stops_at_the_runaway_guard(monkeypatch, annual_rows):
+    """A server that never clears the cursor must not loop forever."""
+    monkeypatch.setattr(
+        sc, "_get", lambda *a, **k: sf1_payload(annual_rows[:1], cursor="always")
+    )
+    frame = sc._request_all("SF1", {"ticker": "TEST"})
+    assert len(frame) == sc._MAX_PAGES
+
+
+def test_unknown_ticker_raises_rather_than_returning_empty(monkeypatch, tickers_response):
+    _stub_tables(monkeypatch, sf1=sf1_payload([]), tickers=tickers_response)
+    with pytest.raises(sc.TickerNotFoundError):
+        sc._fetch_statements("NOPE")
+
+
+# ---------------------------------------------------------------------------
+# Price-table routing
+# ---------------------------------------------------------------------------
+
+
+def test_tickers_are_routed_to_sep_or_sfp(monkeypatch):
+    """Nothing in a ticker string says whether it is an equity or a fund."""
+    payload = {
+        "datatable": {
+            "columns": [{"name": "table"}, {"name": "ticker"}],
+            "data": [["SF1", "AAPL"], ["SEP", "AAPL"], ["SFP", "SPY"]],
+        },
+        "meta": {"next_cursor_id": None},
+    }
+    monkeypatch.setattr(sc, "_get", lambda *a, **k: payload)
+    routes = sc._fetch_price_tables(("AAPL", "SPY"))
+    assert routes == {"AAPL": "SEP", "SPY": "SFP"}
+
+
+def _stub_tables(monkeypatch, *, sf1: dict, tickers: dict) -> None:
+    """Routes ``_get`` to the right canned payload by table name."""
+    def _get(table, params, ticker=None):
+        if table == "TICKERS":
+            return tickers
+        if table == "SF1":
+            return sf1
+        raise AssertionError(f"unexpected table {table}")
+
+    monkeypatch.setattr(sc, "_get", _get)

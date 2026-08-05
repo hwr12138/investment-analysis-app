@@ -118,7 +118,8 @@ def render_page():
         st.subheader("Portfolio Performance & Risk Metrics")
 
         metrics_df = ps_logic.get_comprehensive_metrics(
-            data, allocations, start_str, end_str, rf_rate_decimal, market_ticker="^GSPC"
+            data, allocations, start_str, end_str, rf_rate_decimal,
+            market_ticker=ps_logic.MARKET_TICKER,
         )
 
         if metrics_df.empty:

@@ -133,7 +133,7 @@ def regress_beta(
     *,
     frequency: str = "monthly",
     blume: bool = False,
-    index_ticker: str = "^GSPC",
+    index_ticker: str = "SPY",
     minimum_observations: int | None = None,
 ) -> BetaResult:
     """Regresses stock returns on index returns.

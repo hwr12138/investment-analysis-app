@@ -2,7 +2,7 @@ import streamlit as st
 from datetime import date
 
 from app import charts
-from app.data import market_data
+from app.data import market_data, sharadar_client
 from app.logic import portfolio_optimization as po_logic
 
 # --- Main Dashboard Render ---
@@ -23,7 +23,7 @@ def render_page():
             tickers_input = st.text_input(
                 "Enter Tickers (comma-separated)",
                 value="QQQ, GLD, XLE",
-                help="Enter valid Yahoo Finance tickers."
+                help="Enter US-listed stock or ETF tickers covered by Sharadar."
             )
             start_date = st.date_input("Start Date", value=date(2020, 1, 1), min_value=date(1900, 1, 1))
             end_date = st.date_input("End Date", value=date.today(), min_value=date(1900, 1, 1))
@@ -58,7 +58,7 @@ def render_page():
             return
 
         with st.spinner(f"Fetching historical data for {len(tickers_list)} assets..."):
-            data = market_data.fetch_historical_data(tickers_list, start_str, end_str)
+            data = sharadar_client.fetch_price_history(tuple(tickers_list), start_str, end_str)
 
         if data.empty or data.shape[1] < 2:
             st.error("Failed to download enough valid data. Please check your tickers and date range.")

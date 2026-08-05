@@ -40,7 +40,7 @@ def test_r_squared_is_reported_alongside_beta(paired_prices):
     result = wl.regress_beta(stock, index, frequency="monthly")
     assert 0.0 <= result.r_squared <= 1.0
     assert result.observations >= wl.MIN_MONTHLY_OBSERVATIONS
-    assert result.index_ticker == "^GSPC"
+    assert result.index_ticker == "SPY"
 
 
 def test_noise_produces_a_low_r_squared():
