@@ -3,6 +3,7 @@ from app.views import dcf_valuation as dcf_page
 from app.views import momentum_analysis as ma_page
 from app.views import portfolio_optimization as po_page
 from app.views import portfolio_statistics as ps_page
+from app.views import stock_research as sr_page
 
 # Set the title and favicon that appear in the Browser's tab bar.
 st.set_page_config(
@@ -34,6 +35,7 @@ st.markdown(f'<a href="{linkedin_url}" target="_blank" style="text-decoration: n
 # Navigation
 
 pg = st.navigation([
+    st.Page(sr_page.render_page, title="Stock Research", icon="🔎", url_path="stock_research"),
     st.Page(dcf_page.render_page, title="DCF Valuation", icon="💰", url_path="dcf_valuation"),
     st.Page(po_page.render_page, title="Portfolio Optimization", icon="📈", url_path="portfolio_optimization"),
     st.Page(ps_page.render_page, title="Portfolio Statistics", icon="📊", url_path="portfolio_statistics"),

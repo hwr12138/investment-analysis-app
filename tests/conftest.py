@@ -229,3 +229,40 @@ def financial_tickers_response() -> dict:
     row[TICKERS_COLUMNS.index("sector")] = "Financial Services"
     row[TICKERS_COLUMNS.index("industry")] = "Banks - Diversified"
     return tickers_payload(row)
+
+
+# ---------------------------------------------------------------------------
+# Corporate actions
+# ---------------------------------------------------------------------------
+
+#: ``SHARADAR/ACTIONS`` columns. As with SF1, the order here is deliberately not
+#: the order the client reads them in.
+ACTIONS_COLUMNS = ["action", "value", "date", "ticker", "name", "contraticker", "contraname"]
+
+#: Rows in the order the API actually returns them: **newest first**, the
+#: reverse of every other Sharadar table. The contra columns carry the literal
+#: string ``"N/A"`` rather than a null, which is the other quirk the client
+#: absorbs. Two dividends, one split, one ticker change with a real contra.
+ACTIONS_ROWS = [
+    ["dividend", 0.27, "2025-11-10", "TEST", "TESTCO INC", "N/A", "N/A"],
+    ["dividend", 0.25, "2025-05-12", "TEST", "TESTCO INC", "N/A", "N/A"],
+    ["split", 4.0, "2020-08-31", "TEST", "TESTCO INC", "N/A", "N/A"],
+    ["tickerchangeto", None, "2014-03-27", "TEST", "TESTCO INC", "OLDT", "OLDCO INC"],
+]
+
+
+def actions_payload(rows: list | None = None, *, cursor: str | None = None) -> dict:
+    """Wraps action rows in the datatable envelope."""
+    return {
+        "datatable": {
+            "data": rows if rows is not None else ACTIONS_ROWS,
+            "columns": [{"name": name, "type": "text"} for name in ACTIONS_COLUMNS],
+        },
+        "meta": {"next_cursor_id": cursor},
+    }
+
+
+@pytest.fixture
+def actions_response() -> dict:
+    """A complete ``SHARADAR/ACTIONS`` response for the fixture company."""
+    return actions_payload()

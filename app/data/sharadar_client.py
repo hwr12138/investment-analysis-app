@@ -4,16 +4,18 @@ Everything that talks to ``data.nasdaq.com`` lives here: auth, retry,
 pagination, caching, and the datatable parsing. Callers get pandas frames with
 resolved column names and nothing else.
 
-Four Sharadar tables are used:
+Six Sharadar tables are used:
 
 * ``SF1``     — Core US Fundamentals. One wide row of ~110 indicators per
   (ticker, dimension, period). Partitioned here into the ``PL``/``BS``/``CF``/
   ``DERIVED`` frames the concept resolver expects.
 * ``SEP``     — End-of-day equity prices.
 * ``SFP``     — End-of-day fund (ETF/CEF) prices. Same columns as SEP.
-* ``DAILY``   — Daily valuation ratios (market cap, EV, EV/EBITDA).
+* ``DAILY``   — Daily valuation ratios (market cap, EV, EV/EBITDA, PE, PB, PS).
 * ``TICKERS`` — Reference data: sector, SIC code, currency, EDGAR link, and
   which price table a ticker lives in.
+* ``ACTIONS`` — Corporate actions: dividends (the date *is* the ex-dividend
+  date), splits, listings, ticker changes.
 
 Four things about this API are not obvious from its docs and were confirmed
 against live AAPL and JPM responses. They are the reason this module exists
@@ -865,6 +867,22 @@ def _fetch_daily_metrics(ticker: str, start: str | None = None) -> pd.DataFrame:
     return frame.dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
 
 
+@st.cache_data(show_spinner=False, ttl=60 * 60 * 12)
+def fetch_daily_metrics(ticker: str, start: str | None = None) -> pd.DataFrame:
+    """Daily valuation ratios: ``ev evebit evebitda marketcap pb pe ps``.
+
+    ``fetch_prices`` merges only ``marketcap`` and ``evebitda`` into the price
+    frame because that is all the DCF needs; this exposes the whole thing for
+    callers that want the multiples. Both go through the same private fetcher,
+    which is the point — the millions-to-raw conversion for ``marketcap`` and
+    ``ev`` happens in exactly one place, and a second call site doing its own
+    DAILY request would be a factor-of-a-million bug waiting to happen.
+
+    Columns keep Sharadar's own names and the frame is sorted oldest-first.
+    """
+    return _fetch_daily_metrics(ticker, start)
+
+
 def _fetch_prices(ticker: str, start: str | None = None) -> pd.DataFrame:
     prices = _fetch_price_rows(ticker, table=_price_table_for(ticker), start=start)
     if prices.empty:
@@ -1006,3 +1024,65 @@ def fetch_ohlcv(ticker: str, start_date: str, end_date: str) -> pd.DataFrame:
     series for anything that needs total return.
     """
     return _fetch_ohlcv(ticker, start_date, end_date)
+
+
+# ---------------------------------------------------------------------------
+# Corporate actions
+# ---------------------------------------------------------------------------
+
+#: ``action`` values seen in live ACTIONS responses (AAPL, KO, GOOGL, AMZN):
+#: ``dividend``, ``split``, ``listed``, ``initiated``, ``relation``,
+#: ``acquisitionof``, ``tickerchangefrom``, ``tickerchangeto``. The list is not
+#: closed — Sharadar adds action types — so callers filter for the ones they
+#: understand rather than exhausting it.
+DIVIDEND_ACTION = "dividend"
+SPLIT_ACTION = "split"
+
+#: ACTIONS fills the contra columns with the *string* ``"N/A"`` rather than a
+#: null when an action has no counterparty, which would otherwise render as a
+#: literal "N/A" ticker on screen.
+_ACTIONS_NULL_TEXT = frozenset({"N/A", "NA", ""})
+
+
+def _fetch_actions(ticker: str, start: str | None = None) -> pd.DataFrame:
+    params: dict = {"ticker": ticker}
+    if start:
+        params["date.gte"] = start
+
+    frame = _request_all("ACTIONS", params, ticker=ticker)
+    if frame.empty or "date" not in frame.columns:
+        return pd.DataFrame()
+
+    frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
+    if "value" in frame.columns:
+        frame["value"] = pd.to_numeric(frame["value"], errors="coerce")
+    if "action" in frame.columns:
+        frame["action"] = frame["action"].astype(str).str.strip().str.lower()
+    for column in ("contraticker", "contraname"):
+        if column in frame.columns:
+            frame[column] = frame[column].where(
+                ~frame[column].astype(str).str.strip().str.upper().isin(_ACTIONS_NULL_TEXT)
+            )
+
+    return frame.dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
+
+
+@st.cache_data(show_spinner=False, ttl=60 * 60 * 12)
+def fetch_actions(ticker: str, start: str | None = None) -> pd.DataFrame:
+    """Corporate actions for one ticker, oldest first.
+
+    Columns are Sharadar's own: ``date action ticker name value contraticker
+    contraname``. On a ``dividend`` row ``date`` **is the ex-dividend date** and
+    ``value`` is the dividend per share; on a ``split`` row ``value`` is the
+    ratio. That mapping is documented nowhere in the vendor's column titles —
+    it was confirmed against live responses.
+
+    Returns an **empty frame rather than raising** when there is nothing: a
+    company that has never paid a dividend or split is ordinary, not an error,
+    and an empty response cannot be told apart from an unknown ticker here.
+    Callers that need the ticker validated should use ``fetch_ticker_meta``.
+
+    Rows arrive newest-first from the API — the reverse of every other table
+    here — so the sort is load-bearing, not defensive.
+    """
+    return _fetch_actions(ticker, start)

@@ -1,0 +1,421 @@
+"""Stock research statistics: window slicing, ranges, and the dividend zero-fill guard.
+
+Everything here runs against constructed frames — nothing touches the network,
+and nothing needs a Streamlit runtime, because the module under test is pure.
+"""
+
+from __future__ import annotations
+
+from datetime import date
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from app.data import sharadar_client as sc
+from app.logic import stock_research as sr
+from app.provenance import Origin
+
+TODAY = date(2026, 8, 5)
+
+
+def _ohlcv(start: str = "2019-01-01", end: str = "2026-08-05") -> pd.DataFrame:
+    """A well-behaved daily bar series on business days."""
+    index = pd.bdate_range(start, end, name="Date")
+    base = np.linspace(100.0, 300.0, len(index))
+    return pd.DataFrame(
+        {
+            "Open": base,
+            "High": base + 2.0,
+            "Low": base - 2.0,
+            "Close": base + 1.0,
+            "Adj Close": base + 1.0,
+            "Volume": np.full(len(index), 1_000_000.0),
+        },
+        index=index,
+    )
+
+
+def _actions(rows: list[tuple[str, str, float]]) -> pd.DataFrame:
+    """``(action, date, value)`` triples in the client's output shape."""
+    if not rows:
+        return pd.DataFrame(columns=["date", "action", "value"])
+    return pd.DataFrame(
+        {
+            "action": [r[0] for r in rows],
+            "date": pd.to_datetime([r[1] for r in rows]),
+            "value": [r[2] for r in rows],
+        }
+    ).sort_values("date").reset_index(drop=True)
+
+
+def _ttm_pl(**indicators) -> pd.DataFrame:
+    """A one-row TTM income statement keyed by Sharadar's published captions."""
+    row = {sc.SF1_CAPTIONS[key]: value for key, value in indicators.items()}
+    row["Report Date"] = pd.Timestamp("2026-06-30")
+    return pd.DataFrame([row])
+
+
+# ---------------------------------------------------------------------------
+# Window slicing
+# ---------------------------------------------------------------------------
+
+
+def test_five_day_window_counts_sessions_not_calendar_days():
+    """5D on a quote page means five bars, not five days minus a weekend."""
+    assert len(sr.slice_period(_ohlcv(), "5D", TODAY)) == 5
+
+
+def test_all_returns_the_untouched_frame():
+    frame = _ohlcv()
+    assert sr.slice_period(frame, "ALL", TODAY) is frame
+
+
+def test_ytd_starts_at_january_first_of_the_current_year():
+    window = sr.slice_period(_ohlcv(), "YTD", TODAY)
+    assert window.index.min() >= pd.Timestamp("2026-01-01")
+    assert window.index.min() < pd.Timestamp("2026-01-06")
+
+
+def test_ytd_is_anchored_to_the_calendar_not_to_the_data():
+    """The other windows follow the last bar; YTD must not, or it stops meaning YTD."""
+    stale = _ohlcv(end="2026-03-31")
+    window = sr.slice_period(stale, "YTD", TODAY)
+    assert window.index.min() >= pd.Timestamp("2026-01-01")
+
+
+@pytest.mark.parametrize(
+    "period,years",
+    [("1M", 1 / 12), ("3M", 0.25), ("6M", 0.5), ("1Y", 1.0), ("5Y", 5.0)],
+)
+def test_calendar_windows_span_roughly_their_label(period, years):
+    window = sr.slice_period(_ohlcv(), period, TODAY)
+    span_years = (window.index.max() - window.index.min()).days / 365.25
+    assert span_years == pytest.approx(years, abs=0.06)
+
+
+def test_a_window_longer_than_the_history_returns_everything():
+    short = _ohlcv(start="2026-06-01")
+    assert len(sr.slice_period(short, "5Y", TODAY)) == len(short)
+
+
+def test_slicing_an_empty_frame_is_empty_not_an_error():
+    for period in sr.PERIODS:
+        assert sr.slice_period(pd.DataFrame(), period, TODAY).empty
+
+
+def test_period_change_measures_first_to_last_close():
+    frame = pd.DataFrame(
+        {"Close": [100.0, 110.0]}, index=pd.to_datetime(["2026-08-04", "2026-08-05"])
+    )
+    change = sr.period_change(frame)
+    assert change.ok
+    assert change.value == pytest.approx(0.10)
+    assert change.origin is Origin.DERIVED
+
+
+def test_period_change_of_a_single_session_is_unavailable_not_zero():
+    frame = pd.DataFrame({"Close": [100.0]}, index=pd.to_datetime(["2026-08-05"]))
+    change = sr.period_change(frame)
+    assert not change.ok
+    assert change.origin is Origin.UNAVAILABLE
+
+
+# ---------------------------------------------------------------------------
+# Ranges
+# ---------------------------------------------------------------------------
+
+
+def test_days_range_reads_the_latest_bar():
+    tile = sr.days_range(_ohlcv(), "USD")
+    assert tile.ok
+    assert tile.origin is Origin.REPORTED
+    # The unit is stated once, on the left.
+    assert tile.display.count("USD") == 1
+
+
+def test_fifty_two_week_range_excludes_older_bars():
+    """A spike thirteen months back must not widen the 52-week range."""
+    frame = _ohlcv(start="2024-01-01")
+    frame.loc[frame.index[0], "High"] = 10_000.0
+    tile = sr.fifty_two_week_range(frame, "USD")
+    assert "10,000" not in tile.display
+    assert tile.origin is Origin.DERIVED
+
+
+def test_ranges_on_an_empty_frame_report_unavailable():
+    for tile in (
+        sr.days_range(pd.DataFrame(), "USD"),
+        sr.fifty_two_week_range(pd.DataFrame(), "USD"),
+    ):
+        assert not tile.ok
+        assert tile.origin is Origin.UNAVAILABLE
+        assert tile.detail
+
+
+# ---------------------------------------------------------------------------
+# The dividend zero-fill guard
+# ---------------------------------------------------------------------------
+# Sharadar writes 0 both for "pays nothing" and for "absent from the filing".
+# ACTIONS is what tells the two apart.
+
+
+def test_zero_dividend_with_no_actions_is_a_genuine_nil():
+    tile = sr._dividend_tile(_ttm_pl(dps=0.0), _actions([]), 100.0, "USD", TODAY)
+    assert tile.ok
+    assert "no dividends" in tile.detail.lower()
+
+
+def test_zero_dividend_contradicted_by_actions_is_unavailable_not_zero():
+    """The one case where a plausible-looking 0 must not be shown."""
+    paid = _actions([("dividend", "2026-03-09", 0.21), ("dividend", "2026-06-08", 0.22)])
+    tile = sr._dividend_tile(_ttm_pl(dps=0.0), paid, 100.0, "USD", TODAY)
+    assert not tile.ok
+    assert tile.origin is Origin.UNAVAILABLE
+    assert "ACTIONS" in tile.detail
+
+
+def test_the_dividend_cell_carries_its_yield_in_brackets():
+    """SF1 rounds ``divyield`` to three decimals; 1.05/311 must not become 0.4%."""
+    paid = _actions([("dividend", "2026-05-11", 0.27)])
+    tile = sr._dividend_tile(_ttm_pl(dps=1.05), paid, 311.0, "USD", TODAY)
+    assert tile.display == "USD 1.05 (0.34%)"
+    # Reported dividend, derived yield — the weaker origin governs the cell.
+    assert tile.origin is Origin.DERIVED
+
+
+def test_a_dividend_without_a_price_shows_no_yield_rather_than_a_wrong_one():
+    tile = sr._dividend_tile(_ttm_pl(dps=1.05), _actions([]), None, "USD", TODAY)
+    assert tile.display == "USD 1.05"
+    assert "%" not in tile.display
+
+
+def test_a_missing_dps_line_is_unavailable_rather_than_nil():
+    """Absent is not the same as zero, and neither is shown as the other."""
+    tile = sr._dividend_tile(pd.DataFrame(), _actions([]), 100.0, "USD", TODAY)
+    assert not tile.ok
+    assert tile.origin is Origin.UNAVAILABLE
+
+
+# ---------------------------------------------------------------------------
+# Ex-dividend date
+# ---------------------------------------------------------------------------
+
+
+def test_ex_dividend_date_is_the_latest_dividend_action():
+    paid = _actions(
+        [("dividend", "2026-03-09", 0.21), ("split", "2026-04-01", 4.0),
+         ("dividend", "2026-06-08", 0.22)]
+    )
+    tile = sr._ex_dividend_tile(paid, "USD", TODAY)
+    assert tile.display == "2026-06-08"
+    assert "0.22" in tile.detail
+
+
+def test_a_future_ex_date_is_labelled_upcoming():
+    """Sharadar carries declared ex-dates ahead of time."""
+    tile = sr._ex_dividend_tile(_actions([("dividend", "2026-09-08", 0.22)]), "USD", TODAY)
+    assert "upcoming" in tile.detail
+
+
+def test_a_company_that_never_paid_has_no_ex_date():
+    tile = sr._ex_dividend_tile(_actions([("split", "2020-08-31", 4.0)]), "USD", TODAY)
+    assert not tile.ok
+    assert tile.origin is Origin.UNAVAILABLE
+
+
+# ---------------------------------------------------------------------------
+# Reporting calendar
+# ---------------------------------------------------------------------------
+
+
+def _quarterly_ar(periods: list[tuple[str, str]]) -> pd.DataFrame:
+    """``(report period, publish date)`` pairs, oldest first."""
+    return pd.DataFrame(
+        {
+            "Report Date": pd.to_datetime([p[0] for p in periods]),
+            "Publish Date": pd.to_datetime([p[1] for p in periods]),
+            "Fiscal Year": [pd.Timestamp(p[0]).year for p in periods],
+            "Fiscal Period": ["Q2"] * len(periods),
+        }
+    )
+
+
+def test_next_report_adds_the_median_filing_lag_to_the_next_period_end():
+    frame = _quarterly_ar(
+        [
+            ("2025-09-30", "2025-10-31"),
+            ("2025-12-31", "2026-01-31"),
+            ("2026-03-31", "2026-04-30"),
+            ("2026-06-30", "2026-07-31"),
+        ]
+    )
+    tile = sr._next_report_tile(frame, TODAY)
+    # 2026-06-30 + 3 months = 2026-09-30, + 31 days median lag.
+    assert tile.display == "2026-10-31"
+    assert tile.origin is Origin.ESTIMATE
+
+
+def test_the_last_real_filing_date_rides_along_in_the_detail():
+    """It is what the estimate is built from, so it stays reachable."""
+    frame = _quarterly_ar([("2026-06-30", "2026-07-31")])
+    assert "Last filed 2026-07-31" in sr._next_report_tile(frame, TODAY).detail
+
+
+def test_next_report_is_never_presented_as_an_announced_earnings_date():
+    frame = _quarterly_ar([("2026-06-30", "2026-07-31")])
+    tile = sr._next_report_tile(frame, TODAY)
+    assert tile.origin is Origin.ESTIMATE
+    assert "no earnings calendar" in tile.detail
+
+
+def test_an_estimate_that_has_already_passed_says_so():
+    """Stale vendor data must not read as a confident future date."""
+    frame = _quarterly_ar([("2026-03-31", "2026-05-01")])
+    tile = sr._next_report_tile(frame, TODAY)
+    assert tile.display == "2026-07-31"
+    assert "has passed" in tile.detail
+
+
+def test_no_filing_history_reports_unavailable():
+    tile = sr._next_report_tile(pd.DataFrame(), TODAY)
+    assert not tile.ok
+    assert tile.origin is Origin.UNAVAILABLE
+
+
+# ---------------------------------------------------------------------------
+# Beta
+# ---------------------------------------------------------------------------
+
+
+def test_beta_of_a_series_that_tracks_the_index_is_one():
+    index = pd.bdate_range("2020-01-01", "2026-08-05")
+    rng = np.random.default_rng(0)
+    market = pd.Series(100 * np.cumprod(1 + rng.normal(0, 0.01, len(index))), index=index)
+    tile = sr._beta_tile(market.copy(), market)
+    assert tile.ok
+    assert float(tile.display) == pytest.approx(1.0, abs=0.01)
+    assert tile.origin is Origin.DERIVED
+
+
+def test_too_short_a_history_reports_unavailable_rather_than_a_noisy_beta():
+    index = pd.bdate_range("2026-01-01", "2026-08-05")
+    series = pd.Series(np.linspace(100, 120, len(index)), index=index)
+    tile = sr._beta_tile(series, series * 1.01)
+    assert not tile.ok
+    assert tile.origin is Origin.UNAVAILABLE
+
+
+def test_beta_as_of_comes_from_the_price_series_not_the_resample_label():
+    """Resampling to month-end labels the last bucket in the future."""
+    index = pd.bdate_range("2020-01-01", "2026-08-05")
+    rng = np.random.default_rng(1)
+    market = pd.Series(100 * np.cumprod(1 + rng.normal(0, 0.01, len(index))), index=index)
+    tile = sr._beta_tile(market.copy(), market)
+    assert tile.as_of == index.max().date()
+
+
+# ---------------------------------------------------------------------------
+# The grid as a whole
+# ---------------------------------------------------------------------------
+
+
+def _build(**overrides):
+    base = dict(
+        ohlcv=_ohlcv(),
+        daily=pd.DataFrame(
+            {
+                "date": [pd.Timestamp("2026-08-05")],
+                "marketcap": [4.5e12],
+                "ev": [4.6e12],
+                "pe": [35.2],
+                "pb": [42.2],
+                "ps": [9.7],
+                "evebitda": [27.1],
+            }
+        ),
+        ttm_pl=_ttm_pl(dps=1.05, epsdil=8.71),
+        quarterly_ar=_quarterly_ar([("2026-06-30", "2026-07-31")]),
+        actions=_actions([("dividend", "2026-05-11", 0.27)]),
+        stock_closes=pd.Series(dtype="float64"),
+        index_closes=pd.Series(dtype="float64"),
+        currency="USD",
+        today=TODAY,
+    )
+    base.update(overrides)
+    return sr.build_key_stats(**base)
+
+
+def test_the_layout_and_the_tiles_agree_exactly():
+    """A renamed tile must fail here rather than leave a hole in the table.
+
+    The table is laid out from ``STAT_COLUMNS`` by label lookup, so the two
+    lists drifting apart is the failure this guards: a label with no tile
+    renders "not reported" forever, and a tile with no label vanishes.
+    """
+    laid_out = {label for column in sr.STAT_COLUMNS for label in column}
+    produced = {tile.label for tile in _build()}
+    assert laid_out | {sr.HEADLINE_STAT} == produced
+
+
+def test_the_headline_stat_is_not_repeated_in_the_table():
+    """Previous Close sits above the chart; showing it twice wastes a cell."""
+    laid_out = {label for column in sr.STAT_COLUMNS for label in column}
+    assert sr.HEADLINE_STAT not in laid_out
+
+
+def test_every_tile_carries_an_origin():
+    assert all(isinstance(tile.origin, Origin) for tile in _build())
+
+
+def test_stats_by_label_round_trips_every_tile():
+    tiles = _build()
+    assert len(sr.stats_by_label(tiles)) == len(tiles)
+
+
+def test_missing_feeds_produce_unavailable_tiles_rather_than_zeros():
+    """A dropped feed must be visible, not silently absent."""
+    tiles = _build(daily=pd.DataFrame(), ttm_pl=pd.DataFrame(), actions=_actions([]))
+    by_label = sr.stats_by_label(tiles)
+    for label in ("Market Cap", "P/E", "EPS (TTM, diluted)", "Ex-Dividend Date"):
+        assert not by_label[label].ok, label
+        assert by_label[label].origin is Origin.UNAVAILABLE, label
+        assert by_label[label].detail, label
+    # The price-derived tiles still work — one missing feed does not cascade.
+    assert by_label[sr.HEADLINE_STAT].ok
+
+
+def test_market_cap_is_formatted_from_raw_units():
+    """DAILY publishes millions; the client rescales, so 4.5e12 must read as trillions."""
+    tile = next(t for t in _build() if t.label == "Market Cap")
+    assert tile.display == "USD 4.50T"
+
+
+def test_an_empty_price_history_does_not_raise():
+    tiles = _build(ohlcv=pd.DataFrame())
+    assert all(isinstance(tile, sr.StatTile) for tile in tiles)
+    assert not next(t for t in tiles if t.label == "Previous Close").ok
+
+
+# ---------------------------------------------------------------------------
+# StatTile
+# ---------------------------------------------------------------------------
+
+
+def test_an_unavailable_sourced_projects_to_a_tile_with_no_display():
+    from app.provenance import Sourced
+
+    tile = sr.StatTile.from_sourced(
+        "X", Sourced.unavailable("Sharadar", "nothing there"), sr.format_ratio
+    )
+    assert not tile.ok
+    assert tile.display is None
+    assert "nothing there" in tile.describe()
+
+
+@pytest.mark.parametrize("value", [None, float("nan"), float("inf")])
+def test_formatters_never_invent_a_number(value):
+    assert sr.format_money(value) == "not reported"
+    assert sr.format_count(value) == "not reported"
+    assert sr.format_ratio(value) == "not reported"
+    assert sr.format_pct(value) == "not reported"

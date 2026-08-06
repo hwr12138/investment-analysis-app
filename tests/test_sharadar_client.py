@@ -151,6 +151,67 @@ def test_daily_market_cap_and_ev_are_rescaled_to_raw_units(monkeypatch):
     assert frame["evebitda"].iloc[0] == pytest.approx(26.5)
 
 
+def test_daily_metrics_exposes_the_multiples_that_fetch_prices_drops(monkeypatch):
+    """``fetch_prices`` keeps only marketcap and evebitda; the research page needs the rest."""
+    payload = {
+        "datatable": {
+            "columns": [
+                {"name": n}
+                for n in ("ticker", "date", "ev", "evebit", "evebitda", "marketcap", "pb", "pe", "ps")
+            ],
+            "data": [["AAPL", "2026-08-05", 4583590.0, 29.4, 27.1, 4538790.0, 42.2, 35.2, 9.7]],
+        },
+        "meta": {"next_cursor_id": None},
+    }
+    monkeypatch.setattr(sc, "_get", lambda *a, **k: payload)
+    frame = sc._fetch_daily_metrics("AAPL")
+    for column in ("pe", "pb", "ps", "evebit"):
+        assert column in frame.columns
+    assert frame["pe"].iloc[0] == pytest.approx(35.2)
+    # Still raw units, because the wrapper shares one fetcher with fetch_prices.
+    assert frame["marketcap"].iloc[0] == pytest.approx(4.53879e12)
+
+
+# ---------------------------------------------------------------------------
+# Corporate actions
+# ---------------------------------------------------------------------------
+
+
+def test_actions_are_sorted_oldest_first(monkeypatch, actions_response):
+    """ACTIONS arrives newest-first — the reverse of every other table here."""
+    monkeypatch.setattr(sc, "_get", lambda *a, **k: actions_response)
+    frame = sc._fetch_actions("TEST")
+    dates = frame["date"].tolist()
+    assert dates == sorted(dates)
+    assert frame["date"].iloc[-1] == pd.Timestamp("2025-11-10")
+
+
+def test_actions_normalise_the_na_contra_columns(monkeypatch, actions_response):
+    """Sharadar writes the string "N/A", which would otherwise render as a ticker."""
+    monkeypatch.setattr(sc, "_get", lambda *a, **k: actions_response)
+    frame = sc._fetch_actions("TEST")
+    dividends = frame[frame["action"] == sc.DIVIDEND_ACTION]
+    assert dividends["contraticker"].isna().all()
+    # A real counterparty survives.
+    change = frame[frame["action"] == "tickerchangeto"]
+    assert change["contraticker"].iloc[0] == "OLDT"
+
+
+def test_actions_dividend_rows_carry_the_ex_date_and_amount(monkeypatch, actions_response):
+    monkeypatch.setattr(sc, "_get", lambda *a, **k: actions_response)
+    frame = sc._fetch_actions("TEST")
+    latest = frame[frame["action"] == sc.DIVIDEND_ACTION].iloc[-1]
+    assert latest["date"] == pd.Timestamp("2025-11-10")
+    assert latest["value"] == pytest.approx(0.27)
+
+
+def test_no_actions_returns_an_empty_frame_rather_than_raising(monkeypatch):
+    """A company that has never paid a dividend is ordinary, not an error."""
+    empty = {"datatable": {"columns": [], "data": []}, "meta": {"next_cursor_id": None}}
+    monkeypatch.setattr(sc, "_get", lambda *a, **k: empty)
+    assert sc._fetch_actions("TEST").empty
+
+
 # ---------------------------------------------------------------------------
 # Zero-versus-missing
 # ---------------------------------------------------------------------------
