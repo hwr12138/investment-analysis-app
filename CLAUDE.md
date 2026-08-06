@@ -18,8 +18,9 @@ There is no linter, formatter, type checker, or pytest config file in this repo.
 `.claude/launch.json` defines a `streamlit` configuration on port 8502 — start the app for preview
 with that rather than Bash.
 
-`FMP_API_KEY` (Treasury rates) and `SHARADAR_API_KEY` (fundamentals, prices) come from
-`.streamlit/secrets.toml`, which is gitignored. Tests never need them.
+`SHARADAR_API_KEY` (fundamentals, prices) comes from `.streamlit/secrets.toml`, which is
+gitignored. Treasury yields come from Yahoo Finance via `yfinance` (`^IRX` short rate, `^TNX`
+10-year) and need no key. Tests never need either.
 
 ## Architecture
 

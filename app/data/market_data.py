@@ -1,8 +1,9 @@
 """Rates and the equity risk premium.
 
 The two market inputs that do not come from a securities feed: Treasury yields
-from Financial Modeling Prep, and the implied equity risk premium scraped from
-Damodaran. Prices and fundamentals live in the sibling ``sharadar_client``.
+proxied by the CBOE yield indices on Yahoo Finance, and the implied equity risk
+premium scraped from Damodaran. Prices and fundamentals live in the sibling
+``sharadar_client``.
 
 Two of the fetchers here return :class:`~app.provenance.Sourced` rather than a
 bare float: a scrape or a third-party rate can fail, and the DCF page must be
@@ -16,6 +17,7 @@ from datetime import date, datetime
 
 import requests
 import streamlit as st
+import yfinance as yf
 
 from app.provenance import Sourced
 
@@ -26,88 +28,98 @@ ERP_PLAUSIBLE_BAND = (0.02, 0.10)
 DAMODARAN_URL = "https://pages.stern.nyu.edu/~adamodar/New_Home_Page/home.htm"
 
 
-# --- Treasury Rates (Financial Modeling Prep) ---
+# --- Treasury Rates (Yahoo Finance yield indices) ---
+
+#: CBOE 13-week Treasury bill index — the short-term risk-free proxy. It quotes
+#: the bill's *discount* rate, which sits a few basis points under the
+#: bond-equivalent yield; close enough for a Sharpe-ratio input, and the
+#: shortest tenor Yahoo publishes.
+IRX_SYMBOL = "^IRX"
+
+#: CBOE 10-year Treasury note yield index — the constant-maturity 10-year.
+TNX_SYMBOL = "^TNX"
+
+#: Both indices quote in percentage points, so 4.63 means 4.63%. A reading
+#: outside this band means the quoting convention moved under us — Yahoo
+#: published ^TNX at ten times the yield for years — and a rate wrong by a
+#: factor of ten passes every downstream sanity check, so it is treated as a
+#: failed fetch rather than passed through.
+YIELD_PLAUSIBLE_BAND_PCT = (-1.0, 25.0)
 
 
 @st.cache_data(show_spinner=False, ttl=3600 * 24)
-def _fetch_fmp_treasury_rates() -> tuple[dict, str]:
-    """Fetches the latest Treasury-rates record from Financial Modeling Prep.
+def _fetch_yahoo_yield(symbol: str) -> tuple[float | None, date | None, str]:
+    """Fetches the latest daily close of a Yahoo Finance Treasury-yield index.
 
-    Returns ``(record, error)`` where ``record`` is the most recent
-    ``{tenor: rate_percent}`` dict and ``error`` is an empty string on success
-    or a reason on failure. The reason is what lets callers that must not
-    fabricate a rate explain themselves; callers that tolerate a default can
-    ignore it.
+    Returns ``(rate_percent, as_of, error)``. ``rate_percent`` is ``None``
+    exactly when the fetch failed, and ``error`` then says why. The reason is
+    what lets callers that must not fabricate a rate explain themselves;
+    callers that tolerate a default can ignore it.
     """
     try:
-        api_key = st.secrets.get("FMP_API_KEY")
+        history = yf.Ticker(symbol).history(
+            period="5d", interval="1d", auto_adjust=False, timeout=10
+        )
     except Exception:
-        api_key = None
-    if not api_key:
-        return {}, "FMP_API_KEY is not set in .streamlit/secrets.toml"
+        return None, None, f"Could not reach Yahoo Finance for {symbol}"
 
-    try:
-        # The key travels as a query parameter because that is the only auth
-        # this endpoint accepts; it must never be echoed into an error message.
-        url = f"https://financialmodelingprep.com/stable/treasury-rates?apikey={api_key}"
-        response = requests.get(url, timeout=5)
-    except Exception:
-        return {}, "Could not reach Financial Modeling Prep"
+    # yfinance absorbs an unknown symbol, a rate limit, and an outage alike into
+    # an empty frame rather than raising, so empty is the failure path here and
+    # not an edge case.
+    if history is None or history.empty or "Close" not in history:
+        return None, None, f"Yahoo Finance returned no quotes for {symbol}"
 
-    if response.status_code != 200:
-        return {}, f"Financial Modeling Prep returned HTTP {response.status_code}"
-    try:
-        data = response.json()
-    except ValueError:
-        return {}, "Financial Modeling Prep returned a response that is not valid JSON"
-    if not data:
-        return {}, "Financial Modeling Prep returned no Treasury records"
-    return data[0], ""
+    # Several trading days are requested and the last populated one taken, so a
+    # weekend or a market holiday is not mistaken for an outage.
+    closes = history["Close"].dropna()
+    if closes.empty:
+        return None, None, f"Yahoo Finance returned no closing level for {symbol}"
+
+    rate_pct = float(closes.iloc[-1])
+    low, high = YIELD_PLAUSIBLE_BAND_PCT
+    if not low <= rate_pct <= high:
+        return None, None, (
+            f"{symbol} quoted {rate_pct:.2f}, outside the plausible "
+            f"{low:g}% to {high:g}% band, so the quoting convention is assumed "
+            "to have changed"
+        )
+
+    stamp = closes.index[-1]
+    as_of = stamp.date() if hasattr(stamp, "date") else None
+    return rate_pct, as_of, ""
 
 
-def fetch_current_risk_free_rate(period="month1") -> float:
-    """
-    Returns the current short-term Treasury rate (1-month by default) to use as
-    the risk-free rate.
+def fetch_current_risk_free_rate() -> float:
+    """Returns the current 13-week Treasury bill yield (``^IRX``) as a decimal.
 
-    Falls back to a hardcoded 4% if the API fails. Callers that must not show a
-    fabricated rate should use :func:`fetch_10y_treasury_rate` instead, which
+    Falls back to a hardcoded 4% if the fetch fails. Callers that must not show
+    a fabricated rate should use :func:`fetch_10y_treasury_rate` instead, which
     reports the failure rather than hiding it.
     """
-    rates, _ = _fetch_fmp_treasury_rates()
-    rate_pct = rates.get(period)
-    if rate_pct is not None:
-        return float(rate_pct) / 100.0
-    # Fallback default if the API fails or the key is missing
-    return 0.04
+    rate_pct, _, _ = _fetch_yahoo_yield(IRX_SYMBOL)
+    if rate_pct is None:
+        # Fallback default if Yahoo is unreachable or stops quoting the index.
+        return 0.04
+    return rate_pct / 100.0
 
 
 def fetch_10y_treasury_rate() -> Sourced:
-    """Returns the current 10-year Treasury rate with its provenance.
+    """Returns the current 10-year Treasury rate (``^TNX``) with its provenance.
 
     On failure the returned :class:`Sourced` has ``value=None`` and carries the
     reason. Nothing is substituted — a DCF discounted at a made-up risk-free
     rate is worse than one the user had to fill in by hand.
     """
-    rates, error = _fetch_fmp_treasury_rates()
-    rate_pct = rates.get("year10")
+    rate_pct, as_of, error = _fetch_yahoo_yield(TNX_SYMBOL)
     if rate_pct is None:
         return Sourced.unavailable(
-            source="Financial Modeling Prep (treasury-rates, year10)",
-            reason=error or "Financial Modeling Prep did not return a 10-year rate",
+            source=f"Yahoo Finance ({TNX_SYMBOL}, 10-year Treasury yield)",
+            reason=error or f"Yahoo Finance did not return a quote for {TNX_SYMBOL}",
         )
 
-    as_of = None
-    raw_date = rates.get("date")
-    if raw_date:
-        try:
-            as_of = datetime.strptime(str(raw_date)[:10], "%Y-%m-%d").date()
-        except ValueError:
-            as_of = None
-
     return Sourced.reported(
-        value=float(rate_pct) / 100.0,
-        source="Financial Modeling Prep — 10-year Treasury constant maturity",
+        value=rate_pct / 100.0,
+        source=f"Yahoo Finance {TNX_SYMBOL} — 10-year Treasury constant maturity",
         as_of=as_of,
     )
 

@@ -307,10 +307,94 @@ def test_erp_survives_the_split_element_the_page_actually_uses(monkeypatch):
     assert result.as_of == date(2026, 7, 1)
 
 
+def _yahoo_frame(rows: list[tuple[date, float | None]]) -> pd.DataFrame:
+    """A frame shaped like ``yf.Ticker.history`` — tz-aware index, extra columns."""
+    index = pd.DatetimeIndex(
+        [pd.Timestamp(d, tz="America/Chicago") for d, _ in rows], name="Date"
+    )
+    return pd.DataFrame(
+        {"Open": [c for _, c in rows], "Close": [c for _, c in rows], "Volume": 0},
+        index=index,
+    )
+
+
+def _patch_yahoo(monkeypatch, frame):
+    """Stands in for ``market_data.yf.Ticker(...).history(...)``."""
+    class _Ticker:
+        def __init__(self, symbol):
+            self.symbol = symbol
+
+        def history(self, **kwargs):
+            if isinstance(frame, Exception):
+                raise frame
+            return frame
+
+    monkeypatch.setattr(market_data.yf, "Ticker", _Ticker)
+
+
+def test_treasury_reads_the_last_populated_close(monkeypatch):
+    """^TNX quotes percentage points; the newest non-NaN day is the one used."""
+    _patch_yahoo(monkeypatch, _yahoo_frame([
+        (date(2026, 7, 30), 4.745),
+        (date(2026, 7, 31), 4.627),
+        (date(2026, 8, 3), None),  # holiday or not-yet-printed
+    ]))
+    result = market_data._fetch_yahoo_yield.__wrapped__(market_data.TNX_SYMBOL)
+    assert result == (pytest.approx(4.627), date(2026, 7, 31), "")
+
+
 def test_treasury_failure_returns_no_value(monkeypatch):
     monkeypatch.setattr(
-        market_data, "_fetch_fmp_treasury_rates", lambda: ({}, "FMP_API_KEY is not set")
+        market_data,
+        "_fetch_yahoo_yield",
+        lambda symbol: (None, None, f"Yahoo Finance returned no quotes for {symbol}"),
     )
     result = market_data.fetch_10y_treasury_rate()
     assert result.value is None
-    assert "FMP_API_KEY" in result.detail
+    assert not result.ok
+    assert "^TNX" in result.detail
+
+
+def test_treasury_success_reports_percent_as_decimal(monkeypatch):
+    monkeypatch.setattr(
+        market_data, "_fetch_yahoo_yield", lambda symbol: (4.627, date(2026, 7, 31), "")
+    )
+    result = market_data.fetch_10y_treasury_rate()
+    assert result.value == pytest.approx(0.04627)
+    assert result.as_of == date(2026, 7, 31)
+
+
+def test_treasury_at_the_old_ten_times_quote_is_rejected(monkeypatch):
+    """Yahoo published ^TNX at 10x the yield for years. 46.27% is not a rate."""
+    _patch_yahoo(monkeypatch, _yahoo_frame([(date(2026, 7, 31), 46.27)]))
+    rate, _, error = market_data._fetch_yahoo_yield.__wrapped__(market_data.TNX_SYMBOL)
+    assert rate is None
+    assert "plausible" in error
+
+
+def test_treasury_empty_frame_is_a_failure_not_a_zero(monkeypatch):
+    """yfinance returns an empty frame instead of raising on a bad fetch."""
+    _patch_yahoo(monkeypatch, pd.DataFrame())
+    rate, _, error = market_data._fetch_yahoo_yield.__wrapped__(market_data.TNX_SYMBOL)
+    assert rate is None
+    assert "no quotes" in error
+
+
+def test_treasury_network_error_is_caught(monkeypatch):
+    _patch_yahoo(monkeypatch, RuntimeError("connection reset"))
+    rate, _, error = market_data._fetch_yahoo_yield.__wrapped__(market_data.TNX_SYMBOL)
+    assert rate is None
+    assert "Could not reach Yahoo Finance" in error
+
+
+def test_short_rate_falls_back_when_the_fetch_fails(monkeypatch):
+    """The portfolio pages take a plain float, so this one does substitute."""
+    monkeypatch.setattr(
+        market_data, "_fetch_yahoo_yield", lambda symbol: (None, None, "down")
+    )
+    assert market_data.fetch_current_risk_free_rate() == pytest.approx(0.04)
+
+    monkeypatch.setattr(
+        market_data, "_fetch_yahoo_yield", lambda symbol: (3.73, date(2026, 8, 4), "")
+    )
+    assert market_data.fetch_current_risk_free_rate() == pytest.approx(0.0373)

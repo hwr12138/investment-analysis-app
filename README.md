@@ -23,7 +23,7 @@ investment-analysis-app/
 │   ├── views/             # Streamlit UI for each page (render_page functions)
 │   ├── logic/             # Pure calculations, one module per feature
 │   │   └── dcf/           # The DCF engine (see below)
-│   ├── data/              # Shared data access (Sharadar, FMP Treasury rates, ERP)
+│   ├── data/              # Shared data access (Sharadar, Yahoo Treasury yields, ERP)
 │   ├── provenance.py      # Origin/Sourced types shared by the data and logic layers
 │   └── charts.py          # Reusable Plotly chart helpers
 ├── assets/style.css       # Custom CSS
@@ -66,8 +66,9 @@ lives in one `Tolerances` dataclass in `validation.py`.
 
 ### API keys
 
-`FMP_API_KEY` (Treasury rates) and `SHARADAR_API_KEY` (fundamentals and prices)
-are read from `.streamlit/secrets.toml`, which is gitignored. Nasdaq Data Link
+`SHARADAR_API_KEY` (fundamentals and prices) is the only key the app needs; it
+is read from `.streamlit/secrets.toml`, which is gitignored. Treasury yields
+come from Yahoo Finance via `yfinance`, which needs no key. Nasdaq Data Link
 only accepts its key as a query parameter, so no exception raised by the client
 carries the request params or URL — the key never appears in a log line, an
 error message, or an export.
