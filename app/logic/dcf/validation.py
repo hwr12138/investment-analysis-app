@@ -304,6 +304,34 @@ def _fy(label) -> str:
     return f"FY{label}" if isinstance(label, (int, np.integer)) else str(label)
 
 
+#: Worst-first, for sorting and for taking the max severity across a check.
+SEVERITY_ORDER = {Severity.BLOCKING: 0, Severity.CRITICAL: 1, Severity.WARNING: 2}
+
+
+def _period_severity(
+    ctx: "ValidationContext", label, severity: Severity = Severity.CRITICAL
+) -> tuple[Severity, str]:
+    """Downgrades a per-period failure the model cannot possibly have used.
+
+    A reconciliation break in a fiscal year that sits outside the window the
+    drivers are averaged over is real and still worth reporting — it says
+    something about the feed — but it cannot move the number on screen, so
+    raising it at the same severity as a break in the base period drowns the
+    ones that can. Correctness of the *displayed valuation* is what CRITICAL
+    means here.
+
+    ``ctx.periods_in_use`` of ``None`` means the window is unknown, in which
+    case nothing is downgraded: the conservative reading is that any period
+    might matter.
+    """
+    if ctx.periods_in_use is None or str(label) in ctx.periods_in_use:
+        return severity, ""
+    return Severity.WARNING, (
+        " This period sits outside the window the model draws its drivers from, "
+        "so it does not feed the valuation shown."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Context
 # ---------------------------------------------------------------------------
@@ -363,6 +391,13 @@ class ValidationContext:
     #: exactly zero, which Sharadar also uses to mean "absent from the filing".
     zero_filled: tuple[tuple[str, str], ...] = ()
 
+    #: Period labels the model actually draws on — the driver averaging windows,
+    #: the effective-tax-rate window, and the base period. A per-period
+    #: reconciliation failure outside this set is reported at WARNING rather than
+    #: CRITICAL by :func:`_period_severity`. ``None`` means the window is not
+    #: known and nothing is downgraded.
+    periods_in_use: frozenset[str] | None = None
+
 
 # ---------------------------------------------------------------------------
 # CRITICAL checks
@@ -400,15 +435,16 @@ def check_balance_sheet_balances(
         claims = float(liabilities) + float(equity) + (float(nci) if _finite(nci) else 0.0)
         checked += 1
         if relative_gap(assets, claims) > tol.balance_sheet:
+            severity, scope_note = _period_severity(ctx, label)
             issues.append(
                 ReconciliationIssue(
                     key=f"balance_sheet:{label}",
-                    severity=Severity.CRITICAL,
+                    severity=severity,
                     check=name,
                     concept="Total Assets = Total Liabilities + Total Equity + Minority Interest",
                     company=ctx.ticker,
                     period=_fy(label),
-                    message="The balance sheet does not balance for this period.",
+                    message="The balance sheet does not balance for this period." + scope_note,
                     values={
                         "Total assets": _money(assets),
                         "Liabilities + equity + NCI": _money(claims),
@@ -426,12 +462,21 @@ def check_balance_sheet_balances(
 def check_cash_flow_ties(
     ctx: ValidationContext, tol: Tolerances
 ) -> tuple[list[Issue], CheckResult]:
-    """CFO + CFI + CFF + FX = Net Change in Cash.
+    """CFO + CFI + CFF + FX = Net Change in Cash, under either presentation.
 
-    The FX line is legitimately absent for companies with no translation
-    exposure. When it is missing and the identity ties without it, that is
-    recorded as a pass with a note; when it is missing and the identity does
-    *not* tie, the gap is reported as exactly that rather than assumed to be FX.
+    Two conventions appear in the same feed. The GAAP presentation folds the FX
+    translation line into the reported net change in cash; some vintages instead
+    report the net change *before* it. Sharadar switches between them mid-series
+    — Microsoft's rows change over at FY2006 — so testing only the first
+    convention reports thirteen reconciliation failures against a history that
+    reconciles exactly.
+
+    Both are therefore tried, and which one a period used is recorded rather
+    than absorbed. The FX line is also legitimately absent for companies with no
+    translation exposure, in which case the two conventions coincide. Only a
+    period that ties under *neither* is a genuine break, and that is the one
+    reported — with both gaps shown, so it is clear the convention is not the
+    explanation.
     """
     name = "Cash flow statement ties"
     frame = ctx.annual
@@ -442,6 +487,7 @@ def check_cash_flow_ties(
     issues: list[Issue] = []
     checked = 0
     fx_missing = 0
+    fx_excluded = 0
     for label, row in frame.iterrows():
         cfo, cfi, cff, net = (
             row["cfo"], row["cfi"], row["cff"], row["net_change_in_cash"],
@@ -452,40 +498,60 @@ def check_cash_flow_ties(
         has_fx = _finite(fx)
         if not has_fx:
             fx_missing += 1
-        total = cfo + cfi + cff + (float(fx) if has_fx else 0.0)
+        fx_value = float(fx) if has_fx else 0.0
+        core = float(cfo) + float(cfi) + float(cff)
         checked += 1
-        if relative_gap(total, net) > tol.cash_flow_tie:
-            issues.append(
-                ReconciliationIssue(
-                    key=f"cash_flow_tie:{label}",
-                    severity=Severity.CRITICAL,
-                    check=name,
-                    concept="CFO + CFI + CFF + FX = Net Change in Cash",
-                    company=ctx.ticker,
-                    period=_fy(label),
-                    message=(
-                        "The cash flow statement does not tie."
-                        + (
-                            " No FX translation line was reported, so the gap is "
-                            "unexplained rather than attributable to currency effects."
-                            if not has_fx
-                            else ""
-                        )
-                    ),
-                    values={
-                        "CFO + CFI + CFF" + (" + FX" if has_fx else ""): _money(total),
-                        "Net change in cash": _money(net),
-                        "Difference": _money(total - net),
-                        "FX translation": _money(fx) if has_fx else "not reported",
-                    },
-                    tolerance=f"{tol.cash_flow_tie:.3%}",
-                )
+
+        gap_including_fx = relative_gap(core + fx_value, float(net))
+        gap_excluding_fx = relative_gap(core, float(net))
+        if gap_including_fx <= tol.cash_flow_tie:
+            continue
+        if has_fx and fx_value != 0.0 and gap_excluding_fx <= tol.cash_flow_tie:
+            # The publisher reported its own total before the FX line for this
+            # period. The statement is internally consistent; only the
+            # presentation differs.
+            fx_excluded += 1
+            continue
+
+        severity, scope_note = _period_severity(ctx, label)
+        issues.append(
+            ReconciliationIssue(
+                key=f"cash_flow_tie:{label}",
+                severity=severity,
+                check=name,
+                concept="CFO + CFI + CFF + FX = Net Change in Cash",
+                company=ctx.ticker,
+                period=_fy(label),
+                message=(
+                    "The cash flow statement does not tie under either "
+                    "presentation of the FX line."
+                    + (
+                        " No FX translation line was reported, so the gap is "
+                        "unexplained rather than attributable to currency effects."
+                        if not has_fx
+                        else ""
+                    )
+                    + scope_note
+                ),
+                values={
+                    "CFO + CFI + CFF": _money(core),
+                    "Net change in cash": _money(net),
+                    "Difference including FX": _money(core + fx_value - float(net)),
+                    "Difference excluding FX": _money(core - float(net)),
+                    "FX translation": _money(fx) if has_fx else "not reported",
+                },
+                tolerance=f"{tol.cash_flow_tie:.3%}",
             )
+        )
     if not checked:
         return [], CheckResult(name, "not evaluated", "No period had all four subtotals.")
     detail = f"{checked} periods checked"
     if fx_missing:
         detail += f"; {fx_missing} without an FX line, which tie without one"
+    if fx_excluded:
+        detail += (
+            f"; {fx_excluded} whose reported total excludes the FX line and tie without it"
+        )
     return issues, _result(name, issues, detail, Severity.CRITICAL)
 
 
@@ -518,15 +584,19 @@ def check_quarters_sum_to_year(
             continue
         checked += 1
         if relative_gap(quarter_sum, annual_revenue) > tol.quarters_vs_fy:
+            severity, scope_note = _period_severity(ctx, fiscal_year)
             issues.append(
                 ReconciliationIssue(
                     key=f"quarters_sum:{fiscal_year}",
-                    severity=Severity.CRITICAL,
+                    severity=severity,
                     check=name,
                     concept="Σ quarterly revenue = fiscal year revenue",
                     company=ctx.ticker,
                     period=f"FY{fiscal_year}",
-                    message="The four reported quarters do not sum to the reported year.",
+                    message=(
+                        "The four reported quarters do not sum to the reported year."
+                        + scope_note
+                    ),
                     values={
                         "Sum of quarters": _money(quarter_sum),
                         "Reported fiscal year": _money(annual_revenue),
@@ -610,15 +680,18 @@ def check_ebit_reconciles(
         checked += 1
         computed = sum(float(p) for p in parts)
         if relative_gap(computed, float(reported)) > tol.ebit_reconciliation:
+            severity, scope_note = _period_severity(ctx, label)
             issues.append(
                 ReconciliationIssue(
                     key=f"ebit_reconciliation:{label}",
-                    severity=Severity.CRITICAL,
+                    severity=severity,
                     check=name,
                     concept="Revenue + Cost of Revenue + Operating Expenses = EBIT",
                     company=ctx.ticker,
                     period=_fy(label),
-                    message="Operating income does not reconcile to its components.",
+                    message=(
+                        "Operating income does not reconcile to its components." + scope_note
+                    ),
                     values={
                         "Computed": _money(computed),
                         "Reported operating income": _money(reported),
@@ -659,15 +732,18 @@ def check_total_debt_reconciles(
         )
         checked += 1
         if relative_gap(float(aggregate), components) > tol.total_debt:
+            severity, scope_note = _period_severity(ctx, label)
             issues.append(
                 ReconciliationIssue(
                     key=f"total_debt:{label}",
-                    severity=Severity.CRITICAL,
+                    severity=severity,
                     check=name,
                     concept="Total Debt = Debt Current + Debt Non-Current",
                     company=ctx.ticker,
                     period=_fy(label),
-                    message="The total debt line does not equal the sum of its parts.",
+                    message=(
+                        "The total debt line does not equal the sum of its parts." + scope_note
+                    ),
                     values={
                         "Reported total debt": _money(aggregate),
                         "Current + non-current": _money(components),
@@ -1387,9 +1463,17 @@ def check_book_debt_proxy(
 def _result(
     name: str, issues: list[Issue], detail: str, severity: Severity
 ) -> CheckResult:
+    """``severity`` is the tier the check reports at *when nothing is scoped down*.
+
+    Per-period checks can downgrade individual failures that fall outside the
+    window the model uses, so the roll-up takes the worst severity actually
+    raised rather than the check's nominal one — otherwise the summary line
+    would read CRITICAL while every issue under it was a warning.
+    """
     if issues:
+        worst = min(issues, key=lambda i: SEVERITY_ORDER[i.severity]).severity
         return CheckResult(
-            name, "fail", f"{len(issues)} failure(s); {detail}", severity
+            name, "fail", f"{len(issues)} failure(s); {detail}", worst
         )
     return CheckResult(name, "pass", detail)
 
@@ -1438,8 +1522,7 @@ def run_all(
         issues.extend(found)
         results.append(result)
 
-    order = {Severity.BLOCKING: 0, Severity.CRITICAL: 1, Severity.WARNING: 2}
-    issues.sort(key=lambda i: (order[i.severity], i.check, i.period or ""))
+    issues.sort(key=lambda i: (SEVERITY_ORDER[i.severity], i.check, i.period or ""))
     return issues, results
 
 

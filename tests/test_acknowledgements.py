@@ -9,7 +9,7 @@ from __future__ import annotations
 import pytest
 
 from app.logic.dcf import validation as val
-from app.views import dcf_valuation as page
+from app.views.research import dcf as page
 
 
 class _SessionState(dict):

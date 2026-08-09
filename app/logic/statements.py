@@ -114,19 +114,56 @@ class Residual:
     less: tuple[str, ...]
 
 
-Source = FromCaption | Sum | Residual
+@dataclass(frozen=True)
+class Ratio:
+    """One row divided by another — per-share figures, rates, margins.
+
+    A zero denominator yields *missing*, not infinity. ``scale`` exists for the
+    one case where the sign has to flip: tax expense is negative downstream of
+    ingest, but an effective tax rate reads as a positive percentage.
+
+    ``require_positive_denominator`` is for rates that are meaningless when the
+    base is negative — an effective tax rate on a pretax *loss* is arithmetic
+    without a meaning, so it reports missing instead. Same guard
+    ``dcf.financials.effective_tax_rate`` applies.
+    """
+
+    numerator: str
+    denominator: str
+    scale: float = 1.0
+    require_positive_denominator: bool = False
+
+
+@dataclass(frozen=True)
+class Product:
+    """Rows multiplied together.
+
+    Exists for share counts: Sharadar's ``sharesbas`` is the count on the filing
+    cover, and ``sharefactor`` corrects it for ADRs representing a fraction or
+    multiple of an underlying share. Their product is what Sharadar itself
+    multiplies by price to get market capitalisation, and it is what
+    ``sharadar_client.common_shares_frame`` already computes.
+    """
+
+    factors: tuple[str, ...]
+
+
+Source = FromCaption | Sum | Residual | Ratio | Product
 
 
 @dataclass(frozen=True)
 class Check:
-    """Does this row equal the signed sum of these rows?
+    """Does this reported row equal this expression over the other rows?
 
-    Lives on the row being checked rather than in a side registry, so a subtotal
-    and its identity cannot drift apart.
+    Lives on the row being checked rather than in a side registry, so a row and
+    its identity cannot drift apart.
+
+    ``expected`` is any :data:`Source`, so a check can verify a division as
+    readily as a sum — which matters for the vendor's per-share metrics, where
+    the interesting question is *which* share count was used.
     """
 
-    plus: tuple[str, ...]
-    minus: tuple[str, ...] = ()
+    expected: Source
     note: str = ""
 
 
@@ -221,6 +258,15 @@ class StatementTolerances:
     #: subtotal that is genuinely zero has no meaningful relative scale, so a
     #: half-unit difference would read as infinitely wrong.
     absolute_floor: float = 1.0
+    #: The same idea for rows that are not money: per-share figures, rates and
+    #: multiples. One currency unit is the right floor for a figure reported in
+    #: whole dollars and a useless one for a per-share figure of about 9, where
+    #: it would let an 11% error pass unflagged. Sized instead for the precision
+    #: the vendor publishes these at — Sharadar's own rounding on a per-share
+    #: metric runs to about 0.0005, so this is an order of magnitude above the
+    #: noise and still tight enough to catch a wrong divisor on a figure of well
+    #: under a currency unit.
+    unscaled_floor: float = 0.001
 
 
 STATEMENT_TOLERANCES = StatementTolerances()
@@ -519,19 +565,34 @@ def _period_columns(
 # ---------------------------------------------------------------------------
 
 
-def _derive(source: Sum | Residual, values: Mapping[str, np.ndarray]) -> np.ndarray:
+def _derive(source: Source, values: Mapping[str, np.ndarray]) -> np.ndarray:
     """Arithmetic over the rows a derived row names.
 
-    Plain numpy addition, which **propagates NaN**. Never ``np.nansum``: that
+    Plain numpy arithmetic, which **propagates NaN**. Never ``np.nansum``: that
     treats an unreported component as zero and produces a total that looks
     entirely reasonable and is wrong. A row whose input is missing is missing.
-    This is the single most important line in the module.
+    This is the single most important function in the module.
     """
     if isinstance(source, Residual):
         result = values[source.base].copy()
         for key in source.less:
             result = result - values[key]
         return result
+
+    if isinstance(source, Product):
+        result = values[source.factors[0]].copy()
+        for key in source.factors[1:]:
+            result = result * values[key]
+        return result
+
+    if isinstance(source, Ratio):
+        numerator = values[source.numerator]
+        denominator = values[source.denominator]
+        usable = denominator > 0 if source.require_positive_denominator else denominator != 0
+        # A zero denominator is missing, never infinity. NaN on either side
+        # fails `usable` or propagates through the division, as it must.
+        with np.errstate(divide="ignore", invalid="ignore"):
+            return np.where(usable, numerator / denominator, np.nan) * source.scale
 
     result = np.zeros_like(values[source.plus[0]])
     for key in source.plus:
@@ -546,6 +607,10 @@ def _dependencies(source: Source) -> tuple[str, ...]:
         return (source.base, *source.less)
     if isinstance(source, Sum):
         return (*source.plus, *source.minus)
+    if isinstance(source, Ratio):
+        return (source.numerator, source.denominator)
+    if isinstance(source, Product):
+        return source.factors
     return ()
 
 
@@ -619,22 +684,50 @@ def _reasons(
 
 
 def _formula(row: RowSpec, labels: Mapping[str, str]) -> str:
+    """The arithmetic behind a row, in the labels the reader sees.
+
+    An unknown key falls back to the key itself rather than raising:
+    :func:`validate_spec` is the guard against a dangling reference, and a
+    tooltip is not worth taking the page down for.
+    """
+    def name(key: str) -> str:
+        return labels.get(key, key)
+
     source = row.source
     if isinstance(source, Residual):
-        return " − ".join([labels[source.base], *(labels[k] for k in source.less)])
+        return " − ".join([name(source.base), *(name(k) for k in source.less)])
+    if isinstance(source, Product):
+        return " × ".join(name(key) for key in source.factors)
+    if isinstance(source, Ratio):
+        sign = "−" if source.scale < 0 else ""
+        text = f"{sign}{name(source.numerator)} ÷ {name(source.denominator)}"
+        if source.require_positive_denominator:
+            text += f", where {name(source.denominator)} is positive"
+        return text
     if isinstance(source, Sum):
-        text = " + ".join(labels[key] for key in source.plus)
+        text = " + ".join(name(key) for key in source.plus)
         for key in source.minus:
-            text += f" − {labels[key]}"
+            text += f" − {name(key)}"
         return text
     return ""
 
 
 def _check_formula(check: Check, labels: Mapping[str, str]) -> str:
-    text = " + ".join(labels[key] for key in check.plus)
-    for key in check.minus:
-        text += f" − {labels[key]}"
-    return text
+    """The identity being tested, in the row labels the reader sees."""
+    return _formula(RowSpec("", "", check.expected), labels)
+
+
+def _floor_for(unit: Unit, tolerances: StatementTolerances) -> float:
+    """The absolute floor appropriate to what the row measures.
+
+    Money and share counts are reported in whole units and scale into the
+    millions; per-share figures, rates and multiples do not. One floor for both
+    would be either far too loose for the second group or far too tight for the
+    first.
+    """
+    if unit in (Unit.CURRENCY, Unit.SHARES):
+        return tolerances.absolute_floor
+    return tolerances.unscaled_floor
 
 
 def _reconcile(
@@ -654,7 +747,7 @@ def _reconcile(
     assert check is not None
     formula = _check_formula(check, labels)
 
-    expected = _derive(Sum(plus=check.plus, minus=check.minus), values)
+    expected = _derive(check.expected, values)
     actual = values[row.key]
     usable = ~(np.isnan(expected) | np.isnan(actual))
 
@@ -816,7 +909,8 @@ def build_statement(
             result = None
             if row.check is not None:
                 result = _reconcile(
-                    row, values, labels, columns, tolerance, tolerances.absolute_floor
+                    row, values, labels, columns, tolerance,
+                    _floor_for(row.unit, tolerances),
                 )
                 diagnostics.append(result)
 
@@ -897,7 +991,7 @@ def validate_spec(spec: StatementSpec) -> list[str]:
                     f"reported row nor declared earlier"
                 )
         if row.check is not None:
-            for named in (*row.check.plus, *row.check.minus):
+            for named in _dependencies(row.check.expected):
                 if named not in reported and named not in seen:
                     problems.append(
                         f"{spec.key}.{row.key}: check names {named!r}, which is "
@@ -915,7 +1009,7 @@ def validate_spec(spec: StatementSpec) -> list[str]:
     for row in spec.rows():
         if row.check is None:
             continue
-        named = set(row.check.plus) | set(row.check.minus)
+        named = set(_dependencies(row.check.expected))
         overlap = named & plugged.get(row.key, set())
         if overlap:
             problems.append(
@@ -949,7 +1043,7 @@ INCOME_STATEMENT = StatementSpec(
             RowSpec("revenue", "Revenues", FromCaption("Revenues")),
             RowSpec("cor", "Cost of Revenue", FromCaption("Cost of Revenue"), indent=1),
             RowSpec("gp", "Gross Profit", FromCaption("Gross Profit"),
-                    emphasis=Emphasis.SUBTOTAL, check=Check(("revenue", "cor"))),
+                    emphasis=Emphasis.SUBTOTAL, check=Check(Sum(("revenue", "cor")))),
         )),
         SectionSpec("Operating Expenses & Income", (
             RowSpec("sgna", "Selling, General & Administrative",
@@ -961,7 +1055,7 @@ INCOME_STATEMENT = StatementSpec(
             RowSpec("opex", "Total Operating Expenses", FromCaption("Operating Expenses"),
                     emphasis=Emphasis.SUBTOTAL),
             RowSpec("opinc", "Operating Income", FromCaption("Operating Income"),
-                    emphasis=Emphasis.SUBTOTAL, check=Check(("gp", "opex"))),
+                    emphasis=Emphasis.SUBTOTAL, check=Check(Sum(("gp", "opex")))),
         )),
         SectionSpec("Earnings from Continuing Operations", (
             RowSpec("nonop", "Non-Operating Income", Residual("ebit", ("opinc",)),
@@ -973,40 +1067,70 @@ INCOME_STATEMENT = StatementSpec(
                     emphasis=Emphasis.SUBTOTAL),
             RowSpec("intexp", "Interest Expense", FromCaption("Interest Expense"), indent=1),
             RowSpec("ebt", "Earnings before Tax", FromCaption("Earnings before Tax"),
-                    emphasis=Emphasis.SUBTOTAL, check=Check(("ebit", "intexp"))),
+                    emphasis=Emphasis.SUBTOTAL, check=Check(Sum(("ebit", "intexp")))),
             RowSpec("taxexp", "Income Tax Expense", FromCaption("Income Tax Expense"),
                     indent=1),
             RowSpec("consolinc", "Consolidated Income", FromCaption("Consolidated Income"),
-                    emphasis=Emphasis.SUBTOTAL, check=Check(("ebt", "taxexp"))),
+                    emphasis=Emphasis.SUBTOTAL, check=Check(Sum(("ebt", "taxexp")))),
         )),
         SectionSpec("Net Income", (
             RowSpec("netincnci", "Net Income to Non-Controlling Interests",
                     FromCaption("Net Income to Non-Controlling Interests"), indent=1),
             RowSpec("netinc", "Net Income", FromCaption("Net Income"),
                     emphasis=Emphasis.TOTAL,
-                    check=Check(("consolinc",), ("netincnci",),
+                    check=Check(Sum(("consolinc",), ("netincnci",)),
                                 note="Sharadar publishes non-controlling income as a "
                                      "positive magnitude, so it subtracts here.")),
             RowSpec("prefdivis", "Preferred Dividends",
                     FromCaption("Preferred Dividends Income Statement Impact"), indent=1),
             RowSpec("netinccmn", "Net Income to Common Stockholders",
                     FromCaption("Net Income Common Stock"), emphasis=Emphasis.TOTAL,
-                    check=Check(("netinc",), ("prefdivis",))),
+                    check=Check(Sum(("netinc",), ("prefdivis",)))),
         )),
-        SectionSpec("Supplemental Items", (
-            RowSpec("netincdis", "Net Income (Loss) from Discontinued Operations",
-                    FromCaption("Net Loss Income from Discontinued Operations")),
-            RowSpec("eps", "Earnings per Basic Share",
-                    FromCaption("Earnings per Basic Share"), unit=Unit.PER_SHARE),
-            RowSpec("epsdil", "Earnings per Diluted Share",
-                    FromCaption("Earnings per Diluted Share"), unit=Unit.PER_SHARE),
-            RowSpec("shareswa", "Weighted Average Shares",
-                    FromCaption("Weighted Average Shares"), unit=Unit.SHARES),
-            RowSpec("shareswadil", "Weighted Average Shares, Diluted",
-                    FromCaption("Weighted Average Shares Diluted"), unit=Unit.SHARES),
-            RowSpec("dps", "Dividends per Basic Common Share",
-                    FromCaption("Dividends per Basic Common Share"), unit=Unit.PER_SHARE),
-        )),
+        SectionSpec(
+            "Supplemental Items",
+            (
+                RowSpec("sps", "Revenue per Share", FromCaption("Sales per Share"),
+                        unit=Unit.PER_SHARE),
+                RowSpec("netincdis", "Net Income (Loss) from Discontinued Operations",
+                        FromCaption("Net Loss Income from Discontinued Operations")),
+                RowSpec("netinc_continuing", "Net Income from Continuing Operations",
+                        Sum(("netinccmn",), ("netincdis",)),
+                        note="Income to common stockholders less the discontinued "
+                             "portion. This is as close to a normalised earnings "
+                             "figure as SF1 allows: Sharadar breaks out no other "
+                             "non-recurring items."),
+                RowSpec("eps", "Basic EPS", FromCaption("Earnings per Basic Share"),
+                        unit=Unit.PER_SHARE),
+                RowSpec("eps_continuing", "Basic EPS, Continuing Operations",
+                        Ratio("netinc_continuing", "shareswa"), unit=Unit.PER_SHARE),
+                RowSpec("shareswa", "Basic Weighted Average Shares Outstanding",
+                        FromCaption("Weighted Average Shares"), unit=Unit.SHARES),
+                RowSpec("epsdil", "Diluted EPS",
+                        FromCaption("Earnings per Diluted Share"), unit=Unit.PER_SHARE),
+                RowSpec("epsdil_continuing", "Diluted EPS, Continuing Operations",
+                        Ratio("netinc_continuing", "shareswadil"), unit=Unit.PER_SHARE),
+                RowSpec("shareswadil", "Diluted Weighted Average Shares Outstanding",
+                        FromCaption("Weighted Average Shares Diluted"),
+                        unit=Unit.SHARES),
+                RowSpec("dps", "Dividends per Share",
+                        FromCaption("Dividends per Basic Common Share"),
+                        unit=Unit.PER_SHARE),
+                RowSpec("payoutratio", "Payout Ratio", FromCaption("Payout Ratio"),
+                        unit=Unit.PERCENT),
+                RowSpec("ebitda", "EBITDA",
+                        FromCaption("Earnings Before Interest Taxes & Depreciation "
+                                    "Amortization (EBITDA)")),
+                RowSpec("effective_tax_rate", "Effective Tax Rate",
+                        # Tax expense is negative downstream of ingest; a rate reads
+                        # as a positive percentage. A pretax loss makes the rate
+                        # meaningless rather than merely negative, so it is withheld.
+                        Ratio("taxexp", "ebt", scale=-1.0,
+                              require_positive_denominator=True),
+                        unit=Unit.PERCENT),
+            ),
+            note="EBIT appears above, under Earnings from Continuing Operations.",
+        ),
     ),
 )
 
@@ -1055,7 +1179,7 @@ BALANCE_SHEET = StatementSpec(
             RowSpec("assetsnc", "Total Non-Current Assets",
                     FromCaption("Assets Non-Current"), emphasis=Emphasis.SUBTOTAL),
             RowSpec("assets", "Total Assets", FromCaption("Total Assets"),
-                    emphasis=Emphasis.TOTAL, check=Check(("assetsc", "assetsnc"))),
+                    emphasis=Emphasis.TOTAL, check=Check(Sum(("assetsc", "assetsnc")))),
         )),
         SectionSpec("Current Liabilities", (
             RowSpec("payables", "Trade and Non-Trade Payables",
@@ -1080,7 +1204,7 @@ BALANCE_SHEET = StatementSpec(
                     FromCaption("Liabilities Non-Current"), emphasis=Emphasis.SUBTOTAL),
             RowSpec("liabilities", "Total Liabilities", FromCaption("Total Liabilities"),
                     emphasis=Emphasis.TOTAL,
-                    check=Check(("liabilitiesc", "liabilitiesnc"))),
+                    check=Check(Sum(("liabilitiesc", "liabilitiesnc")))),
         )),
         SectionSpec("Common Equity", (
             RowSpec("retearn", "Accumulated Retained Earnings (Deficit)",
@@ -1114,10 +1238,33 @@ BALANCE_SHEET = StatementSpec(
             ),
         ),
         SectionSpec("Supplemental Items", (
+            RowSpec("sharesbas", "Total Shares Outstanding on Filing Date",
+                    FromCaption("Shares (Basic)"), unit=Unit.SHARES,
+                    note="The count stated on the cover of the 10-K or 10-Q, "
+                         "adjusted for splits."),
+            RowSpec("sharefactor", "Share Factor", FromCaption("Share Factor"),
+                    unit=Unit.RATIO,
+                    note="Corrects for ADRs representing a fraction or multiple of "
+                         "an underlying share, and for multi-class structures. 1.0 "
+                         "for most US companies."),
+            RowSpec("shares_out", "Total Common Shares Outstanding",
+                    Product(("sharesbas", "sharefactor")), unit=Unit.SHARES),
+            RowSpec("cash_per_share", "Cash per Share",
+                    Ratio("cash_sti", "shares_out"), unit=Unit.PER_SHARE),
+            RowSpec("bvps", "Book Value per Share",
+                    FromCaption("Book Value per Share"), unit=Unit.PER_SHARE),
+            RowSpec("tangible_bv", "Tangible Book Value",
+                    Sum(("equity",), ("intangibles",)),
+                    note="Parent equity less goodwill and intangibles. Distinct from "
+                         "Sharadar's Tangible Asset Value, which nets intangibles off "
+                         "total assets rather than off equity."),
+            RowSpec("tangible_bvps", "Tangible Book Value per Share",
+                    Ratio("tangible_bv", "shares_out"), unit=Unit.PER_SHARE),
             RowSpec("debt", "Total Debt", FromCaption("Total Debt"),
-                    check=Check(("debtc", "debtnc"))),
+                    check=Check(Sum(("debtc", "debtnc")))),
+            RowSpec("net_debt", "Net Debt", Sum(("debt",), ("cash_sti",))),
             RowSpec("investments", "Investments, Total", FromCaption("Investments"),
-                    check=Check(("investmentsc", "investmentsnc"))),
+                    check=Check(Sum(("investmentsc", "investmentsnc")))),
             RowSpec("deposits", "Deposit Liabilities", FromCaption("Deposit Liabilities"),
                     note="Sharadar does not classify deposits as current or "
                          "non-current, so they are shown here rather than netted into "
@@ -1186,14 +1333,52 @@ CASH_FLOW = StatementSpec(
             RowSpec("ncf", "Net Change in Cash & Equivalents",
                     FromCaption("Net Cash Flow / Change in Cash & Cash Equivalents"),
                     emphasis=Emphasis.TOTAL,
-                    check=Check(("ncfo", "ncfi", "ncff", "ncfx"))),
+                    check=Check(Sum(("ncfo", "ncfi", "ncff", "ncfx")))),
         )),
-        SectionSpec("Supplemental Items", (
-            RowSpec("fcf", "Free Cash Flow", FromCaption("Free Cash Flow"),
-                    check=Check(("ncfo", "capex"),
-                                note="Sharadar's own definition; capital expenditure "
-                                     "is already signed negative.")),
-        )),
+        SectionSpec(
+            "Supplemental Items",
+            (
+                RowSpec("fcf", "Free Cash Flow (Levered)",
+                        FromCaption("Free Cash Flow"),
+                        note="Operating cash flow less capital expenditure. Levered: "
+                             "operating cash flow is already net of interest paid.",
+                        check=Check(Sum(("ncfo", "capex")),
+                                    note="Sharadar's own definition; capital "
+                                         "expenditure is already signed negative.")),
+                # The divisor of the per-share row below, spelled out here
+                # rather than a tab away. `shareswa` is an income-statement
+                # caption and `sharefactor` a metrics one; the merged frame
+                # makes both plain lookups.
+                RowSpec("shareswa", "Basic Weighted Average Shares Outstanding",
+                        FromCaption("Weighted Average Shares"), unit=Unit.SHARES),
+                RowSpec("sharefactor", "Share Factor", FromCaption("Share Factor"),
+                        unit=Unit.RATIO,
+                        note="1.0 for most companies. An ADR representing a "
+                             "fraction or multiple of an underlying share carries "
+                             "the ratio here — TSM's is 0.2, five ordinary shares "
+                             "to the ADR."),
+                RowSpec("shareswa_adj",
+                        "Basic Weighted Average Shares, Share-Factor Adjusted",
+                        Product(("shareswa", "sharefactor")), unit=Unit.SHARES),
+                RowSpec("fcfps", "Free Cash Flow per Share (Levered)",
+                        FromCaption("Free Cash Flow per Share"),
+                        unit=Unit.PER_SHARE,
+                        # Sharadar documents no divisor for `fcfps`, so the
+                        # identity is checked rather than asserted. The share
+                        # factor is not optional detail: without it every US
+                        # company ties and every ADR is out by the ADR ratio —
+                        # TSM by a factor of five.
+                        check=Check(Ratio("fcf", "shareswa_adj"),
+                                    note="Levered free cash flow — operating cash "
+                                         "flow is already net of interest paid — "
+                                         "over share-factor-adjusted basic "
+                                         "weighted average shares.")),
+            ),
+            note="SF1 carries no cash-interest-paid or cash-tax-paid disclosure, so "
+                 "unlevered free cash flow cannot be built here without assuming a "
+                 "tax rate — the DCF tab computes it properly. Net capital "
+                 "expenditure and net debt issuance are already shown above.",
+        ),
     ),
 )
 
@@ -1212,7 +1397,7 @@ DERIVED_FIGURES = StatementSpec(
             RowSpec("ebitda", "EBITDA",
                     FromCaption("Earnings Before Interest Taxes & Depreciation "
                                 "Amortization (EBITDA)"),
-                    emphasis=Emphasis.SUBTOTAL, check=Check(("ebit", "depamor"))),
+                    emphasis=Emphasis.SUBTOTAL, check=Check(Sum(("ebit", "depamor")))),
             RowSpec("fcf", "Free Cash Flow", FromCaption("Free Cash Flow")),
             RowSpec("workingcapital", "Working Capital", FromCaption("Working Capital")),
             RowSpec("invcap", "Invested Capital", FromCaption("Invested Capital")),

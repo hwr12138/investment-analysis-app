@@ -802,8 +802,16 @@ def build_validation_context(
     terminal_growth: float | None = None,
     risk_free_rate: float | None = None,
     sbc: float | None = None,
+    periods_in_use: frozenset[str] | None = None,
 ) -> val.ValidationContext:
-    """Packs everything the checks need into one context."""
+    """Packs everything the checks need into one context.
+
+    ``periods_in_use`` is the set of period labels the assumptions were actually
+    derived from — the driver averaging windows, the effective-tax-rate window,
+    and the base period. Passing it lets the per-period reconciliation checks
+    scope their severity to what can reach the valuation; omitting it leaves
+    every period at full severity.
+    """
     annual = dataset.annual
     bs_delta = fin.delta_nwc(annual)
 
@@ -836,6 +844,7 @@ def build_validation_context(
             float(bs_delta.iloc[-1]) if len(bs_delta) and not pd.isna(bs_delta.iloc[-1]) else None
         ),
         zero_filled=_zero_filled_base_items(dataset, base),
+        periods_in_use=periods_in_use,
     )
 
     if base_fcff is not None:

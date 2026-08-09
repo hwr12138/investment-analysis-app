@@ -165,6 +165,151 @@ def test_missing_fx_line_is_reported_as_unexplained_when_it_does_not_tie():
     assert issues[0].values["FX translation"] == "not reported"
 
 
+# --- Severity follows the window the model actually uses -------------------
+#
+# A break in FY1992 is real, but it cannot move a valuation whose drivers are
+# averaged over the last five years. Reporting it at the same tier as a break
+# in the base period drowns the ones that can.
+
+
+ALL_PERIODS = frozenset(str(y) for y in range(2026 - BASELINE_YEARS, 2026))
+RECENT_ONLY = frozenset(str(y) for y in range(2021, 2026))
+
+
+def test_a_break_inside_the_driver_window_stays_critical():
+    context = _context(
+        annual=_annual(net_change_in_cash=_poison("net_change_in_cash", 900.0)),
+        periods_in_use=RECENT_ONLY,
+    )
+    issues, result = val.check_cash_flow_ties(context, TOL)
+    assert len(issues) == 1
+    assert issues[0].period == "FY2025"
+    assert issues[0].severity is val.Severity.CRITICAL
+    assert result.severity is val.Severity.CRITICAL
+
+
+def test_a_break_outside_the_driver_window_is_downgraded_to_warning():
+    column = _annual()["net_change_in_cash"].tolist()
+    column[0] = 900.0  # the oldest year, far outside a five-year window
+    context = _context(
+        annual=_annual(net_change_in_cash=column), periods_in_use=RECENT_ONLY
+    )
+    issues, result = val.check_cash_flow_ties(context, TOL)
+    assert len(issues) == 1
+    assert issues[0].severity is val.Severity.WARNING
+    assert "does not feed the valuation shown" in issues[0].message
+    assert result.severity is val.Severity.WARNING
+
+
+def test_an_unknown_window_downgrades_nothing():
+    """``None`` means "we do not know", and the conservative reading is CRITICAL."""
+    column = _annual()["net_change_in_cash"].tolist()
+    column[0] = 900.0
+    context = _context(annual=_annual(net_change_in_cash=column), periods_in_use=None)
+    issues, _ = val.check_cash_flow_ties(context, TOL)
+    assert issues[0].severity is val.Severity.CRITICAL
+
+
+def test_a_wide_window_keeps_old_periods_critical():
+    """Selecting "Median (all years)" pulls old periods back into the model."""
+    column = _annual()["net_change_in_cash"].tolist()
+    column[0] = 900.0
+    context = _context(
+        annual=_annual(net_change_in_cash=column), periods_in_use=ALL_PERIODS
+    )
+    issues, _ = val.check_cash_flow_ties(context, TOL)
+    assert issues[0].severity is val.Severity.CRITICAL
+
+
+@pytest.mark.parametrize(
+    "check, column, value",
+    [
+        (val.check_balance_sheet_balances, "total_assets", 9_999.0),
+        (val.check_ebit_reconciles, "ebit", 9_999.0),
+        (val.check_total_debt_reconciles, "derived_total_debt", 9_999.0),
+    ],
+)
+def test_every_per_period_reconciliation_check_scopes_its_severity(check, column, value):
+    poisoned = _annual()[column].tolist()
+    poisoned[0] = value
+    context = _context(
+        annual=_annual(**{column: poisoned}), periods_in_use=RECENT_ONLY
+    )
+    issues, _ = check(context, TOL)
+    assert len(issues) == 1
+    assert issues[0].severity is val.Severity.WARNING
+
+
+def test_the_roll_up_reports_the_worst_severity_actually_raised():
+    """A CRITICAL summary over nothing but warnings would be its own lie."""
+    column = _annual()["net_change_in_cash"].tolist()
+    column[0] = 900.0   # outside the window -> WARNING
+    column[-1] = 900.0  # inside it          -> CRITICAL
+    context = _context(
+        annual=_annual(net_change_in_cash=column), periods_in_use=RECENT_ONLY
+    )
+    issues, result = val.check_cash_flow_ties(context, TOL)
+    assert {i.severity for i in issues} == {val.Severity.CRITICAL, val.Severity.WARNING}
+    assert result.severity is val.Severity.CRITICAL
+
+
+# --- Two FX presentations appear in the same feed --------------------------
+#
+# Sharadar folds the FX line into the reported net change in cash for recent
+# vintages and reports the net change before it for older ones, switching
+# mid-series (Microsoft changes over at FY2006). Testing only the first
+# convention reported 13 critical failures against a history that reconciles
+# exactly.
+
+
+def _fx_excluded_annual(years: int = BASELINE_YEARS) -> pd.DataFrame:
+    """Rows whose reported total is cfo+cfi+cff, with FX stated outside it."""
+    frame = _annual(fx_effect=7.0)
+    frame["net_change_in_cash"] = frame["cfo"] + frame["cfi"] + frame["cff"]
+    return frame
+
+
+def test_a_total_that_excludes_the_fx_line_still_ties():
+    issues, result = val.check_cash_flow_ties(_context(annual=_fx_excluded_annual()), TOL)
+    assert issues == []
+    assert result.status == "pass"
+
+
+def test_the_excluded_fx_convention_is_reported_rather_than_absorbed():
+    """Silently accepting it would hide that the feed changed presentation."""
+    _, result = val.check_cash_flow_ties(_context(annual=_fx_excluded_annual()), TOL)
+    assert "excludes the FX line" in result.detail
+    assert str(BASELINE_YEARS) in result.detail
+
+
+def test_a_break_under_both_conventions_is_still_critical():
+    """The FX escape hatch must not swallow a genuine reconciliation failure."""
+    frame = _annual(fx_effect=7.0)
+    frame.loc[2025, "net_change_in_cash"] = 900.0
+    issues, _ = val.check_cash_flow_ties(_context(annual=frame), TOL)
+    assert len(issues) == 1
+    assert issues[0].severity is val.Severity.CRITICAL
+    assert "either presentation" in issues[0].message
+
+
+def test_a_failing_period_shows_the_gap_under_both_conventions():
+    """Both are shown so it is clear the convention is not the explanation."""
+    frame = _annual(fx_effect=7.0)
+    frame.loc[2025, "net_change_in_cash"] = 900.0
+    issues, _ = val.check_cash_flow_ties(_context(annual=frame), TOL)
+    assert "Difference including FX" in issues[0].values
+    assert "Difference excluding FX" in issues[0].values
+
+
+def test_a_zero_fx_line_does_not_open_the_excluded_convention_path():
+    """With fx == 0 the conventions coincide, so a break is a real break."""
+    frame = _annual(fx_effect=0.0)
+    frame.loc[2025, "net_change_in_cash"] = 900.0
+    issues, _ = val.check_cash_flow_ties(_context(annual=frame), TOL)
+    assert len(issues) == 1
+    assert issues[0].severity is val.Severity.CRITICAL
+
+
 def test_quarters_that_do_not_sum_to_the_year_is_critical():
     annual_revenue = _annual().loc[2025, "revenue"]
     quarterly = pd.DataFrame(

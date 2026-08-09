@@ -1,10 +1,8 @@
-"""Stock research page: key statistics and price-window slicing.
+"""The Summary tab: key statistics and price-window slicing.
 
-Everything above :func:`load_research` is pure — no Streamlit, no network, no
-global state — so the statistics can be unit tested against fixture frames and
-reused by a future screener. :func:`load_research` is the single
-network-touching entry point, in the same shape as ``dcf.model.load_company``:
-called once per ticker, never from inside a re-render.
+Pure — no Streamlit, no network, no global state — so the statistics can be
+unit tested against fixture frames and reused by a future screener. The fetch
+that feeds them lives in :mod:`app.logic.research.dataset`.
 
 Two conventions from the DCF engine carry over unchanged:
 
@@ -16,7 +14,7 @@ Two conventions from the DCF engine carry over unchanged:
 The one place those two rules genuinely collide is the dividend. Sharadar fills
 ``dps`` and ``divyield`` with ``0`` both for companies that pay nothing and for
 figures absent from a filing (see ``sharadar_client.ZERO_FILLED_INDICATORS``),
-so a bare ``0.00`` is ambiguous. :func:`_dividend_tiles` resolves it by
+so a bare ``0.00`` is ambiguous. :func:`_dividend_tile` resolves it by
 cross-checking the ACTIONS table, which records an actual dividend payment or
 records nothing at all.
 """
@@ -26,11 +24,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 
-import numpy as np
 import pandas as pd
 
 from app.data import sharadar_client
 from app.logic.dcf import wacc as wacc_lib
+from app.logic.research.formatting import (
+    _missing,
+    format_count,
+    format_money,
+    format_pct,
+    format_range,
+    format_ratio,
+)
 from app.provenance import Origin, Sourced
 
 #: Price windows offered above the chart, in display order. ``5D`` counts
@@ -64,12 +69,6 @@ _AVG_VOLUME_SESSIONS = 63
 
 #: Quarters of filing history used to estimate the next reporting date.
 _FILING_LAG_QUARTERS = 8
-
-#: SEP coverage starts in the late 1990s regardless of what ``firstpricedate``
-#: claims, so the ALL window asks from here and takes whatever exists. ~7,100
-#: rows for a company listed throughout, which is one page.
-HISTORY_FLOOR = "1990-01-01"
-
 #: Benchmark for the beta regression. Sharadar carries no index levels, so the
 #: S&P 500 stand-in is the ETF — same convention as the DCF page.
 BENCHMARK = "SPY"
@@ -143,70 +142,6 @@ class StatTile:
             source=source,
             detail=reason,
         )
-
-
-# ---------------------------------------------------------------------------
-# Formatting
-# ---------------------------------------------------------------------------
-# These overlap with the DCF view's private ``_money``/``_pct`` but live here
-# because a tile's ``display`` is built in the logic layer, and formatting a
-# float is not a Streamlit call. They differ deliberately: this page wants a
-# compact 4.54T rather than a padded one.
-
-
-def _missing(value) -> bool:
-    if value is None:
-        return True
-    if isinstance(value, (int, float, np.floating)):
-        return bool(np.isnan(value) or np.isinf(value))
-    return bool(pd.isna(value))
-
-
-def format_money(value, currency: str = "", digits: int = 2) -> str:
-    if _missing(value):
-        return "not reported"
-    prefix = f"{currency} " if currency else ""
-    magnitude = abs(float(value))
-    for cutoff, suffix in ((1e12, "T"), (1e9, "B"), (1e6, "M")):
-        if magnitude >= cutoff:
-            return f"{prefix}{float(value) / cutoff:,.2f}{suffix}"
-    return f"{prefix}{float(value):,.{digits}f}"
-
-
-def format_count(value) -> str:
-    """Whole units with thousands separators — volumes and share counts."""
-    if _missing(value):
-        return "not reported"
-    magnitude = abs(float(value))
-    for cutoff, suffix in ((1e12, "T"), (1e9, "B"), (1e6, "M"), (1e3, "K")):
-        if magnitude >= cutoff:
-            return f"{float(value) / cutoff:,.2f}{suffix}"
-    return f"{float(value):,.0f}"
-
-
-def format_ratio(value, digits: int = 2) -> str:
-    if _missing(value):
-        return "not reported"
-    return f"{float(value):,.{digits}f}"
-
-
-def format_pct(value, digits: int = 2) -> str:
-    if _missing(value):
-        return "not reported"
-    return f"{float(value):.{digits}%}"
-
-
-def format_date(value) -> str:
-    if _missing(value):
-        return "not reported"
-    return pd.Timestamp(value).date().isoformat()
-
-
-def format_range(low, high, currency: str = "") -> str:
-    """``USD 305.67 – 311.71``. The unit is stated once, on the left."""
-    if _missing(low) or _missing(high):
-        return "not reported"
-    return f"{format_money(low, currency)} – {format_money(high)}"
 
 
 # ---------------------------------------------------------------------------
@@ -707,157 +642,3 @@ def stats_by_label(stats: list[StatTile]) -> dict[str, StatTile]:
     """Tiles keyed by label, for laying the table out by :data:`STAT_COLUMNS`."""
     return {tile.label: tile for tile in stats}
 
-
-# ---------------------------------------------------------------------------
-# Orchestration — the only part of this module that touches the network
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class ResearchDataset:
-    """Everything the page fetched for one ticker, in one snapshot."""
-
-    ticker: str
-    profile: dict
-    ohlcv: pd.DataFrame
-    daily: pd.DataFrame
-    actions: pd.DataFrame
-    #: The four SF1 frames at each dimension the page shows. Empty when that
-    #: dimension could not be fetched — see :func:`_statement_frames`.
-    statements_ttm: dict[str, pd.DataFrame]
-    statements_annual: dict[str, pd.DataFrame]
-    statements_quarterly: dict[str, pd.DataFrame]
-    #: The as-reported quarterly income statement, kept as a bare frame because
-    #: the only thing that wants it is the next-earnings-date tile: the ``AR``
-    #: dimensions are the ones carrying real filing dates.
-    quarterly_ar: pd.DataFrame
-    stats: list[StatTile]
-    currency: str
-    loaded_at: date
-
-    @property
-    def name(self) -> str:
-        return str(self.profile.get("name") or self.ticker)
-
-    @property
-    def ttm_pl(self) -> pd.DataFrame:
-        """The TTM income statement.
-
-        A property rather than a stored field so the TTM statements live in one
-        place; the statistics builder and its tests are unchanged by the move.
-        """
-        return self.statements_ttm.get("PL", pd.DataFrame())
-
-
-def load_research(ticker: str, *, today: date | None = None) -> ResearchDataset:
-    """Fetches and assembles everything the research page shows.
-
-    Called once per search, never from a re-render — switching price windows
-    slices :attr:`ResearchDataset.ohlcv` rather than refetching it.
-
-    Deliberately does **not** go through ``dcf.model.load_company``: that
-    rejects SIC 6000–6999 because banks and insurers have no meaningful FCFF,
-    which is right for a valuation and wrong here. A research page must render
-    JPM.
-
-    Individual failures below the price history are tolerated — a company with
-    no ACTIONS rows or no ``ARQ`` history still gets a page, with the affected
-    tiles reporting themselves unavailable.
-    """
-    ticker = ticker.strip().upper()
-    today = today or date.today()
-
-    profile = sharadar_client.fetch_ticker_meta(ticker)
-    ohlcv = sharadar_client.fetch_ohlcv(ticker, HISTORY_FLOOR, today.isoformat())
-    if ohlcv.empty:
-        raise sharadar_client.TickerNotFoundError(
-            f"Sharadar returned no price history for {ticker}.",
-            table="SEP",
-            ticker=ticker,
-        )
-
-    daily = _tolerant(lambda: sharadar_client.fetch_daily_metrics(ticker))
-    actions = _tolerant(lambda: sharadar_client.fetch_actions(ticker))
-
-    statements_ttm = _statement_frames(ticker, annual=False, ttm=True)
-    statements_annual = _statement_frames(ticker, annual=True)
-    statements_quarterly = _statement_frames(ticker, annual=False)
-    quarterly_ar = _tolerant(
-        lambda: sharadar_client.fetch_statements(
-            ticker, annual=False, asreported=True
-        ).frame("PL")
-    )
-
-    beta_start = (pd.Timestamp(today) - pd.DateOffset(years=_BETA_YEARS)).date()
-    stock_closes = (
-        ohlcv["Adj Close"].dropna()
-        if "Adj Close" in ohlcv.columns
-        else pd.Series(dtype="float64")
-    )
-    stock_closes = stock_closes[stock_closes.index >= pd.Timestamp(beta_start)]
-    index_closes = _tolerant(
-        lambda: sharadar_client.fetch_index_prices(
-            BENCHMARK, beta_start.isoformat(), today.isoformat()
-        ),
-        empty=pd.Series(dtype="float64"),
-    )
-
-    stats = build_key_stats(
-        ohlcv=ohlcv,
-        daily=daily,
-        ttm_pl=statements_ttm.get("PL", pd.DataFrame()),
-        quarterly_ar=quarterly_ar,
-        actions=actions,
-        stock_closes=stock_closes,
-        index_closes=index_closes,
-        currency=str(profile.get("currency") or ""),
-        today=today,
-    )
-
-    return ResearchDataset(
-        ticker=ticker,
-        profile=profile,
-        ohlcv=ohlcv,
-        daily=daily,
-        actions=actions,
-        statements_ttm=statements_ttm,
-        statements_annual=statements_annual,
-        statements_quarterly=statements_quarterly,
-        quarterly_ar=quarterly_ar,
-        stats=stats,
-        currency=str(profile.get("currency") or ""),
-        loaded_at=today,
-    )
-
-
-def _tolerant(fetch, empty=None):
-    """Runs a secondary fetch, returning empty on failure rather than raising.
-
-    Only the price history is load-bearing enough to block the page. Everything
-    else degrades into an unavailable tile that says so, which is the point of
-    the provenance model — a missing feed is visible, not silently absent.
-    """
-    fallback = pd.DataFrame() if empty is None else empty
-    try:
-        return fetch()
-    except sharadar_client.SharadarError:
-        return fallback
-
-
-def _statement_frames(
-    ticker: str, *, annual: bool, ttm: bool = False, asreported: bool = False
-) -> dict[str, pd.DataFrame]:
-    """One SF1 dimension's four frames, or ``{}`` if the request failed.
-
-    Same contract as :func:`_tolerant`: a dimension that does not come back
-    leaves the financials tab saying so rather than blocking the page. A company
-    too young to have an annual filing still gets a quarterly statement view.
-    """
-    return _tolerant(
-        lambda: dict(
-            sharadar_client.fetch_statements(
-                ticker, annual=annual, ttm=ttm, asreported=asreported
-            ).frames
-        ),
-        empty={},
-    )

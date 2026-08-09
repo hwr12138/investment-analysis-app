@@ -12,6 +12,8 @@ with a dict subclass, as in ``test_acknowledgements``.
 from __future__ import annotations
 
 import dataclasses
+import inspect
+import re
 from datetime import date
 
 import pandas as pd
@@ -19,8 +21,11 @@ import pytest
 
 from app.data import sharadar_client as sc
 from app.logic import statements
-from app.logic import stock_research as sr
-from app.views import stock_research as page
+from app.logic.research import dataset as research_dataset
+from app.logic.research import summary as research_summary
+from app.provenance import Origin
+from app.views import research as page
+from app.views.research import dcf, financials, placeholders, summary
 from tests.conftest import SF1_COLUMNS, _ANNUAL_ROWS, _TTM_ROW, blank, sf1_payload
 
 
@@ -48,7 +53,7 @@ def session(monkeypatch) -> _SessionState:
     return state
 
 
-def _dataset(ticker: str = "AAPL") -> sr.ResearchDataset:
+def _dataset(ticker: str = "AAPL") -> research_dataset.ResearchDataset:
     index = pd.bdate_range("2025-01-01", "2026-08-05", name="Date")
     ohlcv = pd.DataFrame(
         {
@@ -57,7 +62,7 @@ def _dataset(ticker: str = "AAPL") -> sr.ResearchDataset:
         },
         index=index,
     )
-    return sr.ResearchDataset(
+    return research_dataset.ResearchDataset(
         ticker=ticker,
         profile={"name": f"{ticker} INC", "currency": "USD"},
         ohlcv=ohlcv,
@@ -107,14 +112,31 @@ def test_reset_leaves_the_selected_window_alone(session):
 def test_reset_leaves_other_pages_state_alone(session):
     """Every page shares one session_state; only this page's keys may be cleared."""
     session["default_rf_rate"] = 4.2
-    session["dcf_acks"] = {"tv_share": "2026-07-31T09:00:00"}
     session["ps_rf_input"] = 3.9
 
     page._session_reset("MSFT")
 
     assert session["default_rf_rate"] == 4.2
-    assert session["dcf_acks"] == {"tv_share": "2026-07-31T09:00:00"}
     assert session["ps_rf_input"] == 3.9
+
+
+def test_a_new_search_does_not_discard_a_computed_dcf(session):
+    """The DCF tab owns its own state and clears it on its own Compute.
+
+    Throwing away a model the reader had to press a button for, because they
+    looked up another company, would lose real work. The staleness notice on
+    that tab is what stops the surviving results from reading as the new
+    company's.
+    """
+    session["dcf_acks"] = {"tv_share": "2026-07-31T09:00:00"}
+    session["dcf_output"] = {"company": "AAPL|False"}
+    session["dcf_loaded_ticker"] = "AAPL|False"
+
+    page._session_reset("MSFT")
+
+    assert session["dcf_acks"] == {"tv_share": "2026-07-31T09:00:00"}
+    assert session["dcf_output"] == {"company": "AAPL|False"}
+    assert session["dcf_loaded_ticker"] == "AAPL|False"
 
 
 # ---------------------------------------------------------------------------
@@ -142,16 +164,52 @@ def test_an_empty_session_always_loads():
 
 
 def test_every_placeholder_names_what_it_will_show_and_where_it_comes_from():
-    for label, (what, source) in page._PLACEHOLDERS.items():
+    for label, (what, source) in placeholders.PLACEHOLDERS.items():
         assert what.strip()
         assert "SHARADAR" in source or "sharadar" in source, label
 
 
+#: The tabs this module renders itself, plus the one it delegates to the DCF
+#: module. Everything else in `_TAB_ORDER` has to be a placeholder.
+_BUILT = ("📊 Summary", "📄 Financials", "💰 DCF")
+
+
 def test_the_built_tabs_are_not_placeholders():
-    """Summary and Financials are built; the other seven are not."""
-    assert not any("Summary" in label for label in page._PLACEHOLDERS)
-    assert not any("Financials" in label for label in page._PLACEHOLDERS)
-    assert len(page._PLACEHOLDERS) == 7
+    """Summary, Financials and DCF are built; the other seven are not."""
+    for built in _BUILT:
+        assert built not in placeholders.PLACEHOLDERS, built
+    assert len(placeholders.PLACEHOLDERS) == 7
+
+
+def test_every_tab_is_either_built_or_a_placeholder():
+    """`render_page` indexes the tab dict by name, so an unclaimed name is a
+    ``KeyError`` at render time and a placeholder with no slot never shows."""
+    assert set(page._TAB_ORDER) == set(_BUILT) | set(placeholders.PLACEHOLDERS)
+    assert len(page._TAB_ORDER) == len(set(page._TAB_ORDER))
+
+
+def test_the_dcf_tab_sits_directly_before_the_valuation_tab():
+    """Intrinsic value and what the market pays for it read as a pair."""
+    order = list(page._TAB_ORDER)
+    assert order[order.index("💰 DCF") + 1] == "⚖️ Valuation"
+
+
+def test_summary_is_the_tab_that_opens():
+    """Streamlit selects the first tab, so the order is the landing tab."""
+    assert page._TAB_ORDER[0] == "📊 Summary"
+
+
+def test_every_built_tab_module_exposes_render():
+    """The shell dispatches by that name and nothing else."""
+    for module in (summary, financials, dcf, placeholders):
+        assert callable(getattr(module, "render", None)), module.__name__
+    assert not hasattr(dcf, "render_page")
+
+
+def test_the_dcf_tab_takes_the_ticker_rather_than_asking_for_one():
+    """Two ticker boxes on one page is the thing this move exists to remove."""
+    parameters = inspect.signature(dcf.render).parameters
+    assert list(parameters) == ["ticker"]
 
 
 def test_changing_a_financials_control_does_not_reload_the_company(session):
@@ -159,16 +217,34 @@ def test_changing_a_financials_control_does_not_reload_the_company(session):
     session["research_fin_statement"] = "Balance sheet"
     session["research_fin_period"] = "Quarterly"
     session["research_fin_units"] = "Billions"
-    session["research_fin_count"] = "20"
 
     assert not page._needs_load(_dataset("AAPL"), "AAPL")
 
 
-def test_the_period_counts_cover_the_default_the_control_offers():
-    """`segmented_control` returns None when cleared, and the guard reads "8"."""
-    assert "8" in page._PERIOD_COUNTS
-    assert page._PERIOD_COUNTS["8"] == 8
-    assert page._PERIOD_COUNTS["All"] is None
+def test_every_period_sharadar_returned_is_shown():
+    """There is no period-count control: the table carries the full history.
+
+    Guards the call site rather than a constant, because the failure this
+    prevents is a truncating default silently creeping back in.
+    """
+    source = inspect.getsource(financials.render)
+    assert "max_periods=None" in source
+
+
+def test_the_table_grows_to_its_content_rather_than_scrolling_inside_a_box():
+    """The reader scrolls the page vertically and the table horizontally.
+
+    Comments are stripped first — this file explains at length why there is no
+    `max-height`, and the explanation must not satisfy the assertion.
+    """
+    css = re.sub(r"/\*.*?\*/", "", financials._STATEMENT_CSS, flags=re.S)
+
+    assert "max-height" not in css
+    assert "overflow-x: auto" in css
+    # A sticky header would resolve against a box that never scrolls.
+    assert "position: sticky; top: 0" not in css
+    # ...while the label column still pins as the periods scroll past it.
+    assert "position: sticky; left: 0" in css
 
 
 # ---------------------------------------------------------------------------
@@ -187,33 +263,33 @@ def _table(spec=None, rows=None, **kwargs):
 
 def test_the_table_is_one_line_of_html():
     """Streamlit parses the string as Markdown first; a blank line splits it."""
-    html = page._statement_table_html(_table())
+    html = financials._statement_table_html(_table())
     assert "\n" not in html
     assert html.startswith('<div class="fin-scroll">')
     assert html.endswith("</table></div>")
 
 
 def test_the_label_column_is_a_header_cell_so_it_can_pin():
-    html = page._statement_table_html(_table())
+    html = financials._statement_table_html(_table())
     assert '<th class="fin-label fin-corner">' in html
     assert '<th class="fin-label">Revenues</th>' in html
 
 
 def test_subtotals_and_totals_carry_their_class():
-    html = page._statement_table_html(_table())
+    html = financials._statement_table_html(_table())
     assert "fin-row fin-subtotal" in html
     assert "fin-row fin-total" in html
     assert "fin-row fin-detail" in html
 
 
 def test_section_headers_render_as_their_own_row():
-    html = page._statement_table_html(_table())
+    html = financials._statement_table_html(_table())
     assert '<tr class="fin-section"><th class="fin-label">Revenues</th>' in html
     assert "Operating Expenses &amp; Income" in html
 
 
 def test_a_derived_row_is_marked_and_carries_its_formula_in_the_tooltip():
-    html = page._statement_table_html(_table())
+    html = financials._statement_table_html(_table())
     assert 'class="fin-tag" title="Total Operating Expenses' in html
     assert ">derived</span>" in html
 
@@ -225,7 +301,7 @@ def test_a_missing_figure_renders_a_dash_and_never_the_word_none():
         rows=[blank(row, "sbcomp") for row in _ANNUAL_ROWS],
         show_empty=True,
     )
-    html = page._statement_table_html(table)
+    html = financials._statement_table_html(table)
 
     assert "None" not in html
     assert 'class="fin-missing"' in html
@@ -234,7 +310,7 @@ def test_a_missing_figure_renders_a_dash_and_never_the_word_none():
 
 
 def test_a_zero_sharadar_may_have_invented_is_marked():
-    html = page._statement_table_html(_table())
+    html = financials._statement_table_html(_table())
     assert 'class="fin-zerofill"' in html
 
 
@@ -244,7 +320,7 @@ def test_a_flagged_row_shows_why_without_changing_the_reported_figure():
         out = list(row)
         out[SF1_COLUMNS.index("cor")] = float(out[SF1_COLUMNS.index("cor")]) + 25.0
         broken.append(out)
-    html = page._statement_table_html(_table(rows=broken))
+    html = financials._statement_table_html(_table(rows=broken))
 
     assert "fin-flagged" in html
     assert 'class="fin-flag"' in html
@@ -259,7 +335,7 @@ def test_vendor_supplied_strings_are_escaped_not_trusted_as_markup():
         key="x", label="<img src=x onerror=alert(1)>", sublabel="\"><script>",
     )
     table = dataclasses.replace(table, periods=(hostile, *table.periods[1:]))
-    html = page._statement_table_html(table)
+    html = financials._statement_table_html(table)
 
     assert "<img" not in html
     assert "&lt;img" in html
@@ -268,7 +344,7 @@ def test_vendor_supplied_strings_are_escaped_not_trusted_as_markup():
 
 def test_the_ttm_column_is_ruled_off_from_the_fiscal_periods():
     table = _table(statements.CASH_FLOW, latest=_frames([list(_TTM_ROW)]))
-    html = page._statement_table_html(table)
+    html = financials._statement_table_html(table)
 
     assert "fin-period fin-first" in html
     assert 'class="fin-first"' in html
@@ -280,20 +356,20 @@ def test_the_ttm_column_is_ruled_off_from_the_fiscal_periods():
 
 
 def test_the_table_is_four_columns_of_four():
-    assert len(sr.STAT_COLUMNS) == 4
-    assert all(len(column) == 4 for column in sr.STAT_COLUMNS)
+    assert len(research_summary.STAT_COLUMNS) == 4
+    assert all(len(column) == 4 for column in research_summary.STAT_COLUMNS)
 
 
 def test_a_cell_shows_its_value_on_the_right_of_its_label():
-    tile = sr.StatTile(
-        label="P/E", display="35.20", origin=sr.Origin.REPORTED, source="Sharadar DAILY"
+    tile = research_summary.StatTile(
+        label="P/E", display="35.20", origin=Origin.REPORTED, source="Sharadar DAILY"
     )
-    cell = page._stat_cell("P/E", tile)
+    cell = summary._stat_cell("P/E", tile)
     assert cell.index("P/E") < cell.index("35.20")
 
 
 def test_a_missing_cell_says_not_reported_rather_than_rendering_blank():
-    cell = page._stat_cell("P/E", sr.StatTile.unavailable("P/E", "Sharadar", "gone"))
+    cell = summary._stat_cell("P/E", research_summary.StatTile.unavailable("P/E", "Sharadar", "gone"))
     assert "not reported" in cell
     # The reason belongs in the sources panel, not crammed into the cell.
     assert "gone" not in cell
@@ -301,14 +377,14 @@ def test_a_missing_cell_says_not_reported_rather_than_rendering_blank():
 
 def test_a_label_with_no_matching_tile_still_renders_a_cell():
     """A layout/tile mismatch must degrade, not raise, in front of the user."""
-    assert "not reported" in page._stat_cell("Nonexistent", None)
+    assert "not reported" in summary._stat_cell("Nonexistent", None)
 
 
 def test_vendor_values_are_escaped_not_trusted_as_markup():
-    tile = sr.StatTile(
+    tile = research_summary.StatTile(
         label="X", display="<img src=x onerror=alert(1)>",
-        origin=sr.Origin.REPORTED, source="Sharadar",
+        origin=Origin.REPORTED, source="Sharadar",
     )
-    cell = page._stat_cell("X", tile)
+    cell = summary._stat_cell("X", tile)
     assert "<img" not in cell
     assert "&lt;img" in cell

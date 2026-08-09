@@ -9,6 +9,7 @@ a failure means either the spec or the fixture is wrong, never the check.
 
 from __future__ import annotations
 
+import dataclasses
 import math
 
 import pytest
@@ -125,18 +126,28 @@ def test_no_subtotal_is_checked_against_its_own_plug(spec):
     for row in spec.rows():
         if row.check is None:
             continue
-        named = set(row.check.plus) | set(row.check.minus)
+        named = set(st._dependencies(row.check.expected))
         assert not (named & plugged.get(row.key, set())), f"{spec.key}.{row.key}"
 
 
 @pytest.mark.parametrize("spec", SPECS, ids=lambda s: s.key)
-def test_percentages_only_appear_on_the_derived_view(spec):
-    """Sharadar publishes no percentage line on PL, BS or CF."""
-    percent = [r.key for r in spec.rows() if r.unit is st.Unit.PERCENT]
-    if spec.key != "DERIVED":
-        assert percent == []
-    else:
-        assert percent
+def test_a_percentage_row_is_computed_here_or_read_off_the_metrics_frame(spec):
+    """Sharadar publishes percentages only on its DERIVED (metrics) frame.
+
+    A ``PERCENT`` row reading a PL, BS or CF caption would be typing a currency
+    figure as a rate, and would render, say, revenue as "39,103,500.0%".
+    """
+    statement_of = {c: s for _, c, s in sc.SF1_LAYOUT}
+    for row in spec.rows():
+        if row.unit is not st.Unit.PERCENT:
+            continue
+        if isinstance(row.source, st.FromCaption):
+            assert statement_of[row.source.caption] == "DERIVED", (
+                f"{spec.key}.{row.key} types a "
+                f"{statement_of[row.source.caption]} caption as a percentage"
+            )
+        else:
+            assert isinstance(row.source, st.Ratio), f"{spec.key}.{row.key}"
 
 
 def test_the_four_statements_are_offered_in_reading_order():
@@ -327,6 +338,86 @@ def test_diagnostics_report_the_passes_too(annual):
     assert checked == {"assets", "liabilities", "debt", "investments"}
 
 
+def test_free_cash_flow_per_share_states_and_verifies_its_divisor(annual):
+    """The label claims levered FCF over *basic* shares; the check proves it.
+
+    Sharadar documents no divisor for ``fcfps``, so asserting one in a note and
+    leaving it unverified would be exactly the plausible-looking claim this
+    table exists to prevent.
+    """
+    row = next(r for r in st.CASH_FLOW.rows() if r.key == "fcfps")
+    assert row.label == "Free Cash Flow per Share (Levered)"
+    assert row.check.expected == st.Ratio("fcf", "shareswa_adj")
+
+    result = diagnostics_by_key(build(st.CASH_FLOW, annual))["fcfps"]
+    assert result.status == "ok"
+    # Both halves name themselves: levered numerator, basic divisor.
+    assert result.formula == (
+        "Free Cash Flow (Levered) ÷ "
+        "Basic Weighted Average Shares, Share-Factor Adjusted"
+    )
+
+
+def test_the_share_factor_is_what_makes_an_adr_reconcile():
+    """Divide by the raw basic count and every ADR is out by the ADR ratio.
+
+    Discovered against TSM, whose share factor is 0.2 — five ordinary shares to
+    the ADR — where the unadjusted divisor put free cash flow per share out by a
+    factor of five. Every US company has a factor of 1.0 and ties either way,
+    which is exactly why this needs its own test.
+    """
+    adr = []
+    for row in _ANNUAL_ROWS:
+        out = list(row)
+        fcf = float(out[SF1_COLUMNS.index("fcf")])
+        out[SF1_COLUMNS.index("sharefactor")] = 0.2
+        out[SF1_COLUMNS.index("fcfps")] = round(fcf / (1000.0 * 0.2), 6)
+        adr.append(out)
+
+    table = build(st.CASH_FLOW, frames(adr))
+    assert diagnostics_by_key(table)["fcfps"].status == "ok"
+
+    rows = rows_by_key(table)
+    assert rows["shareswa"].cells[0].value == 1000.0
+    assert rows["shareswa_adj"].cells[0].value == pytest.approx(200.0)
+
+
+def test_dividing_by_diluted_shares_would_fail_the_check(annual):
+    """Proof the check discriminates rather than passing on anything."""
+    # Same keys, diluted caption — so the spec stays valid and only the
+    # divisor changes.
+    swaps = {
+        "shareswa": st.RowSpec("shareswa", "Diluted Weighted Average Shares",
+                               st.FromCaption("Weighted Average Shares Diluted"),
+                               unit=st.Unit.SHARES),
+    }
+    spec = dataclasses.replace(
+        st.CASH_FLOW,
+        sections=tuple(
+            dataclasses.replace(
+                section,
+                rows=tuple(swaps.get(r.key, r) for r in section.rows),
+            )
+            for section in st.CASH_FLOW.sections
+        ),
+    )
+    assert st.validate_spec(spec) == []
+
+    # The fixture's diluted count is 1,010 against 1,000 basic — a 1% gap,
+    # comfortably outside the 0.1% cash-flow tolerance.
+    assert diagnostics_by_key(build(spec, annual))["fcfps"].status == "gap"
+
+
+def test_a_per_share_check_is_not_swamped_by_the_money_sized_floor(annual):
+    """One currency unit would let an 11% error through on a figure of ~9."""
+    assert st.STATEMENT_TOLERANCES.absolute_floor == 1.0
+    assert st.STATEMENT_TOLERANCES.unscaled_floor < 0.01
+    assert st._floor_for(st.Unit.CURRENCY, st.STATEMENT_TOLERANCES) == 1.0
+    assert st._floor_for(st.Unit.SHARES, st.STATEMENT_TOLERANCES) == 1.0
+    for unit in (st.Unit.PER_SHARE, st.Unit.PERCENT, st.Unit.RATIO):
+        assert st._floor_for(unit, st.STATEMENT_TOLERANCES) < 0.01
+
+
 def test_the_balance_sheet_identity_is_shown_but_never_checked():
     """Minority interest is derived as that very residual, so it cannot fail."""
     row = next(r for r in st.BALANCE_SHEET.rows() if r.key == "liab_and_equity")
@@ -431,7 +522,7 @@ def test_units_scale_money_and_share_counts(annual):
 def test_per_share_percent_and_ratio_rows_never_take_the_divisor(annual, unit_name):
     """The regression guard: scaling a whole frame turns EPS into 0.00.
 
-    ``dcf_valuation._render_reported_figures`` divides every row by the units
+    ``research.dcf._render_reported_figures`` divides every row by the units
     divisor, which is wrong for exactly these three unit kinds. The ``Unit``
     enum exists so this module cannot inherit that.
     """
@@ -477,12 +568,21 @@ def test_hidden_rows_are_counted_so_the_caption_can_say_how_many():
 
 
 def test_a_section_with_nothing_left_in_it_disappears():
-    without = frames([blank(row, "fcf") for row in _ANNUAL_ROWS])
-    table = build(st.CASH_FLOW, without)
+    """Uses Reference, whose single row makes the assertion stable.
 
-    assert "Supplemental Items" not in [section.title for section in table.sections]
-    assert "Supplemental Items" in [
-        s.title for s in build(st.CASH_FLOW, without, show_empty=True).sections
+    Pointing this at a Supplemental Items section made it fail every time a
+    line item was added there, which tests the wrong thing.
+    """
+    assert len(dict(
+        (s.title, s) for s in st.DERIVED_FIGURES.sections
+    )["Reference"].rows) == 1
+
+    without = frames([blank(row, "fxusd") for row in _ANNUAL_ROWS])
+    table = build(st.DERIVED_FIGURES, without)
+
+    assert "Reference" not in [section.title for section in table.sections]
+    assert "Reference" in [
+        s.title for s in build(st.DERIVED_FIGURES, without, show_empty=True).sections
     ]
 
 
@@ -535,6 +635,143 @@ def test_subtotals_and_totals_carry_their_emphasis(annual):
     assert rows["gp"].emphasis is st.Emphasis.SUBTOTAL
     assert rows["netinc"].emphasis is st.Emphasis.TOTAL
     assert rows["revenue"].emphasis is st.Emphasis.DETAIL
+
+
+# ---------------------------------------------------------------------------
+# Ratios and products — the supplemental rows
+# ---------------------------------------------------------------------------
+
+
+def test_per_share_supplementals_divide_by_the_right_share_count(annual):
+    """Basic uses basic shares, diluted uses diluted — 1,000 against 1,010."""
+    rows = rows_by_key(build(st.INCOME_STATEMENT, annual))
+
+    # netinccmn 250 with no discontinued operations.
+    assert rows["netinc_continuing"].cells[0].value == 250.0
+    assert rows["eps_continuing"].cells[0].value == pytest.approx(250.0 / 1000.0)
+    assert rows["epsdil_continuing"].cells[0].value == pytest.approx(250.0 / 1010.0)
+
+
+def test_continuing_operations_strips_the_discontinued_portion():
+    with_disc = [bump(row, "netincdis", 40.0) for row in _ANNUAL_ROWS]
+    rows = rows_by_key(build(st.INCOME_STATEMENT, frames(with_disc)))
+
+    assert rows["netinc_continuing"].cells[0].value == 210.0
+    assert rows["eps_continuing"].cells[0].value == pytest.approx(0.21)
+
+
+def test_the_effective_tax_rate_reads_as_a_positive_percentage(annual):
+    """Tax expense is negative downstream of ingest; a rate is not."""
+    rows = rows_by_key(build(st.INCOME_STATEMENT, annual))
+    # tax 60 on pretax 310.
+    assert rows["effective_tax_rate"].cells[0].value == pytest.approx(60.0 / 310.0)
+    assert rows["effective_tax_rate"].cells[0].text == "19.4%"
+
+
+def test_no_tax_rate_is_shown_on_a_pretax_loss():
+    """A rate on a negative base is arithmetic without a meaning."""
+    losses = [bump(row, "ebt", -2 * float(row[SF1_COLUMNS.index("ebt")]))
+              for row in _ANNUAL_ROWS]
+    rows = rows_by_key(build(st.INCOME_STATEMENT, frames(losses), show_empty=True))
+
+    assert all(cell.missing for cell in rows["effective_tax_rate"].cells)
+
+
+def test_a_ratio_with_a_zero_denominator_is_missing_not_infinite():
+    no_shares = [bump(row, "shareswa", -1000.0) for row in _ANNUAL_ROWS]
+    rows = rows_by_key(
+        build(st.INCOME_STATEMENT, frames(no_shares), show_empty=True)
+    )
+    cell = rows["eps_continuing"].cells[0]
+
+    assert cell.missing
+    assert cell.value is None
+
+
+def test_a_ratio_with_a_missing_input_is_missing(annual):
+    without = frames([blank(row, "netincdis") for row in _ANNUAL_ROWS])
+    rows = rows_by_key(build(st.INCOME_STATEMENT, without, show_empty=True))
+
+    assert all(cell.missing for cell in rows["netinc_continuing"].cells)
+    assert all(cell.missing for cell in rows["eps_continuing"].cells)
+    # ...while the reported basic EPS beside it is untouched.
+    assert not any(cell.missing for cell in rows["eps"].cells)
+
+
+def test_shares_outstanding_applies_the_share_factor():
+    """The correction Sharadar itself applies before computing market cap."""
+    halved = [bump(row, "sharefactor", -0.5) for row in _ANNUAL_ROWS]
+    rows = rows_by_key(build(st.BALANCE_SHEET, frames(halved)))
+
+    assert rows["sharesbas"].cells[0].value == 1000.0
+    assert rows["shares_out"].cells[0].value == 500.0
+    assert rows["shares_out"].formula == (
+        "Total Shares Outstanding on Filing Date × Share Factor"
+    )
+
+
+def test_tangible_book_value_nets_intangibles_off_equity_not_off_assets(annual):
+    """Distinct from Sharadar's Tangible Asset Value, which nets off assets."""
+    balance = rows_by_key(build(st.BALANCE_SHEET, annual))
+    derived = rows_by_key(build(st.DERIVED_FIGURES, annual))
+
+    equity, intangibles = 360.0, 145.0
+    assert balance["equity"].cells[0].value == equity
+    assert balance["intangibles"].cells[0].value == intangibles
+    assert balance["tangible_bv"].cells[0].value == equity - intangibles
+    # Sharadar's own figure is assets less intangibles — a different number.
+    assert derived["tangibles"].cells[0].value == 1060.0 - intangibles
+
+
+def test_net_debt_nets_cash_and_short_term_investments_off_total_debt(annual):
+    rows = rows_by_key(build(st.BALANCE_SHEET, annual))
+    assert rows["debt"].cells[0].value == 270.0
+    assert rows["cash_sti"].cells[0].value == 210.0
+    assert rows["net_debt"].cells[0].value == 60.0
+
+
+def test_per_share_balance_sheet_rows_use_shares_outstanding(annual):
+    rows = rows_by_key(build(st.BALANCE_SHEET, annual))
+    assert rows["cash_per_share"].cells[0].value == pytest.approx(210.0 / 1000.0)
+    assert rows["tangible_bvps"].cells[0].value == pytest.approx(215.0 / 1000.0)
+
+
+def test_the_supplemental_rows_survive_every_unit_setting(annual):
+    """Per-share and percentage supplementals must not take the divisor."""
+    for name in st.UNITS:
+        income = rows_by_key(
+            build(st.INCOME_STATEMENT, annual, units=st.UNITS[name])
+        )
+        balance = rows_by_key(build(st.BALANCE_SHEET, annual, units=st.UNITS[name]))
+        assert income["eps_continuing"].cells[0].text == "0.25"
+        assert income["effective_tax_rate"].cells[0].text == "19.4%"
+        assert balance["cash_per_share"].cells[0].text == "0.21"
+
+
+def test_the_requested_supplemental_items_are_all_present(annual):
+    """The line items asked for, as far as SF1 can support them."""
+    income = rows_by_key(build(st.INCOME_STATEMENT, annual))
+    for key in ("sps", "eps", "eps_continuing", "shareswa", "epsdil",
+                "epsdil_continuing", "shareswadil", "netinc_continuing", "dps",
+                "payoutratio", "ebitda", "effective_tax_rate"):
+        assert key in income, key
+
+    balance = rows_by_key(build(st.BALANCE_SHEET, annual))
+    for key in ("sharesbas", "shares_out", "cash_per_share", "bvps",
+                "tangible_bv", "tangible_bvps", "debt", "net_debt"):
+        assert key in balance, key
+
+    cash = rows_by_key(build(st.CASH_FLOW, annual))
+    for key in ("fcf", "fcfps"):
+        assert key in cash, key
+
+
+def test_ebit_is_not_repeated_in_the_income_statement_supplementals():
+    """It already has a home under Earnings from Continuing Operations."""
+    section = {s.title: s for s in st.INCOME_STATEMENT.sections}
+    assert "ebit" in {r.key for r in section["Earnings from Continuing Operations"].rows}
+    assert "ebit" not in {r.key for r in section["Supplemental Items"].rows}
+    assert "EBIT appears above" in section["Supplemental Items"].note
 
 
 # ---------------------------------------------------------------------------

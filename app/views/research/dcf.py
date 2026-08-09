@@ -1,8 +1,18 @@
-"""DCF valuation page — UI only.
+"""The 💰 DCF tab — UI only.
+
+The one tab that loads its own data. :func:`render` takes the page's ticker
+rather than the snapshot, because none of what it shows comes from there: the
+model needs statements normalised and schema-resolved by ``app.logic.dcf``,
+which the research fetch does not do. Hence the **Compute** gate — see
+:func:`render`.
+
+At an order of magnitude larger than any other tab body, this is the module to
+split next if it grows again; the assumptions panel, the valuation display, the
+reverse DCF and the export are each separable.
 
 Every number rendered here carries a provenance badge and, where it was
 computed, the formula behind it. The severity banners sit above everything and
-do not collapse: the governing rule for this page is that it must be impossible
+do not collapse: the governing rule for this tab is that it must be impossible
 to look at the output and not notice something is wrong.
 """
 
@@ -323,26 +333,38 @@ def _render_blocking(title: str, body: str, detail: str = "") -> None:
 
 
 # ---------------------------------------------------------------------------
-# Page
+# Tab
 # ---------------------------------------------------------------------------
 
 
-def render_page() -> None:
+def render(ticker: str) -> None:
+    """The whole model, for the company the research page currently has loaded.
+
+    ``ticker`` comes from that page, which is why there is no ticker box here.
+    The **Compute** gate stays, and is load-bearing in a way it was not when
+    this was a page of its own: ``st.tabs`` renders every tab body on every
+    rerun, so without the gate, changing the price window on Summary would fetch
+    and value a company.
+
+    Nothing about the DCF's own state is cleared when the research page loads a
+    different ticker. The results stay, and the staleness notice says loudly
+    which company they are for — discarding a computed model because the reader
+    looked something up would lose work the page asked them to press a button
+    for.
+    """
     st.markdown(_BANNER_CSS, unsafe_allow_html=True)
-    st.header("DCF Valuation")
+    st.subheader("DCF valuation")
     st.write(
         "Unlevered free cash flow to the firm, discounted to an intrinsic value per share. "
         "Fundamentals and prices from Nasdaq Data Link (Sharadar); Treasury yields and the "
         "equity risk premium from the shared market-data layer."
     )
 
-    ticker_column, button_column, basis_column = st.columns(
-        [3, 1.2, 2], vertical_alignment="bottom"
-    )
-    with ticker_column:
-        ticker = st.text_input("Ticker", value="AAPL", key="dcf_ticker_input").strip().upper()
+    button_column, basis_column = st.columns([1.4, 5], vertical_alignment="center")
     with button_column:
-        compute = st.button("Compute", type="primary", width="stretch")
+        compute = st.button(
+            "Compute", type="primary", width="stretch", key="dcf_compute"
+        )
     with basis_column:
         asreported = st.toggle(
             "Use as-reported (not restated) statements",
@@ -355,10 +377,6 @@ def render_page() -> None:
             ),
         )
 
-    if not ticker:
-        st.info("Enter a US-listed ticker and press **Compute**.")
-        return
-
     state_key = f"{ticker}|{asreported}"
 
     if compute:
@@ -370,9 +388,10 @@ def render_page() -> None:
 
     if not st.session_state.get("dcf_run"):
         st.info(
-            f"Press **Compute** to load {ticker} and value it. Nothing is fetched until "
-            "you do, and once loaded, changing an assumption will not re-run the model "
-            "until you press Compute again."
+            f"Press **Compute** to value {ticker}. Nothing is fetched until you do — "
+            "the statements this model needs are a separate request from the ones "
+            "behind the other tabs — and once loaded, changing an assumption will not "
+            "re-run the model until you press Compute again."
         )
         return
 
@@ -410,8 +429,8 @@ def render_page() -> None:
     if dataset.annual.empty:
         _render_blocking(
             "No usable statements",
-            f"Sharadar returned no annual fundamentals for {ticker}, so there is no history "
-            "to build a forecast on.",
+            f"Sharadar returned no annual fundamentals for {loaded_ticker}, so there is no "
+            "history to build a forecast on.",
         )
         return
 
@@ -506,6 +525,7 @@ def render_page() -> None:
             terminal_growth=inputs["terminal_growth"],
             risk_free_rate=inputs["risk_free"],
             sbc=inputs["sbc"],
+            periods_in_use=inputs["periods_in_use"],
         )
         issues, check_results = val.run_all(context, inputs["tolerances"])
 
@@ -544,7 +564,7 @@ def render_page() -> None:
     with notice_slot:
         _render_staleness_notice(
             pending_reload=pending_reload,
-            requested_ticker=ticker,
+            page_ticker=ticker,
             loaded_ticker=loaded_ticker,
             stale_assumptions=stale_assumptions,
             computed_at=output["computed_at"],
@@ -586,7 +606,7 @@ def render_page() -> None:
 def _render_staleness_notice(
     *,
     pending_reload: bool,
-    requested_ticker: str,
+    page_ticker: str,
     loaded_ticker: str,
     stale_assumptions: bool,
     computed_at: datetime,
@@ -594,7 +614,11 @@ def _render_staleness_notice(
     """Says plainly when what is on screen no longer matches the controls.
 
     Results are never silently updated and never silently left to look current:
-    if the inputs have moved on, the page says so above every number.
+    if the inputs have moved on, the tab says so above every number.
+
+    ``page_ticker`` is the company the rest of the research page is showing, so
+    the first line is what stops a valuation of the previous company from
+    reading as this one's after a new search.
     """
     if not (pending_reload or stale_assumptions):
         return
@@ -602,8 +626,8 @@ def _render_staleness_notice(
     lines = []
     if pending_reload:
         lines.append(
-            f"The ticker box says **{requested_ticker}**, but these results are for "
-            f"**{loaded_ticker}**."
+            f"The rest of this page is showing **{page_ticker}**, but these results "
+            f"are for **{loaded_ticker}**."
         )
     if stale_assumptions:
         lines.append(
@@ -665,8 +689,12 @@ def _driver_input(
     driver_key: str,
     *,
     default_basis: str = "5-year average",
-) -> tuple[float | None, Sourced]:
-    """One driver: a basis selector, an editable value, and its provenance."""
+) -> tuple[float | None, Sourced, tuple[str, ...]]:
+    """One driver: a basis selector, an editable value, and its provenance.
+
+    Also returns the period labels the default was averaged over, so the
+    validation layer can tell which fiscal years actually reach the model.
+    """
     basis = st.selectbox(
         f"{label} — basis",
         fin.BASES,
@@ -686,7 +714,11 @@ def _driver_input(
         manual = st.number_input(
             f"{label} (%)", value=0.0, step=0.5, key=f"dcf_input_{key}_manual"
         )
-        return manual / 100.0, Sourced.user(manual / 100.0, "No historical basis available.")
+        return (
+            manual / 100.0,
+            Sourced.user(manual / 100.0, "No historical basis available."),
+            (),
+        )
 
     widget_key = f"dcf_input_{key}_value"
     default_pct = round(default.value * 100, 4)
@@ -709,7 +741,7 @@ def _driver_input(
     _provenance(sourced)
     if default.detail:
         st.caption(f"⚠️ {default.detail}")
-    return user_value, sourced
+    return user_value, sourced, default.periods
 
 
 def _collect_assumptions(
@@ -737,6 +769,10 @@ def _collect_assumptions(
         years = st.slider("Forecast years", 5, 10, 5, key="dcf_input_years")
 
         driver_values: dict[str, float] = {}
+        # Every fiscal year any driver averaged over. Reconciliation failures
+        # outside this set cannot reach the valuation, and the validation layer
+        # scopes their severity accordingly.
+        periods_in_use: set[str] = set()
         grid = st.columns(3)
         specs = [
             ("Revenue growth", "growth", "revenue_growth"),
@@ -748,8 +784,9 @@ def _collect_assumptions(
         ]
         for index, (label, key, driver_key) in enumerate(specs):
             with grid[index % 3]:
-                value, sourced = _driver_input(label, key, ratios, driver_key)
+                value, sourced, periods = _driver_input(label, key, ratios, driver_key)
                 driver_values[driver_key] = value if value is not None else 0.0
+                periods_in_use.update(periods)
                 records.append(
                     dcf_export.AssumptionRecord("Forecast drivers", label, value, sourced)
                 )
@@ -1280,7 +1317,13 @@ def _collect_assumptions(
 
     # --- Effective tax rate for FCFF -------------------------------------
     etr_series = fin.effective_tax_rate(dataset.annual).dropna()
-    etr = float(etr_series.tail(5).median()) if not etr_series.empty else None
+    etr_window = etr_series.tail(5)
+    etr = float(etr_window.median()) if not etr_series.empty else None
+    periods_in_use.update(str(p) for p in etr_window.index)
+    # The base period is what everything is projected from, so it is in use by
+    # definition even when no driver window happens to reach it.
+    if not dataset.annual.empty:
+        periods_in_use.add(str(dataset.annual.index[-1]))
     delta_nwc, delta_nwc_span = dcf_model.base_period_delta_nwc(dataset, base)
 
     base_fcff = dcf_model.base_period_fcff(
@@ -1325,6 +1368,7 @@ def _collect_assumptions(
         "risk_free": risk_free,
         "beta_outcome": beta_outcome,
         "records": records,
+        "periods_in_use": frozenset(periods_in_use),
         "tolerances": val.DEFAULT_TOLERANCES,
     }
 

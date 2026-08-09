@@ -8,7 +8,7 @@ An interactive Streamlit web application designed for financial engineering, tec
 
 The application is organized into five analytical modules:
 
-* **DCF Valuation:** An unlevered free-cash-flow-to-the-firm model producing an intrinsic value per share for a US-listed equity, built on Sharadar Core US Fundamentals via the Nasdaq Data Link Tables API. Resolves every financial concept against the columns the API actually returns rather than hardcoding names, builds FCFF two independent ways and reconciles them, regresses beta against SPY with its R², and computes both Gordon growth and exit multiple terminal values side by side with each method's implied version of the other. Every displayed number carries a provenance badge (reported / derived / estimated / user) and, where computed, its formula. Twenty-four validation checks run on load and surface as a persistent red (critical) or amber (warning) banner with per-check acknowledgement; banks and insurers are rejected outright rather than valued with a model that does not fit them. The full model exports to a multi-sheet workbook that reproduces value per share outside the app.
+* **DCF Valuation** (the 💰 DCF tab on Stock Research)**:** An unlevered free-cash-flow-to-the-firm model producing an intrinsic value per share for a US-listed equity, built on Sharadar Core US Fundamentals via the Nasdaq Data Link Tables API. Resolves every financial concept against the columns the API actually returns rather than hardcoding names, builds FCFF two independent ways and reconciles them, regresses beta against SPY with its R², and computes both Gordon growth and exit multiple terminal values side by side with each method's implied version of the other. Every displayed number carries a provenance badge (reported / derived / estimated / user) and, where computed, its formula. Twenty-four validation checks run on load and surface as a persistent red (critical) or amber (warning) banner with per-check acknowledgement; banks and insurers are rejected outright rather than valued with a model that does not fit them. The full model exports to a multi-sheet workbook that reproduces value per share outside the app.
 * **Portfolio Optimization:** Allocates capital across multiple assets from historical data using four methodologies: Maximum Traditional Sharpe, Maximum Geometric Sharpe, Volatility Targeting, and the Fractional Kelly Criterion. Outputs include expected CAGR, volatility metrics, and visualized yearly returns.
 * **Portfolio Statistics:** Computes comprehensive risk and return metrics (Mean Annual Return, CAGR, Standard Deviation, Alpha, Beta, Sharpe, Geometric Sharpe, Sortino, and Treynor) for a custom-weighted portfolio across trailing 1/3/5/10-year and custom periods, alongside correlation and annualized covariance matrices.
 * **Black-Scholes Model:** Calculates Call and Put option prices alongside their respective Greeks (Delta, Gamma, Theta, Vega, Rho). Features interactive heatmaps to visualize pricing and PnL across varying spot prices and volatilities.
@@ -21,8 +21,11 @@ investment-analysis-app/
 ├── streamlit_app.py       # Entrypoint: page config, styling, and navigation
 ├── app/
 │   ├── views/             # Streamlit UI for each page (render_page functions)
+│   │   └── research/      # Stock Research: the shell, then one module per tab
+│   │                      #   (summary, financials, dcf, placeholders)
 │   ├── logic/             # Pure calculations, one module per feature
-│   │   └── dcf/           # The DCF engine (see below)
+│   │   ├── dcf/           # The DCF engine (see below)
+│   │   └── research/      # Stock Research: formatting ← summary ← dataset
 │   ├── data/              # Shared data access (Sharadar, Yahoo Treasury yields, ERP)
 │   ├── provenance.py      # Origin/Sourced types shared by the data and logic layers
 │   └── charts.py          # Reusable Plotly chart helpers

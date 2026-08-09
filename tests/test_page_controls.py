@@ -8,7 +8,7 @@ import pytest
 
 from app.logic.dcf import reverse
 from app.logic.dcf import valuation as dcf
-from app.views import dcf_valuation as page
+from app.views.research import dcf as page
 
 
 def _inputs(**overrides) -> dict:

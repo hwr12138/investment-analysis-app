@@ -32,16 +32,51 @@ registers pages in `st.navigation([...])`. Each feature is three layers:
 - `app/logic/<feature>.py` — the math, no Streamlit
 - `app/data/` — every external API call, so caching and keys stay in one place
 
+A feature earns a **package** in place of either module when it grows several independently
+testable parts — `app/logic/dcf/` and both halves of `app/views/research/` are the cases.
+Reach for it when the single module would otherwise hold pieces that have no reason to know
+about each other, not at a line count.
+
 `app/provenance.py` sits at the `app/` root because both the data and logic layers construct its
 types and neither may import the other.
 
 To add a page: create the logic module, create the view with `render_page()`, register it in
 `st.navigation`, and reuse `app/data/market_data.py` for fetching.
 
-`app/logic/statements.py` is the one logic module not owned by a single page: it declares the
-four SF1 statement layouts (sections, rows, subtotals, reconciliations) and evaluates them into a
-rendered table. The Stock Research financials tab consumes it; the DCF page's reported-figures
-table is the obvious second consumer. Pure — no Streamlit, no network.
+To add a **tab** to Stock Research: create `app/logic/research/<tab>.py` for the arithmetic and
+`app/views/research/<tab>.py` with a `render` function and its own CSS, then add the label to
+`_TAB_ORDER` and dispatch it in `views/research/__init__.py`. Remove its entry from
+`placeholders.PLACEHOLDERS` in the same commit — a test fails if the two disagree.
+
+### The Stock Research page
+
+The one feature that is a package on both layers rather than a pair of modules, because it
+carries ten tabs:
+
+```
+app/views/research/     __init__.py = the shell; one module per tab beside it
+app/logic/research/     formatting ← summary ← dataset
+```
+
+`views/research/__init__.py` owns the ticker box, the search gate, the session snapshot and
+`_TAB_ORDER` — **the one place tab order is decided**. Each tab module exposes a `render`
+function taking exactly what that tab needs: the snapshot for the ones that read it, the bare
+ticker for `dcf`, which loads its own. There is no shared signature, because the dispatch is
+explicit and a uniform one would hide that the DCF reads nothing from the snapshot. Each tab
+also owns its CSS, so the rules travel with the markup they style.
+
+On the logic side the dependencies run one way — `formatting` is shared by every tab, each tab
+module owns its arithmetic, and `dataset` sits on top because it assembles the snapshot. Its
+call into `summary.build_key_stats` is the one upward edge.
+
+Two modules deliberately stay outside both packages. `app/logic/statements.py` declares the four
+SF1 statement layouts (sections, rows, subtotals, reconciliations) and evaluates them into a
+rendered table; the financials tab consumes it and the DCF tab's reported-figures table is the
+obvious second consumer, so it is not owned by this page. `app/logic/dcf/` stays independently
+reusable so batch screening remains an extension rather than a rewrite. Both are pure.
+
+`views/research/dcf.py` is by far the largest tab body and is the module to split next if it
+grows again — assumptions, valuation, reverse and export are each separable.
 
 ### The DCF engine
 
@@ -118,12 +153,24 @@ million), and rows arrive **unsorted** with truncation at 10,000 rows behind an 
 
 ## UI conventions
 
-The DCF page gates on an explicit **Compute** button: nothing is fetched until it is pressed, and
+The DCF tab gates on an explicit **Compute** button: nothing is fetched until it is pressed, and
 changing an assumption does not re-run the model until it is pressed again. Session state is
 keyed `dcf_*`; loading a different ticker clears acknowledgements and overrides via
 `_session_reset`, recomputing the same one keeps them.
 
-Severity banners sit above everything and do not collapse. The governing rule for that page: it
+That gate is what makes the tab safe to host: `st.tabs` renders every tab body on every rerun and
+reports **nothing to Python about which tab is open**, so an ungated tab would fetch whenever the
+reader changed the price window on Summary. It is the same reason the placeholder tabs render
+nothing, and the reason `logic/research/dataset.py` fetches eagerly for every tab — "load when
+opened" is not expressible until the tab strip becomes a control that reports its selection. A
+tab whose data is expensive gates behind its own button until then. The Peers tab is where that
+bill comes due: its cost is one `DAILY` request *per comparable*, not a fixed one.
+
+The research page's own Search does **not** reset `dcf_*` state — the two searches are
+independent. A model computed for the previous company survives, and `_render_staleness_notice`
+says loudly which company the results on screen are for.
+
+Severity banners sit above everything and do not collapse. The governing rule for that tab: it
 must be impossible to look at the output and not notice something is wrong.
 
 ## Tests
@@ -138,6 +185,11 @@ wrongly**.
 `tests/test_golden.py` snapshots one full model run. If a refactor moves those numbers, either
 the refactor is wrong or the snapshot needs updating with a stated reason.
 
-View-level tests (`test_page_controls.py`, `test_acknowledgements.py`) import
-`app.views.dcf_valuation` directly and monkeypatch `page.st.session_state` with a dict subclass,
+View-level tests (`test_page_controls.py`, `test_acknowledgements.py`, `test_research_page_controls.py`)
+import the view modules directly and monkeypatch `page.st.session_state` with a dict subclass,
 since there is no Streamlit runtime.
+
+The test files still map one-to-one onto the *old* module layout rather than the packages —
+`test_stock_research.py` covers all of `app/logic/research/`, and `test_research_page_controls.py`
+covers the shell plus three tab modules. Split them to mirror the packages when the next tab
+lands; both already carry section headers along the seams.
