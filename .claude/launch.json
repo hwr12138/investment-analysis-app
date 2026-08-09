@@ -4,8 +4,9 @@
     {
       "name": "streamlit",
       "runtimeExecutable": "streamlit",
-      "runtimeArgs": ["run", "streamlit_app.py", "--server.port", "8502", "--server.headless", "true"],
-      "port": 8502
+      "runtimeArgs": ["run", "streamlit_app.py", "--server.headless", "true"],
+      "port": 8502,
+      "autoPort": true
     }
   ]
 }

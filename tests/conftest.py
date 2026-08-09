@@ -27,15 +27,29 @@ _EDGAR = "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0000000
 #: Every SF1 column the client reads, in the order Sharadar returns them
 #: (alphabetical after the key columns). Order is deliberately *not* the order
 #: ``SF1_LAYOUT`` declares, so the tests prove the client zips on names.
+#:
+#: All 91 indicators in ``sharadar_client.SF1_LAYOUT`` are present. The statement
+#: views read line items the model never resolves a concept for, so a fixture
+#: carrying only the model's subset would leave most of a rendered statement
+#: untested.
 SF1_COLUMNS = [
     "ticker", "dimension", "calendardate", "datekey", "reportperiod",
     "fiscalperiod", "lastupdated",
-    "assets", "assetsc", "assetsnc", "capex", "cashneq", "consolinc", "cor",
-    "debt", "debtc", "debtnc", "depamor", "ebit", "ebitda", "ebt", "eps",
-    "epsdil", "equity", "fcf", "gp", "intexp", "investmentsc", "investmentsnc",
-    "liabilities", "liabilitiesc", "ncf", "ncff", "ncfi", "ncfo", "ncfx",
-    "netinc", "opex", "opinc", "revenue", "sbcomp", "sharefactor", "sharesbas",
-    "shareswa", "shareswadil", "taxexp", "workingcapital",
+    "accoci", "assets", "assetsc", "assetsnc", "assetturnover", "bvps",
+    "capex", "cashneq", "consolinc", "cor", "currentratio", "de", "debt",
+    "debtc", "debtnc", "deferredrev", "depamor", "deposits", "divyield", "dps",
+    "ebit", "ebitda", "ebitdamargin", "ebt", "eps", "epsdil", "equity", "ev",
+    "evebit", "evebitda", "fcf", "fcfps", "fxusd", "gp", "grossmargin",
+    "intangibles", "intexp", "invcap", "inventory", "investments",
+    "investmentsc", "investmentsnc", "liabilities", "liabilitiesc",
+    "liabilitiesnc", "marketcap", "ncf", "ncfbus", "ncfcommon", "ncfdebt",
+    "ncfdiv", "ncff", "ncfi", "ncfinv", "ncfo", "ncfx", "netinc", "netinccmn",
+    "netincdis", "netincnci", "netmargin", "opex", "opinc", "payables",
+    "payoutratio", "pb", "pe1", "ppnenet", "prefdivis", "price", "ps1",
+    "receivables", "retearn",
+    "revenue", "rnd", "roa", "roe", "roic", "ros", "sbcomp", "sgna",
+    "sharefactor", "sharesbas", "shareswa", "shareswadil", "sps", "tangibles",
+    "taxassets", "taxexp", "taxliabilities", "workingcapital",
 ]
 
 #: Shares consistent with the EPS figures below, so the share-count
@@ -75,6 +89,12 @@ def _sf1_row(
     Deriving rather than hardcoding gross profit, operating income and the like
     keeps the fixture internally consistent: a test that changes revenue cannot
     silently leave the reconciliation checks comparing stale constants.
+
+    The detail lines added for the statement views are split off their own
+    subtotal by fixed fractions that deliberately **do not** sum to it, so every
+    "Other …" residual row the statement specs derive has real work to do. A
+    fixture whose components added up exactly would let a broken residual pass
+    as zero.
     """
     gp = revenue - cor
     opinc = gp - opex
@@ -84,6 +104,52 @@ def _sf1_row(
     # Equity is the plug that makes the balance sheet balance, and the fixture
     # company has no non-controlling interests.
     equity = assets - liabilities
+    ebitda = opinc + dna
+    fcf = cfo + capex
+    assets_nc = assets - tca
+    liabilities_nc = liabilities - tcl
+
+    # Operating expenses: SG&A and R&D leave 15% unattributed.
+    sgna = round(opex * 0.55, 6)
+    rnd = round(opex * 0.30, 6)
+
+    # Current assets beyond cash and short-term investments; 30% unattributed.
+    current_rest = tca - cash - sti
+    receivables = round(current_rest * 0.40, 6)
+    inventory = round(current_rest * 0.30, 6)
+
+    # Non-current assets; `investmentsnc` is nil, so 25% is unattributed.
+    ppnenet = round(assets_nc * 0.45, 6)
+    intangibles = round(assets_nc * 0.25, 6)
+    taxassets = round(assets_nc * 0.05, 6)
+
+    # Current liabilities beyond current debt; 30% unattributed.
+    current_liab_rest = tcl - debt_c
+    payables = round(current_liab_rest * 0.50, 6)
+    deferredrev = round(current_liab_rest * 0.20, 6)
+
+    # Non-current liabilities beyond non-current debt; half unattributed.
+    taxliabilities = round((liabilities_nc - debt_nc) * 0.50, 6)
+
+    # Common equity. AOCI is negative, as it usually is in a real filing.
+    retearn = round(equity * 0.70, 6)
+    accoci = round(equity * -0.05, 6)
+
+    # Financing and investing detail, again leaving a residual in each.
+    ncfdiv = round(cff * 0.40, 6)
+    ncfcommon = round(cff * 0.35, 6)
+    ncfdebt = round(cff * 0.10, 6)
+    ncfbus = round((cfi - capex) * 0.30, 6)
+    ncfinv = round((cfi - capex) * 0.50, 6)
+
+    eps = round(netinc / _BASIC_SHARES, 6)
+    dps = round(-ncfdiv / _BASIC_SHARES, 6)
+    price = round(eps * 20.0, 6)
+    marketcap = round(price * _BASIC_SHARES, 6)
+    debt = debt_c + debt_nc
+    ev = round(marketcap + debt - cash, 6)
+    invcap = debt + equity
+
     values = {
         "ticker": "TEST",
         "dimension": dimension,
@@ -92,46 +158,101 @@ def _sf1_row(
         "reportperiod": reportperiod,
         "fiscalperiod": fiscal_period,
         "lastupdated": datekey,
-        "assets": assets,
-        "assetsc": tca,
-        "assetsnc": assets - tca,
-        "capex": capex,
-        "cashneq": cash,
-        "consolinc": netinc,
+        # --- Income statement ---------------------------------------------
+        "revenue": revenue,
         "cor": cor,
-        "debt": debt_c + debt_nc,
-        "debtc": debt_c,
-        "debtnc": debt_nc,
-        "depamor": dna,
-        "ebit": netinc + tax + intexp,
-        "ebitda": opinc + dna,
-        "ebt": ebt,
-        "eps": round(netinc / _BASIC_SHARES, 6),
-        "epsdil": round(netinc / _DILUTED_SHARES, 6),
-        "equity": equity,
-        "fcf": cfo + capex,
         "gp": gp,
-        "intexp": intexp,
-        "investmentsc": sti,
-        "investmentsnc": 0.0,
-        "liabilities": liabilities,
-        "liabilitiesc": tcl,
-        "ncf": net_change,
-        "ncff": cff,
-        "ncfi": cfi,
-        "ncfo": cfo,
-        "ncfx": 0.0,
-        "netinc": netinc,
+        "sgna": sgna,
+        "rnd": rnd,
         "opex": opex,
         "opinc": opinc,
-        "revenue": revenue,
-        "sbcomp": 5.0,
-        "sharefactor": 1.0,
-        "sharesbas": _BASIC_SHARES,
+        "ebit": netinc + tax + intexp,
+        "intexp": intexp,
+        "ebt": ebt,
+        "taxexp": tax,
+        "consolinc": netinc,
+        "netincnci": 0.0,
+        "netinc": netinc,
+        "prefdivis": 0.0,
+        "netinccmn": netinc,
+        "netincdis": 0.0,
+        "eps": eps,
+        "epsdil": round(netinc / _DILUTED_SHARES, 6),
         "shareswa": _BASIC_SHARES,
         "shareswadil": _DILUTED_SHARES,
-        "taxexp": tax,
+        "dps": dps,
+        # --- Balance sheet -------------------------------------------------
+        "cashneq": cash,
+        "investmentsc": sti,
+        "receivables": receivables,
+        "inventory": inventory,
+        "assetsc": tca,
+        "investmentsnc": 0.0,
+        "ppnenet": ppnenet,
+        "intangibles": intangibles,
+        "taxassets": taxassets,
+        "investments": sti,
+        "assetsnc": assets_nc,
+        "assets": assets,
+        "payables": payables,
+        "deferredrev": deferredrev,
+        "debtc": debt_c,
+        "liabilitiesc": tcl,
+        "debtnc": debt_nc,
+        "deposits": 0.0,
+        "taxliabilities": taxliabilities,
+        "liabilitiesnc": liabilities_nc,
+        "liabilities": liabilities,
+        "debt": debt,
+        "retearn": retearn,
+        "accoci": accoci,
+        "equity": equity,
+        # --- Cash flow ------------------------------------------------------
+        "depamor": dna,
+        "sbcomp": 5.0,
+        "ncfo": cfo,
+        "capex": capex,
+        "ncfbus": ncfbus,
+        "ncfinv": ncfinv,
+        "ncfi": cfi,
+        "ncfdebt": ncfdebt,
+        "ncfcommon": ncfcommon,
+        "ncfdiv": ncfdiv,
+        "ncff": cff,
+        "ncfx": 0.0,
+        "ncf": net_change,
+        # --- Derived ---------------------------------------------------------
+        "ebitda": ebitda,
+        "fcf": fcf,
         "workingcapital": tca - tcl,
+        "invcap": invcap,
+        "tangibles": assets - intangibles,
+        "sharesbas": _BASIC_SHARES,
+        "sharefactor": 1.0,
+        "price": price,
+        "marketcap": marketcap,
+        "ev": ev,
+        "evebit": round(ev / opinc, 6),
+        "evebitda": round(ev / ebitda, 6),
+        "pe1": round(marketcap / netinc, 6),
+        "pb": round(marketcap / equity, 6),
+        "ps1": round(marketcap / revenue, 6),
+        "grossmargin": round(gp / revenue, 6),
+        "ebitdamargin": round(ebitda / revenue, 6),
+        "netmargin": round(netinc / revenue, 6),
+        "ros": round(opinc / revenue, 6),
+        "roe": round(netinc / equity, 6),
+        "roa": round(netinc / assets, 6),
+        "roic": round(opinc / invcap, 6),
+        "currentratio": round(tca / tcl, 6),
+        "de": round(liabilities / equity, 6),
+        "bvps": round(equity / _BASIC_SHARES, 6),
+        "fcfps": round(fcf / _BASIC_SHARES, 6),
+        "sps": round(revenue / _BASIC_SHARES, 6),
+        "divyield": round(dps / price, 6),
+        "payoutratio": round(dps / eps, 6),
+        "assetturnover": round(revenue / assets, 6),
+        "fxusd": 1.0,
     }
     return [values[name] for name in SF1_COLUMNS]
 
@@ -164,6 +285,77 @@ _ANNUAL_ROWS = [
         assets=980, liabilities=650,
     ),
 ]
+
+
+#: Four quarters plus the trailing-twelve-month row they sum to, so the
+#: statement views can be exercised at every dimension the page requests. The
+#: TTM flows are the four quarters added up; its balance sheet is the most
+#: recent quarter's, which is what Sharadar's ``MRT`` dimension actually
+#: carries and why the balance sheet's leading column is labelled by quarter
+#: rather than as a twelve-month figure.
+_QUARTER_INPUTS = [
+    dict(fiscal_period="2025-Q3", calendardate="2025-09-30",
+         reportperiod="2025-09-30", datekey="2025-10-28",
+         revenue=280, cor=163, opex=44, tax=14, dna=17,
+         cfo=79, capex=-23, cfi=-28, cff=-47, net_change=4,
+         cash=128, sti=64, tca=452, tcl=338, debt_c=47, debt_nc=214,
+         assets=1010, liabilities=668),
+    dict(fiscal_period="2025-Q4", calendardate="2025-12-31",
+         reportperiod="2025-12-31", datekey="2026-01-27",
+         revenue=310, cor=180, opex=49, tax=15, dna=18,
+         cfo=87, capex=-26, cfi=-31, cff=-52, net_change=4,
+         cash=134, sti=67, tca=466, tcl=349, debt_c=48, debt_nc=217,
+         assets=1035, liabilities=684),
+    dict(fiscal_period="2026-Q1", calendardate="2026-03-31",
+         reportperiod="2026-03-31", datekey="2026-04-28",
+         revenue=295, cor=172, opex=47, tax=15, dna=18,
+         cfo=83, capex=-25, cfi=-30, cff=-50, net_change=3,
+         cash=140, sti=70, tca=480, tcl=360, debt_c=50, debt_nc=220,
+         assets=1060, liabilities=700),
+    dict(fiscal_period="2026-Q2", calendardate="2026-06-30",
+         reportperiod="2026-06-30", datekey="2026-07-28",
+         revenue=325, cor=190, opex=51, tax=16, dna=19,
+         cfo=91, capex=-27, cfi=-33, cff=-55, net_change=3,
+         cash=146, sti=73, tca=497, tcl=372, debt_c=52, debt_nc=228,
+         assets=1092, liabilities=722),
+]
+
+#: Newest first, so the client's sort is exercised here too.
+_QUARTERLY_ROWS = [
+    _sf1_row(dimension="MRQ", **inputs) for inputs in reversed(_QUARTER_INPUTS)
+]
+
+_FLOWS = ("revenue", "cor", "opex", "tax", "dna", "cfo", "capex", "cfi", "cff",
+          "net_change")
+
+#: The TTM row: flows summed over the four quarters, balances taken from the
+#: latest one.
+_TTM_ROW = _sf1_row(
+    dimension="MRT",
+    fiscal_period=_QUARTER_INPUTS[-1]["fiscal_period"],
+    calendardate=_QUARTER_INPUTS[-1]["calendardate"],
+    reportperiod=_QUARTER_INPUTS[-1]["reportperiod"],
+    datekey=_QUARTER_INPUTS[-1]["datekey"],
+    **{key: sum(q[key] for q in _QUARTER_INPUTS) for key in _FLOWS},
+    **{key: _QUARTER_INPUTS[-1][key]
+       for key in ("cash", "sti", "tca", "tcl", "debt_c", "debt_nc",
+                   "assets", "liabilities")},
+)
+
+
+def blank(row: list, *names: str) -> list:
+    """A copy of ``row`` with the named indicators returned as nulls.
+
+    Sharadar sends a JSON null for an indicator a company does not report, which
+    is not the same as sending 0 — and for the indicators outside
+    ``ZERO_FILLED_INDICATORS`` it is the only signal there is. Blanking rather
+    than zeroing is what lets a test prove a residual row goes missing instead
+    of quietly computing against an assumed zero.
+    """
+    out = list(row)
+    for name in names:
+        out[SF1_COLUMNS.index(name)] = None
+    return out
 
 
 def sf1_payload(rows: list | None = None, *, cursor: str | None = None) -> dict:
@@ -211,6 +403,32 @@ def annual_rows() -> list:
 def statements_payload() -> dict:
     """A complete annual ``SHARADAR/SF1`` response for the fixture company."""
     return sf1_payload()
+
+
+@pytest.fixture
+def sparse_statements_payload() -> dict:
+    """The same company, but three line items it does not report at all.
+
+    ``sbcomp``, ``rnd`` and ``intangibles`` are blanked. None of the three is in
+    ``ZERO_FILLED_INDICATORS``, so Sharadar leaves them null rather than zero,
+    and each one is a component of a different residual row. That makes this the
+    fixture for "missing stays missing": the residuals that depend on them must
+    go missing, and the ones that do not must still compute.
+    """
+    return sf1_payload([blank(row, "sbcomp", "rnd", "intangibles")
+                        for row in _ANNUAL_ROWS])
+
+
+@pytest.fixture
+def quarterly_statements_payload() -> dict:
+    """Four ``MRQ`` quarters, newest first."""
+    return sf1_payload(list(_QUARTERLY_ROWS))
+
+
+@pytest.fixture
+def ttm_statements_payload() -> dict:
+    """The single ``MRT`` row covering those four quarters."""
+    return sf1_payload([list(_TTM_ROW)])
 
 
 @pytest.fixture

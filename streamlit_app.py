@@ -7,7 +7,7 @@ from app.views import stock_research as sr_page
 
 # Set the title and favicon that appear in the Browser's tab bar.
 st.set_page_config(
-    page_title='Quantitative Analysis App',
+    page_title='Equiti',
     page_icon=':earth_americas:', # This is an emoji shortcode. Could be a URL too.
     layout="wide",
     initial_sidebar_state="expanded"
@@ -26,7 +26,7 @@ local_css("assets/style.css")
 
 # -----------------------------------------------------------------------------
 # Set the title that appears at the top of the page.
-st.title("Quantitative Analysis Application")
+st.title("Equiti")
 st.write("`Created by:`")
 linkedin_url = "https://www.linkedin.com/in/ansonrui/"
 st.markdown(f'<a href="{linkedin_url}" target="_blank" style="text-decoration: none; color: inherit;"><img src="https://cdn-icons-png.flaticon.com/512/174/174857.png" width="25" height="25" style="vertical-align: middle; margin-right: 10px;">`Anson (Hao Wen) Rui`</a>', unsafe_allow_html=True)

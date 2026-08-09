@@ -84,14 +84,70 @@ class Tolerances:
     erp_band: tuple[float, float] = (0.02, 0.10)
     #: R² below which a regressed beta is noise.
     beta_r2_floor: float = 0.10
-    #: Terminal value share of enterprise value above which the valuation is
-    #: mostly assumption rather than forecast.
+    #: Fallback terminal value share of enterprise value above which the
+    #: valuation is mostly assumption rather than forecast. Only used when the
+    #: horizon-implied baseline cannot be computed — see
+    #: :meth:`terminal_value_share_ceiling`, which is what the check normally
+    #: compares against.
     terminal_value_share: float = 0.75
+    #: How far above its own horizon-implied baseline a valuation has to sit
+    #: before the terminal share is worth surfacing.
+    terminal_value_share_margin: float = 0.10
     #: SBC as a share of revenue above which the add-back choice matters a lot.
     sbc_share_of_revenue: float = 0.05
     #: Long-term debt share above which book value is likely to diverge from
     #: market value if rates have moved.
     debt_share_of_capital: float = 0.20
+
+    def terminal_value_share_ceiling(
+        self,
+        *,
+        years: int | None,
+        wacc: float | None,
+        growth: float | None,
+    ) -> tuple[float, str]:
+        """Terminal-share ceiling scaled to the horizon actually forecast.
+
+        A short forecast is *mechanically* more terminal-heavy than a long one
+        at the same discount rate — the explicit strip simply has fewer years in
+        it. A flat threshold therefore fires on almost every five-year model
+        while letting a ten-year model that really is terminal-driven pass
+        silently, which is backwards.
+
+        The baseline here is the share a flat-FCFF projection would produce at
+        this horizon, WACC and terminal growth. It uses no company data: it is
+        what the arithmetic alone implies. Only a valuation sitting
+        ``terminal_value_share_margin`` above its own baseline is surfaced, so
+        the check answers "is this more terminal-dependent than the horizon
+        requires?" rather than "is this number large?".
+
+        Returns the ceiling and a description of how it was derived, so the
+        issue can state which basis it used rather than showing a bare number.
+        """
+        usable = (
+            _finite(years)
+            and _finite(wacc)
+            and _finite(growth)
+            and int(years) >= 1
+            and float(wacc) > float(growth)
+        )
+        if not usable:
+            return self.terminal_value_share, (
+                f"≤ {self.terminal_value_share:.0%} — fixed, because the "
+                "horizon-implied baseline could not be computed"
+            )
+
+        periods, rate, g = int(years), float(wacc), float(growth)
+        annuity = (1.0 - (1.0 + rate) ** -periods) / rate
+        pv_terminal = ((1.0 + g) / (rate - g)) / (1.0 + rate) ** periods
+        baseline = pv_terminal / (pv_terminal + annuity)
+
+        ceiling = min(baseline + self.terminal_value_share_margin, 0.99)
+        return ceiling, (
+            f"≤ {ceiling:.0%} — a {periods}-year horizon at {rate:.1%} WACC and "
+            f"{g:.1%} terminal growth implies {baseline:.0%} on its own, plus "
+            f"{self.terminal_value_share_margin:.0%}"
+        )
 
     def describe(self) -> pd.DataFrame:
         """Tabular view for the validation panel and the export."""
@@ -111,7 +167,11 @@ class Tolerances:
             ("Effective tax rate band", f"{self.etr_band[0]:.0%}–{self.etr_band[1]:.0%}"),
             ("Equity risk premium band", f"{self.erp_band[0]:.0%}–{self.erp_band[1]:.0%}"),
             ("Beta R² floor", f"{self.beta_r2_floor:.2f}"),
-            ("Terminal value share of EV", f"{self.terminal_value_share:.0%}"),
+            (
+                "Terminal value share of EV",
+                f"horizon-implied baseline + {self.terminal_value_share_margin:.0%} "
+                f"(fallback {self.terminal_value_share:.0%})",
+            ),
             ("SBC share of revenue", f"{self.sbc_share_of_revenue:.0%}"),
         ]
         return pd.DataFrame(rows, columns=["Tolerance", "Default"])
@@ -287,6 +347,10 @@ class ValidationContext:
     terminal_value_share: float | None = None
     terminal_growth: float | None = None
     risk_free_rate: float | None = None
+    #: Length of the explicit forecast and the rate discounting it. Both are
+    #: needed to scale the terminal-share ceiling to the model actually run.
+    forecast_years: int | None = None
+    wacc: float | None = None
 
     sbc: float | None = None
     latest_revenue: float | None = None
@@ -1089,12 +1153,20 @@ def check_erp_plausible(
 def check_terminal_value_share(
     ctx: ValidationContext, tol: Tolerances
 ) -> tuple[list[Issue], CheckResult]:
-    """How much of enterprise value is terminal value."""
+    """How much of enterprise value is terminal value, against its own horizon.
+
+    Compared to the share the horizon and discount rate imply on their own
+    rather than to a flat number, so shortening the forecast does not by itself
+    raise a warning. See :meth:`Tolerances.terminal_value_share_ceiling`.
+    """
     name = "Terminal value share of enterprise value"
     if not _finite(ctx.terminal_value_share):
         return [], CheckResult(name, "not evaluated", "No valuation computed yet.")
     share = float(ctx.terminal_value_share)
-    if share > tol.terminal_value_share:
+    ceiling, basis = tol.terminal_value_share_ceiling(
+        years=ctx.forecast_years, wacc=ctx.wacc, growth=ctx.terminal_growth
+    )
+    if share > ceiling:
         return [
             ImplausibleValueIssue(
                 key="tv_share",
@@ -1104,14 +1176,20 @@ def check_terminal_value_share(
                 company=ctx.ticker,
                 period=None,
                 message=(
-                    "Most of the value sits beyond the explicit forecast, so the answer "
-                    "is driven by the terminal assumptions rather than the projection."
+                    "More of the value sits beyond the explicit forecast than this "
+                    "horizon and discount rate account for, so the answer is driven "
+                    "by the terminal assumptions rather than the projection. "
+                    "Lengthening the forecast is the usual remedy."
                 ),
-                values={"Terminal value share": f"{share:.1%}"},
-                tolerance=f"≤ {tol.terminal_value_share:.0%}",
+                values={
+                    "Terminal value share": f"{share:.1%}",
+                    "Ceiling for this model": f"{ceiling:.1%}",
+                    "Forecast years": str(ctx.forecast_years or "n/a"),
+                },
+                tolerance=basis,
             )
-        ], CheckResult(name, "fail", f"{share:.1%}", Severity.WARNING)
-    return [], CheckResult(name, "pass", f"{share:.1%}")
+        ], CheckResult(name, "fail", f"{share:.1%} vs {ceiling:.0%}", Severity.WARNING)
+    return [], CheckResult(name, "pass", f"{share:.1%} vs {ceiling:.0%} ceiling")
 
 
 def check_terminal_growth_reasonable(

@@ -15,7 +15,8 @@ python -m pytest tests/ -k "fcff" -q         # by name
 
 There is no linter, formatter, type checker, or pytest config file in this repo.
 
-`.claude/launch.json` defines a `streamlit` configuration on port 8502 — start the app for preview
+`.claude/launch.json` defines a `streamlit` configuration on port 8502, with `autoPort` so a
+second session falls back to a free port instead of colliding — start the app for preview
 with that rather than Bash.
 
 `SHARADAR_API_KEY` (fundamentals, prices) comes from `.streamlit/secrets.toml`, which is
@@ -36,6 +37,11 @@ types and neither may import the other.
 
 To add a page: create the logic module, create the view with `render_page()`, register it in
 `st.navigation`, and reuse `app/data/market_data.py` for fetching.
+
+`app/logic/statements.py` is the one logic module not owned by a single page: it declares the
+four SF1 statement layouts (sections, rows, subtotals, reconciliations) and evaluates them into a
+rendered table. The Stock Research financials tab consumes it; the DCF page's reported-figures
+table is the obvious second consumer. Pure — no Streamlit, no network.
 
 ### The DCF engine
 
@@ -91,8 +97,12 @@ absent data, never for data that merely looks wrong), `CRITICAL` (red persistent
 `WARNING` (amber). Checks aggregate: six failures produce six issues. A check whose inputs are
 absent reports *not evaluated* rather than passing.
 
-**Every tolerance lives in the `Tolerances` dataclass** in `validation.py`. Do not introduce a
-threshold anywhere else.
+**Every tolerance lives in a `Tolerances` dataclass owned by its consumer** — `dcf/validation.py`
+`Tolerances` for the model, `logic/statements.py` `StatementTolerances` for the statements tab.
+Never a bare literal at a comparison site. The two are deliberately not shared: the model's
+thresholds gate whether a valuation is trustworthy, the statement ones gate whether a display row
+grows a marker, and coupling them would let a change made for a valuation reason silently change
+what the research page flags.
 
 **Banks and insurers are rejected** before anything is computed, on SIC code (6000–6999), not on
 Sharadar's vendor `sector` label.

@@ -371,6 +371,87 @@ def test_high_terminal_value_share_is_a_warning():
     assert issues[0].values["Terminal value share"] == "92.0%"
 
 
+# --- The terminal share is judged against its own horizon -------------------
+#
+# A five-year forecast is mechanically more terminal-heavy than a ten-year one
+# at the same discount rate. Judging both against one flat number fired on
+# almost every short model and stayed quiet on long models that really were
+# terminal-driven.
+
+
+def _tv_context(share: float, years: int, wacc: float = 0.09, growth: float = 0.025):
+    return _context(
+        terminal_value_share=share,
+        forecast_years=years,
+        wacc=wacc,
+        terminal_growth=growth,
+    )
+
+
+def test_a_default_five_year_model_does_not_trip_the_terminal_share_check():
+    """The regression this scaling exists for.
+
+    At the page's default five-year horizon and a typical WACC the arithmetic
+    alone puts ~72% of value in the terminal, so a 78% model is unremarkable and
+    used to raise a warning purely for being short.
+    """
+    issues, result = val.check_terminal_value_share(_tv_context(0.78, years=5), TOL)
+    assert issues == []
+    assert result.status == "pass"
+
+
+def test_a_genuinely_terminal_heavy_five_year_model_still_warns():
+    issues, _ = val.check_terminal_value_share(_tv_context(0.88, years=5), TOL)
+    assert len(issues) == 1
+    assert issues[0].severity is val.Severity.WARNING
+    assert issues[0].values["Forecast years"] == "5"
+
+
+def test_a_long_horizon_tightens_rather_than_loosens_the_ceiling():
+    """70% terminal passed the old flat 75% threshold; over ten years it should not.
+
+    The scaling is not a blanket relaxation — at a long horizon the same share
+    means the projection is contributing far less than it should be.
+    """
+    issues, _ = val.check_terminal_value_share(_tv_context(0.70, years=10), TOL)
+    assert len(issues) == 1
+    assert issues[0].severity is val.Severity.WARNING
+
+
+@pytest.mark.parametrize(
+    "years, wacc, growth",
+    [
+        (None, 0.09, 0.025),   # horizon unknown
+        (5, None, 0.025),      # no WACC
+        (5, 0.09, None),       # no terminal growth
+        (5, 0.02, 0.025),      # growth above WACC — the Gordon form has no value
+    ],
+)
+def test_the_fixed_threshold_is_used_when_the_baseline_cannot_be_computed(
+    years, wacc, growth
+):
+    ceiling, basis = TOL.terminal_value_share_ceiling(
+        years=years, wacc=wacc, growth=growth
+    )
+    assert ceiling == TOL.terminal_value_share
+    assert "fixed" in basis
+
+
+def test_the_ceiling_falls_as_the_horizon_lengthens():
+    ceilings = [
+        TOL.terminal_value_share_ceiling(years=y, wacc=0.09, growth=0.025)[0]
+        for y in (5, 7, 10, 15)
+    ]
+    assert ceilings == sorted(ceilings, reverse=True)
+
+
+def test_the_issue_states_the_basis_it_judged_against():
+    """A bare ceiling would leave the user unable to tell why it moved."""
+    issues, _ = val.check_terminal_value_share(_tv_context(0.95, years=5), TOL)
+    assert "5-year horizon" in issues[0].tolerance
+    assert "9.0% WACC" in issues[0].tolerance
+
+
 def test_terminal_growth_above_the_economy_is_a_warning():
     issues, _ = val.check_terminal_growth_reasonable(
         _context(terminal_growth=0.09, risk_free_rate=0.04), TOL

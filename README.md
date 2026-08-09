@@ -1,4 +1,4 @@
-# Quantitative Analysis Application
+# Equiti
 
 An interactive Streamlit web application designed for financial engineering, technical analysis, and portfolio optimization.
 
@@ -63,6 +63,19 @@ need to be testable on their own:
 `wacc.py` and `valuation.py` import no Streamlit, make no network calls, and
 hold no global state — numbers in, dataclasses out. Every tolerance in the model
 lives in one `Tolerances` dataclass in `validation.py`.
+
+### Financial statements
+
+| Module | Responsibility |
+|---|---|
+| `app/logic/statements.py` | The four SF1 statement layouts and their evaluator — **pure** |
+
+Declares each statement as sections of rows: reported line items, derived
+"Other …" residuals where Sharadar's detail does not account for its own
+subtotal, and reconciliations of each reported subtotal against the lines above
+it. Subtotals always show what the company filed; where the two disagree the row
+is flagged rather than quietly corrected. Its thresholds live in one
+`StatementTolerances` dataclass, separate from the model's on purpose.
 
 ### API keys
 

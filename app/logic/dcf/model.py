@@ -747,6 +747,15 @@ def solve_implied_growth(
     )
 
 
+#: Concepts whose base-period zero carries no information, and so would make
+#: the zero-fill warning fire on the majority of companies for no reason.
+#: ``fx_effect`` is zero for any filer without translation exposure, and
+#: :func:`~app.logic.dcf.validation.check_cash_flow_ties` already treats an
+#: absent FX line as expected rather than suspect — flagging it here as well
+#: would have the two checks contradict each other on the same figure.
+ZERO_FILL_UNINFORMATIVE = frozenset({"fx_effect"})
+
+
 def _zero_filled_base_items(
     dataset: CompanyDataset, base: BasePeriod
 ) -> tuple[tuple[str, str], ...]:
@@ -755,7 +764,9 @@ def _zero_filled_base_items(
     Sharadar writes 0, not null, for a line item absent from a filing, so the
     two are indistinguishable in the data. Rather than guess, the ones that
     could plausibly be either are collected here and shown to the user as
-    ``(concept label, resolved column)`` pairs.
+    ``(concept label, resolved column)`` pairs. Concepts in
+    :data:`ZERO_FILL_UNINFORMATIVE` are left out: the ambiguity is real for them
+    too, but it never changes a decision.
     """
     from app.logic.dcf.schema import CONCEPTS_BY_KEY
 
@@ -764,6 +775,8 @@ def _zero_filled_base_items(
         if series is None:
             continue
         for key, value in series.items():
+            if str(key) in ZERO_FILL_UNINFORMATIVE:
+                continue
             column = dataset.schema.column(str(key))
             if column is None or not sharadar_client.is_zero_filled(column):
                 continue
@@ -835,6 +848,8 @@ def build_validation_context(
 
     if result is not None:
         context.debt_weight = result.wacc.debt_weight
+        context.wacc = result.wacc.wacc
+        context.forecast_years = len(result.projection.rows)
         context.long_term_debt = _series_value(base.stocks, "long_term_debt")
         terminal = result.headline_terminal
         enterprise_value = result.enterprise_values[result.headline_method]

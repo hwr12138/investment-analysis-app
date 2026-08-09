@@ -419,3 +419,76 @@ def test_formatters_never_invent_a_number(value):
     assert sr.format_count(value) == "not reported"
     assert sr.format_ratio(value) == "not reported"
     assert sr.format_pct(value) == "not reported"
+
+
+# ---------------------------------------------------------------------------
+# Orchestration — the statement sets the financials tab reads
+# ---------------------------------------------------------------------------
+
+
+def _statement_set(dimension: str) -> sc.StatementSet:
+    """A StatementSet whose frames are identifiable by their dimension."""
+    return sc.StatementSet(
+        ticker="TEST", permaticker=999, name="TESTCO INC", currency="USD",
+        template="Technology", dimension=dimension,
+        period="FY" if dimension.endswith("Y") else "Q1,Q2,Q3,Q4",
+        ttm=dimension.endswith("T"), asreported=dimension.startswith("AR"),
+        frames={"PL": pd.DataFrame({"Fiscal Year": [2025], "Dimension": [dimension]})},
+    )
+
+
+@pytest.fixture
+def stub_fetches(monkeypatch):
+    """Every network call `load_research` makes, replaced by a local stub."""
+    monkeypatch.setattr(sr.sharadar_client, "fetch_ticker_meta",
+                        lambda ticker: {"name": "TESTCO INC", "currency": "USD"})
+    monkeypatch.setattr(sr.sharadar_client, "fetch_ohlcv",
+                        lambda *a, **k: _ohlcv("2025-01-01", "2026-08-05"))
+    monkeypatch.setattr(sr.sharadar_client, "fetch_daily_metrics",
+                        lambda *a, **k: pd.DataFrame())
+    monkeypatch.setattr(sr.sharadar_client, "fetch_actions",
+                        lambda *a, **k: _actions([]))
+    monkeypatch.setattr(sr.sharadar_client, "fetch_index_prices",
+                        lambda *a, **k: pd.Series(dtype="float64"))
+
+    def statements(ticker, *, annual=True, ttm=False, asreported=False):
+        return _statement_set(
+            sc.dimension_for(annual=annual, ttm=ttm, asreported=asreported)
+        )
+
+    monkeypatch.setattr(sr.sharadar_client, "fetch_statements", statements)
+    return monkeypatch
+
+
+def test_load_research_keeps_every_dimension_the_financials_tab_needs(stub_fetches):
+    dataset = sr.load_research("TEST", today=TODAY)
+
+    assert dataset.statements_ttm["PL"]["Dimension"].iloc[0] == "MRT"
+    assert dataset.statements_annual["PL"]["Dimension"].iloc[0] == "MRY"
+    assert dataset.statements_quarterly["PL"]["Dimension"].iloc[0] == "MRQ"
+    # The as-reported quarterly income statement is still a bare frame; only
+    # the next-report tile wants it.
+    assert dataset.quarterly_ar["Dimension"].iloc[0] == "ARQ"
+
+
+def test_ttm_pl_still_resolves_through_the_property(stub_fetches):
+    """`build_key_stats` and its tests address `ttm_pl`; the move must be invisible."""
+    dataset = sr.load_research("TEST", today=TODAY)
+    assert dataset.ttm_pl["Dimension"].iloc[0] == "MRT"
+
+
+def test_a_dimension_that_fails_leaves_an_empty_set_rather_than_blocking(stub_fetches):
+    """The `_tolerant` contract: a research page renders without its financials."""
+    def statements(ticker, *, annual=True, ttm=False, asreported=False):
+        dimension = sc.dimension_for(annual=annual, ttm=ttm, asreported=asreported)
+        if dimension in {"MRY", "MRQ"}:
+            raise sc.SharadarError("no fundamentals", table="SF1", ticker=ticker)
+        return _statement_set(dimension)
+
+    stub_fetches.setattr(sr.sharadar_client, "fetch_statements", statements)
+    dataset = sr.load_research("TEST", today=TODAY)
+
+    assert dataset.statements_annual == {}
+    assert dataset.statements_quarterly == {}
+    assert dataset.statements_ttm["PL"]["Dimension"].iloc[0] == "MRT"
+    assert dataset.stats  # the summary tab is unaffected

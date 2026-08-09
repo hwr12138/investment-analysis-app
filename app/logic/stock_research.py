@@ -722,7 +722,14 @@ class ResearchDataset:
     ohlcv: pd.DataFrame
     daily: pd.DataFrame
     actions: pd.DataFrame
-    ttm_pl: pd.DataFrame
+    #: The four SF1 frames at each dimension the page shows. Empty when that
+    #: dimension could not be fetched — see :func:`_statement_frames`.
+    statements_ttm: dict[str, pd.DataFrame]
+    statements_annual: dict[str, pd.DataFrame]
+    statements_quarterly: dict[str, pd.DataFrame]
+    #: The as-reported quarterly income statement, kept as a bare frame because
+    #: the only thing that wants it is the next-earnings-date tile: the ``AR``
+    #: dimensions are the ones carrying real filing dates.
     quarterly_ar: pd.DataFrame
     stats: list[StatTile]
     currency: str
@@ -731,6 +738,15 @@ class ResearchDataset:
     @property
     def name(self) -> str:
         return str(self.profile.get("name") or self.ticker)
+
+    @property
+    def ttm_pl(self) -> pd.DataFrame:
+        """The TTM income statement.
+
+        A property rather than a stored field so the TTM statements live in one
+        place; the statistics builder and its tests are unchanged by the move.
+        """
+        return self.statements_ttm.get("PL", pd.DataFrame())
 
 
 def load_research(ticker: str, *, today: date | None = None) -> ResearchDataset:
@@ -763,9 +779,9 @@ def load_research(ticker: str, *, today: date | None = None) -> ResearchDataset:
     daily = _tolerant(lambda: sharadar_client.fetch_daily_metrics(ticker))
     actions = _tolerant(lambda: sharadar_client.fetch_actions(ticker))
 
-    ttm_pl = _tolerant(
-        lambda: sharadar_client.fetch_statements(ticker, annual=False, ttm=True).frame("PL")
-    )
+    statements_ttm = _statement_frames(ticker, annual=False, ttm=True)
+    statements_annual = _statement_frames(ticker, annual=True)
+    statements_quarterly = _statement_frames(ticker, annual=False)
     quarterly_ar = _tolerant(
         lambda: sharadar_client.fetch_statements(
             ticker, annual=False, asreported=True
@@ -789,7 +805,7 @@ def load_research(ticker: str, *, today: date | None = None) -> ResearchDataset:
     stats = build_key_stats(
         ohlcv=ohlcv,
         daily=daily,
-        ttm_pl=ttm_pl,
+        ttm_pl=statements_ttm.get("PL", pd.DataFrame()),
         quarterly_ar=quarterly_ar,
         actions=actions,
         stock_closes=stock_closes,
@@ -804,7 +820,9 @@ def load_research(ticker: str, *, today: date | None = None) -> ResearchDataset:
         ohlcv=ohlcv,
         daily=daily,
         actions=actions,
-        ttm_pl=ttm_pl,
+        statements_ttm=statements_ttm,
+        statements_annual=statements_annual,
+        statements_quarterly=statements_quarterly,
         quarterly_ar=quarterly_ar,
         stats=stats,
         currency=str(profile.get("currency") or ""),
@@ -824,3 +842,22 @@ def _tolerant(fetch, empty=None):
         return fetch()
     except sharadar_client.SharadarError:
         return fallback
+
+
+def _statement_frames(
+    ticker: str, *, annual: bool, ttm: bool = False, asreported: bool = False
+) -> dict[str, pd.DataFrame]:
+    """One SF1 dimension's four frames, or ``{}`` if the request failed.
+
+    Same contract as :func:`_tolerant`: a dimension that does not come back
+    leaves the financials tab saying so rather than blocking the page. A company
+    too young to have an annual filing still gets a quarterly statement view.
+    """
+    return _tolerant(
+        lambda: dict(
+            sharadar_client.fetch_statements(
+                ticker, annual=annual, ttm=ttm, asreported=asreported
+            ).frames
+        ),
+        empty={},
+    )

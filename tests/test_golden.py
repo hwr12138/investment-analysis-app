@@ -224,6 +224,24 @@ def test_a_zero_interest_line_is_flagged_rather_than_absorbed(built):
     assert "Interest Expense" in flagged[0].values
 
 
+def test_a_zero_fx_line_is_not_flagged_as_an_ambiguous_zero(built):
+    """The fixture reports ``ncfx`` as 0, like any filer without FX exposure.
+
+    The zero is as ambiguous as any other, but nothing turns on resolving it,
+    and ``check_cash_flow_ties`` already treats an absent FX line as expected.
+    Flagging it here as well contradicted that check and put a warning on the
+    majority of domestic filers.
+    """
+    flagged = [i for i in built["issues"] if i.key == "zero_filled"]
+    assert flagged, "the zero-fill check did not fire at all"
+    assert not any("Exchange" in label for label in flagged[0].values), (
+        f"FX was flagged as an ambiguous zero: {list(flagged[0].values)}"
+    )
+
+    tie = [r for r in built["check_results"] if r.name == "Cash flow statement ties"]
+    assert tie and tie[0].status == "pass"
+
+
 def test_financial_sector_is_rejected_before_anything_is_computed(
     statements_payload, financial_tickers_response, monkeypatch
 ):
