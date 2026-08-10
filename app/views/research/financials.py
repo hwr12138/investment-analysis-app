@@ -1,17 +1,20 @@
 """The 📄 Financials tab: the four statements, sectioned and reconciled.
 
 Fetches nothing — the statements arrive with the snapshot. The layout itself
-lives in ``app.logic.statements``, which is deliberately outside
-``app.logic.research`` because the DCF tab's reported-figures table is its
-intended second consumer.
+lives in ``app.logic.statements``, deliberately outside ``app.logic.research``
+so that a second consumer needs no move.
+
+This is the **only** statement viewer on the page. The DCF tab used to carry a
+raw one of its own; it now points here and keeps only the filing links, which
+this tab does not show.
 
 The table is hand-rolled HTML rather than ``st.dataframe``. Bolded subtotals,
 section header rows, indentation, per-cell tooltips, a derived marker and a
 pinned first column are each impossible there — and the figures have to be
 pre-formatted strings anyway, because this Streamlit build prints a missing
-number as the word "None" in every numeric path (see the comment in
-``research.dcf._render_reported_figures``). Once the cells are strings,
-``st.dataframe`` buys nothing.
+number as the word "None" in every numeric path tried: ``column_config``, a
+Styler with ``na_rep``, nullable ``Float64``, and a bare frame alike. Once the
+cells are strings, ``st.dataframe`` buys nothing.
 """
 
 from __future__ import annotations

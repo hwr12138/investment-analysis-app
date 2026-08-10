@@ -6,14 +6,19 @@ from inside a re-render. Everything else in ``app.logic.research`` is pure.
 
 **This module is the seam where per-tab loading would land.** The fetch is
 eager — one search pulls every table the page could want, whether or not the
-reader opens the tab that needs it — which is affordable today because the two
-built tabs use almost all of it. It stops being affordable at the Peers tab,
-whose cost is one ``DAILY`` request *per comparable* rather than a fixed one.
-The blocker is not this function: ``st.tabs`` renders every tab body on every
-rerun and reports no active tab to Python, so "fetch when opened" is not
-expressible until the tab strip becomes a control that reports its selection.
-Until then a tab whose data is expensive gates behind its own button, which is
-what the DCF tab does.
+reader opens the tab that needs it. The blocker is not this function:
+``st.tabs`` renders every tab body on every rerun and reports no active tab to
+Python, so "fetch when opened" is not expressible until the tab strip becomes a
+control that reports its selection. Until then a tab whose data is expensive
+gates behind its own button, which is what the DCF tab does.
+
+The peer universe was expected to be where that stopped being affordable, on
+the assumption that comparables cost one ``DAILY`` request each. They do not:
+``DAILY`` filtered on a date and no ticker returns every listed company in a
+single page — 5,446 rows in ~1.1s — so the cost is fixed rather than
+per-comparable. Better still, all three universe fetches are keyed on a date
+alone, so one cache entry serves every company searched that day and the second
+search pays nothing.
 
 :func:`load_research` deliberately does **not** go through
 ``dcf.model.load_company``: that rejects SIC 6000–6999 because banks and
@@ -29,6 +34,7 @@ from datetime import date
 import pandas as pd
 
 from app.data import sharadar_client
+from app.logic.research import valuation
 from app.logic.research.summary import (
     BENCHMARK,
     StatTile,
@@ -61,6 +67,11 @@ class ResearchDataset:
     #: dimensions are the ones carrying real filing dates.
     quarterly_ar: pd.DataFrame
     stats: list[StatTile]
+    #: Every listed company's multiples and industry on the same session, for
+    #: the Valuation tab's peer medians. One row per ticker, including this one.
+    #: Empty when the universe fetches failed, which leaves that tab reporting
+    #: its medians unavailable rather than the page failing.
+    peer_universe: pd.DataFrame
     currency: str
     loaded_at: date
 
@@ -127,6 +138,8 @@ def load_research(ticker: str, *, today: date | None = None) -> ResearchDataset:
         empty=pd.Series(dtype="float64"),
     )
 
+    peer_universe = _peer_universe(daily, today)
+
     stats = build_key_stats(
         ohlcv=ohlcv,
         daily=daily,
@@ -150,8 +163,34 @@ def load_research(ticker: str, *, today: date | None = None) -> ResearchDataset:
         statements_quarterly=statements_quarterly,
         quarterly_ar=quarterly_ar,
         stats=stats,
+        peer_universe=peer_universe,
         currency=str(profile.get("currency") or ""),
         loaded_at=today,
+    )
+
+
+def _peer_universe(daily: pd.DataFrame, today: date) -> pd.DataFrame:
+    """The cross-sectional snapshot the Valuation tab compares against.
+
+    Anchored on the last date in *this company's* ``DAILY`` history rather than
+    on ``today``: Sharadar answers a weekend or a holiday with zero rows, and a
+    date the company already has a row for is a session the market was open on.
+    It also lines the peers up with the company's own latest reading, which is
+    the comparison the tab claims to be making.
+    """
+    if daily.empty or "date" not in daily.columns:
+        return pd.DataFrame()
+    as_of = pd.Timestamp(daily["date"].max())
+    if pd.isna(as_of):
+        return pd.DataFrame()
+
+    since = (
+        pd.Timestamp(today) - pd.Timedelta(days=sharadar_client.UNIVERSE_LOOKBACK_DAYS)
+    ).date()
+    return valuation.build_peer_universe(
+        _tolerant(lambda: sharadar_client.fetch_universe_daily(as_of.date().isoformat())),
+        _tolerant(lambda: sharadar_client.fetch_universe_fundamentals(since.isoformat())),
+        _tolerant(sharadar_client.fetch_ticker_directory),
     )
 
 

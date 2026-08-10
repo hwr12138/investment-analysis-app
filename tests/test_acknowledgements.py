@@ -51,14 +51,24 @@ def _issues() -> list[val.Issue]:
 
 def test_acknowledgements_reset_when_the_ticker_changes(session):
     session["dcf_acks"] = {"tv_share": "2026-07-31T09:00:00"}
-    session["dcf_loaded_ticker"] = "AAPL|False"
+    session["dcf_loaded_ticker"] = "AAPL"
     session["dcf_input_growth_value"] = 9.34
 
-    page._session_reset("MSFT|False")
+    page._session_reset("MSFT")
 
     assert session["dcf_acks"] == {}
-    assert session["dcf_loaded_ticker"] == "MSFT|False"
+    assert session["dcf_loaded_ticker"] == "MSFT"
     assert "dcf_input_growth_value" not in session
+
+
+def test_reset_also_clears_the_computed_run(session):
+    """The previous company's numbers must not outlive the reset that drops its
+    inputs — the tab has no staleness notice to fall back on."""
+    session["dcf_output"] = {"company": "AAPL"}
+
+    page._session_reset("MSFT")
+
+    assert "dcf_output" not in session
 
 
 def test_reset_also_clears_assumption_overrides(session):
@@ -67,10 +77,19 @@ def test_reset_also_clears_assumption_overrides(session):
     session["dcf_input_beta"] = 1.8
     session["dcf_beta_override"] = True
 
-    page._session_reset("MSFT|False")
+    page._session_reset("MSFT")
 
     assert "dcf_input_beta" not in session
     assert "dcf_beta_override" not in session
+
+
+def test_reset_clears_the_reverse_what_if_price(session):
+    """Solved against the next company's model, it would read as an answer about it."""
+    session["dcf_reverse_price"] = 214.50
+
+    page._session_reset("MSFT")
+
+    assert "dcf_reverse_price" not in session
 
 
 def test_reset_leaves_unrelated_pages_state_alone(session):
@@ -78,15 +97,10 @@ def test_reset_leaves_unrelated_pages_state_alone(session):
     session["default_rf_rate"] = 4.2
     session["ps_rf_input"] = 3.9
 
-    page._session_reset("MSFT|False")
+    page._session_reset("MSFT")
 
     assert session["default_rf_rate"] == 4.2
     assert session["ps_rf_input"] == 3.9
-
-
-def test_changing_the_asreported_basis_also_resets():
-    """Restated and as-filed are different runs, so acknowledgements do not carry."""
-    assert "AAPL|False" != "AAPL|True"
 
 
 def test_acknowledged_items_stay_in_the_issue_list():

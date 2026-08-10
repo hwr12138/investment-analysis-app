@@ -25,7 +25,7 @@ from app.logic.research import dataset as research_dataset
 from app.logic.research import summary as research_summary
 from app.provenance import Origin
 from app.views import research as page
-from app.views.research import dcf, financials, placeholders, summary
+from app.views.research import dcf, financials, placeholders, summary, valuation
 from tests.conftest import SF1_COLUMNS, _ANNUAL_ROWS, _TTM_ROW, blank, sf1_payload
 
 
@@ -73,6 +73,7 @@ def _dataset(ticker: str = "AAPL") -> research_dataset.ResearchDataset:
         statements_quarterly={},
         quarterly_ar=pd.DataFrame(),
         stats=[],
+        peer_universe=pd.DataFrame(),
         currency="USD",
         loaded_at=date(2026, 8, 5),
     )
@@ -120,23 +121,22 @@ def test_reset_leaves_other_pages_state_alone(session):
     assert session["ps_rf_input"] == 3.9
 
 
-def test_a_new_search_does_not_discard_a_computed_dcf(session):
-    """The DCF tab owns its own state and clears it on its own Compute.
+def test_a_new_search_leaves_the_dcf_tab_to_clear_itself(session):
+    """One place decides when a model is stale, and it is not this one.
 
-    Throwing away a model the reader had to press a button for, because they
-    looked up another company, would lose real work. The staleness notice on
-    that tab is what stops the surviving results from reading as the new
-    company's.
+    The DCF tab notices on its next render that the ticker has moved and runs
+    its own reset. Clearing its keys from here as well would put that decision
+    in two places, and they would drift.
     """
     session["dcf_acks"] = {"tv_share": "2026-07-31T09:00:00"}
-    session["dcf_output"] = {"company": "AAPL|False"}
-    session["dcf_loaded_ticker"] = "AAPL|False"
+    session["dcf_output"] = {"company": "AAPL"}
+    session["dcf_loaded_ticker"] = "AAPL"
 
     page._session_reset("MSFT")
 
     assert session["dcf_acks"] == {"tv_share": "2026-07-31T09:00:00"}
-    assert session["dcf_output"] == {"company": "AAPL|False"}
-    assert session["dcf_loaded_ticker"] == "AAPL|False"
+    assert session["dcf_output"] == {"company": "AAPL"}
+    assert session["dcf_loaded_ticker"] == "AAPL"
 
 
 # ---------------------------------------------------------------------------
@@ -171,14 +171,14 @@ def test_every_placeholder_names_what_it_will_show_and_where_it_comes_from():
 
 #: The tabs this module renders itself, plus the one it delegates to the DCF
 #: module. Everything else in `_TAB_ORDER` has to be a placeholder.
-_BUILT = ("📊 Summary", "📄 Financials", "💰 DCF")
+_BUILT = ("📊 Summary", "📄 Financials", "💰 DCF", "⚖️ Valuation")
 
 
 def test_the_built_tabs_are_not_placeholders():
-    """Summary, Financials and DCF are built; the other seven are not."""
+    """Summary, Financials, DCF and Valuation are built; the other six are not."""
     for built in _BUILT:
         assert built not in placeholders.PLACEHOLDERS, built
-    assert len(placeholders.PLACEHOLDERS) == 7
+    assert len(placeholders.PLACEHOLDERS) == 6
 
 
 def test_every_tab_is_either_built_or_a_placeholder():
@@ -201,7 +201,7 @@ def test_summary_is_the_tab_that_opens():
 
 def test_every_built_tab_module_exposes_render():
     """The shell dispatches by that name and nothing else."""
-    for module in (summary, financials, dcf, placeholders):
+    for module in (summary, financials, dcf, valuation, placeholders):
         assert callable(getattr(module, "render", None)), module.__name__
     assert not hasattr(dcf, "render_page")
 

@@ -25,11 +25,6 @@ PLACEHOLDERS = {
         "`SHARADAR/ACTIONS` via `sharadar_client.fetch_actions` — already "
         "fetched for the ex-dividend tile on Summary.",
     ),
-    "⚖️ Valuation": (
-        "P/E, P/S, P/B and EV/EBITDA bands over five years, with today's "
-        "reading against the company's own history.",
-        "`SHARADAR/DAILY` via `sharadar_client.fetch_daily_metrics`.",
-    ),
     "🌱 Growth": (
         "Revenue, earnings and free-cash-flow growth, with CAGRs.",
         "`SHARADAR/SF1` annual and TTM.",
@@ -40,9 +35,10 @@ PLACEHOLDERS = {
         "`roic`, `assetturnover`.",
     ),
     "🧭 Peers": (
-        "Comparison against companies in the same industry.",
-        "`SHARADAR/TICKERS` on `sicindustry`/`famaindustry`, then `DAILY` for "
-        "the multiples.",
+        "The named companies behind the ⚖️ Valuation tab's industry medians, "
+        "ranked — who is dearest, who is cheapest, and where this one sits.",
+        "`sharadar_client.fetch_universe_daily` and `fetch_ticker_directory`, "
+        "already on the snapshot as `peer_universe` — no further requests.",
     ),
     "🕰️ History": (
         "Long-run total return, drawdowns, and volatility.",

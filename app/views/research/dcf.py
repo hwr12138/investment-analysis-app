@@ -3,8 +3,8 @@
 The one tab that loads its own data. :func:`render` takes the page's ticker
 rather than the snapshot, because none of what it shows comes from there: the
 model needs statements normalised and schema-resolved by ``app.logic.dcf``,
-which the research fetch does not do. Hence the **Compute** gate — see
-:func:`render`.
+which the research fetch does not do. It loads and values that ticker as soon as
+the tab body renders — see :func:`render` for what that costs.
 
 At an order of magnitude larger than any other tab body, this is the module to
 split next if it grows again; the assumptions panel, the valuation display, the
@@ -101,29 +101,6 @@ _HEADLINE_METHODS = {
     "Gordon growth": "gordon",
 }
 
-#: Display scales for the historical figures table: divisor, header suffix, decimals.
-_UNITS = {
-    "As reported": (1.0, "", 0),
-    "Millions": (1e6, " (m)", 1),
-    "Billions": (1e9, " (bn)", 2),
-}
-
-#: The three statements, in the order an analyst reads them.
-_STATEMENTS = {
-    "Income statement": "PL",
-    "Balance sheet": "BS",
-    "Cash flow": "CF",
-}
-
-#: Per-period bookkeeping carried on every statement frame. These describe the
-#: filing rather than the business, so they are shown as provenance instead of
-#: being mixed in among the line items.
-_STATEMENT_META = (
-    "Fiscal Period", "Fiscal Year", "Report Date", "Publish Date",
-    "Calendar Date", "Dimension", "Restated", "Source", "TTM", "Value Check",
-    "Data Model",
-)
-
 _BADGE_CLASS = {
     Origin.REPORTED: "dcf-reported",
     Origin.DERIVED: "dcf-derived",
@@ -183,23 +160,38 @@ def _pct(value, digits: int = 2) -> str:
 
 
 @st.cache_data(show_spinner=False, ttl=60 * 60 * 6)
-def _load_company_cached(ticker: str, asreported: bool) -> dcf_model.CompanyDataset:
+def _load_company_cached(ticker: str) -> dcf_model.CompanyDataset:
     """Caches the whole normalised dataset, not just the HTTP calls.
 
     The fetchers underneath are cached individually, but the schema resolution
     and statement normalisation are not free either. Caching here means moving a
     slider re-runs the arithmetic and nothing else — no refetch, no re-parse.
+    It is also what keeps the ungated load in :func:`render` to once per company
+    rather than once per rerun.
+
+    Always the restated (``MR``) series. ``dcf_model.load_company`` still takes
+    ``asreported``, and the export and provenance captions still read the flag
+    off the dataset, so a caller that wants the as-filed series can have it —
+    this page does not offer the choice, because a consistent time series is
+    what the ratio derivation needs and mixing the two within one run is never
+    allowed anyway.
     """
-    return dcf_model.load_company(ticker, asreported=asreported)
+    return dcf_model.load_company(ticker)
 
 
 def _assumption_fingerprint(inputs: dict) -> tuple:
     """A hashable snapshot of every input the valuation depends on.
 
-    Used to tell whether the displayed results still correspond to what the
-    assumption panel currently shows. Widgets rerun the script on every change;
-    this is what stops the model, the checks and the workbook from being rebuilt
-    each time.
+    The key the results are memoised under: a rerun whose fingerprint matches
+    reuses the stored run, and any change to it recomputes. Streamlit reruns the
+    whole script on every widget interaction, including the display-only ones —
+    the units selector, the statement picker — and the reverse solve underneath
+    is some fifty-odd model evaluations, so this is what stops the model, the
+    checks and the workbook being rebuilt when nothing that feeds them moved.
+
+    A field missing from this tuple is therefore a correctness bug, not a
+    performance one: the page would keep showing the previous run's numbers as
+    if they were current.
 
     The reverse DCF adds nothing here. It depends only on assumptions already
     listed plus the market price, and the price reaches this tuple already: it
@@ -234,11 +226,40 @@ def _assumption_fingerprint(inputs: dict) -> tuple:
     )
 
 
+def _needs_run(output: dict | None, ticker: str, fingerprint: tuple) -> bool:
+    """True when the stored run cannot serve what the page currently shows.
+
+    With no Compute gate this is the whole of the recompute decision, and it is
+    a correctness one rather than a performance one: a run is either reused
+    because it matches the assumptions on screen exactly, or it is rebuilt
+    before anything renders. Nothing on this tab is ever drawn from a run that
+    does not match, because there is no staleness notice to fall back on.
+
+    The company check is belt-and-braces — :func:`_session_reset` has already
+    dropped the stored run if the ticker moved — but it is what makes it
+    impossible for one company's numbers to appear under another's name.
+    """
+    return (
+        output is None
+        or output["company"] != ticker
+        or output["fingerprint"] != fingerprint
+    )
+
+
 def _session_reset(ticker: str) -> None:
-    """Clears per-company state. Acknowledgements never carry across companies."""
+    """Clears per-company state. Acknowledgements never carry across companies.
+
+    Called from :func:`render` whenever the page's ticker no longer matches what
+    this tab last loaded, which is the only thing that invalidates a driver
+    typed by hand or a check ticked off: both are statements about one company.
+
+    ``dcf_reverse_price`` goes with them — a price per share typed for one
+    company would otherwise be solved against the next one's model and read as
+    an answer about it.
+    """
     for key in list(st.session_state.keys()):
         if key.startswith("dcf_input_") or key in {
-            "dcf_acks", "dcf_beta_override", "dcf_output"
+            "dcf_acks", "dcf_beta_override", "dcf_output", "dcf_reverse_price"
         }:
             del st.session_state[key]
     st.session_state["dcf_acks"] = {}
@@ -340,17 +361,18 @@ def _render_blocking(title: str, body: str, detail: str = "") -> None:
 def render(ticker: str) -> None:
     """The whole model, for the company the research page currently has loaded.
 
-    ``ticker`` comes from that page, which is why there is no ticker box here.
-    The **Compute** gate stays, and is load-bearing in a way it was not when
-    this was a page of its own: ``st.tabs`` renders every tab body on every
-    rerun, so without the gate, changing the price window on Summary would fetch
-    and value a company.
+    ``ticker`` comes from that page, which is why there is no ticker box here,
+    and the model loads and values it as soon as this body renders. There is no
+    Compute gate, so what is on screen always describes the company the rest of
+    the page is showing and the assumptions currently set — an assumption change
+    is applied on the spot.
 
-    Nothing about the DCF's own state is cleared when the research page loads a
-    different ticker. The results stay, and the staleness notice says loudly
-    which company they are for — discarding a computed model because the reader
-    looked something up would lose work the page asked them to press a button
-    for.
+    What that costs is one extra set of Sharadar requests per company searched,
+    whether or not the reader ever opens this tab: ``st.tabs`` renders every tab
+    body on every rerun and reports nothing to Python about which one is open.
+    Two caches keep it to exactly that — :func:`_load_company_cached` for the
+    fetch and normalisation, :func:`_needs_run` for the arithmetic — so a rerun
+    triggered by any other control on the page costs nothing here.
     """
     st.markdown(_BANNER_CSS, unsafe_allow_html=True)
     st.subheader("DCF valuation")
@@ -360,50 +382,17 @@ def render(ticker: str) -> None:
         "equity risk premium from the shared market-data layer."
     )
 
-    button_column, basis_column = st.columns([1.4, 5], vertical_alignment="center")
-    with button_column:
-        compute = st.button(
-            "Compute", type="primary", width="stretch", key="dcf_compute"
-        )
-    with basis_column:
-        asreported = st.toggle(
-            "Use as-reported (not restated) statements",
-            value=False,
-            key="dcf_asreported",
-            help=(
-                "Restated figures give a consistent time series, which is what ratio "
-                "derivation needs, and are the default. As-reported figures match what the "
-                "market saw at the time. The two are never mixed within one model run."
-            ),
-        )
-
-    state_key = f"{ticker}|{asreported}"
-
-    if compute:
-        # Loading a different company clears the previous one's acknowledgements
-        # and assumption overrides. Recomputing the same one keeps them.
-        if st.session_state.get("dcf_loaded_ticker") != state_key:
-            _session_reset(state_key)
-        st.session_state["dcf_run"] = True
-
-    if not st.session_state.get("dcf_run"):
-        st.info(
-            f"Press **Compute** to value {ticker}. Nothing is fetched until you do — "
-            "the statements this model needs are a separate request from the ones "
-            "behind the other tabs — and once loaded, changing an assumption will not "
-            "re-run the model until you press Compute again."
-        )
-        return
-
-    loaded_key = st.session_state.get("dcf_loaded_ticker", state_key)
-    loaded_ticker, loaded_basis = loaded_key.rsplit("|", 1)
-    pending_reload = loaded_key != state_key
+    # Following the page to a different company clears the previous one's
+    # acknowledgements and assumption overrides; a rerun on the same one keeps
+    # them, which is what makes the assumption panel usable at all.
+    if st.session_state.get("dcf_loaded_ticker") != ticker:
+        _session_reset(ticker)
     acknowledged: dict[str, str] = st.session_state.setdefault("dcf_acks", {})
 
     # --- Load ------------------------------------------------------------
     try:
-        with st.spinner(f"Loading {loaded_ticker} from Sharadar…"):
-            dataset = _load_company_cached(loaded_ticker, loaded_basis == "True")
+        with st.spinner(f"Loading {ticker} from Sharadar…"):
+            dataset = _load_company_cached(ticker)
     except val.UnsupportedSectorError as error:
         _render_blocking("Unsupported sector", str(error))
         return
@@ -429,7 +418,7 @@ def render(ticker: str) -> None:
     if dataset.annual.empty:
         _render_blocking(
             "No usable statements",
-            f"Sharadar returned no annual fundamentals for {loaded_ticker}, so there is no "
+            f"Sharadar returned no annual fundamentals for {ticker}, so there is no "
             "history to build a forecast on.",
         )
         return
@@ -444,7 +433,6 @@ def render(ticker: str) -> None:
     # header and above every number on the page. Page order follows the spec:
     # banners, validation panel, historicals, assumptions, projection,
     # valuation, export — the checks come before the answer on purpose.
-    notice_slot = st.container()
     banner_slot = st.container()
     validation_slot = st.container()
 
@@ -456,10 +444,8 @@ def render(ticker: str) -> None:
 
     fingerprint = _assumption_fingerprint(inputs)
     output = st.session_state.get("dcf_output")
-    compute = compute or inputs["recompute"]
-    needs_run = compute or output is None or output["company"] != loaded_key
 
-    if needs_run:
+    if _needs_run(output, ticker, fingerprint):
         try:
             result = dcf_model.run_model(
                 dataset,
@@ -530,9 +516,8 @@ def render(ticker: str) -> None:
         issues, check_results = val.run_all(context, inputs["tolerances"])
 
         output = {
-            "company": loaded_key,
+            "company": ticker,
             "fingerprint": fingerprint,
-            "computed_at": datetime.now(),
             "result": result,
             "reverse": reverse_result,
             "issues": issues,
@@ -560,16 +545,6 @@ def render(ticker: str) -> None:
             ))
         return
 
-    stale_assumptions = output["fingerprint"] != fingerprint
-    with notice_slot:
-        _render_staleness_notice(
-            pending_reload=pending_reload,
-            page_ticker=ticker,
-            loaded_ticker=loaded_ticker,
-            stale_assumptions=stale_assumptions,
-            computed_at=output["computed_at"],
-        )
-
     with banner_slot:
         _render_banners(issues, acknowledged)
 
@@ -581,14 +556,7 @@ def render(ticker: str) -> None:
     ]
 
     _render_projection(dataset, result)
-    _render_valuation(
-        dataset,
-        result,
-        computed_inputs,
-        unacknowledged_critical,
-        stale=stale_assumptions or pending_reload,
-        computed_at=output["computed_at"],
-    )
+    _render_valuation(dataset, result, computed_inputs, unacknowledged_critical)
     if reverse_result is not None:
         _render_reverse_dcf(
             dataset,
@@ -596,48 +564,10 @@ def render(ticker: str) -> None:
             computed_inputs,
             reverse_result,
             fin.revenue_growth_history(dataset.annual),
-            stale=stale_assumptions or pending_reload,
         )
     _render_export(
         dataset, result, computed_inputs, issues, check_results, acknowledged, valuation_date
     )
-
-
-def _render_staleness_notice(
-    *,
-    pending_reload: bool,
-    page_ticker: str,
-    loaded_ticker: str,
-    stale_assumptions: bool,
-    computed_at: datetime,
-) -> None:
-    """Says plainly when what is on screen no longer matches the controls.
-
-    Results are never silently updated and never silently left to look current:
-    if the inputs have moved on, the tab says so above every number.
-
-    ``page_ticker`` is the company the rest of the research page is showing, so
-    the first line is what stops a valuation of the previous company from
-    reading as this one's after a new search.
-    """
-    if not (pending_reload or stale_assumptions):
-        return
-
-    lines = []
-    if pending_reload:
-        lines.append(
-            f"The rest of this page is showing **{page_ticker}**, but these results "
-            f"are for **{loaded_ticker}**."
-        )
-    if stale_assumptions:
-        lines.append(
-            "One or more assumptions have changed since these results were computed."
-        )
-    lines.append(
-        f"Everything below is the run from **{computed_at.strftime('%H:%M:%S')}**. "
-        "Press **Compute** to bring it up to date."
-    )
-    st.warning("  \n".join(lines), icon="⏳")
 
 
 # ---------------------------------------------------------------------------
@@ -671,7 +601,7 @@ def _render_header(dataset: dcf_model.CompanyDataset, valuation_date: date) -> N
         st.caption(
             f"Price as of {dataset.price_date} · share count as of "
             f"{dataset.shares_point_in_time_date} · statements "
-            f"{'as-reported' if dataset.asreported else 'restated (default)'} · "
+            f"{'as-reported' if dataset.asreported else 'restated'} · "
             f"{dataset.template or 'sector not classified'} · "
             f"{len(dataset.annual)} fiscal years retrieved"
         )
@@ -1274,8 +1204,7 @@ def _collect_assumptions(
                     "**This figure is not changing the valuation yet.** Standard FCFF adds "
                     "SBC back as a non-cash charge, which operating cash flow has already "
                     "done — so entering it alone is a no-op by construction. Turn on "
-                    "**Deduct SBC from FCFF** above to treat it as a real cost, then press "
-                    "**Compute**.",
+                    "**Deduct SBC from FCFF** above to treat it as a real cost.",
                     icon="ℹ️",
                 )
             elif sbc is not None and deduct_sbc:
@@ -1335,18 +1264,7 @@ def _collect_assumptions(
     )
     _render_fcff_panel(dataset, base, base_fcff, etr, etr_series, delta_nwc_span)
 
-    # A second Compute, at the bottom of a long assumptions panel. Without it the
-    # only way to apply a change is to scroll back to the top, which reads as
-    # "I changed it and nothing happened".
-    recompute = st.button(
-        "Compute with these assumptions",
-        type="primary",
-        width="stretch",
-        key="dcf_compute_bottom",
-    )
-
     return {
-        "recompute": recompute,
         "base": base,
         "drivers": drivers,
         "wacc": wacc_result,
@@ -1464,28 +1382,11 @@ def _render_valuation(
     result: dcf_model.ModelResult,
     inputs: dict,
     unacknowledged_critical: list[val.Issue],
-    *,
-    stale: bool = False,
-    computed_at: datetime | None = None,
 ) -> None:
     st.divider()
     st.subheader("Valuation")
 
     marker = ""
-    # The staleness warning is repeated here, not just at the top of the page.
-    # An assumption is changed halfway down a long page, and the number the user
-    # is watching is here — a notice they have to scroll up to see is a notice
-    # that reads as "nothing happened".
-    if stale:
-        marker = " ⏳"
-        stamp = f" from {computed_at.strftime('%H:%M:%S')}" if computed_at else ""
-        st.warning(
-            f"**These figures are from the previous run{stamp} and do not reflect the "
-            f"assumptions currently shown above.** Press **Compute** — at the top of the "
-            f"page or at the end of the assumptions panel — to apply them.",
-            icon="⏳",
-        )
-
     if unacknowledged_critical:
         marker = " ⚠️"
         st.error(
@@ -1499,8 +1400,7 @@ def _render_valuation(
     columns[0].metric(
         f"Value per share{marker}",
         f"{bridge.value_per_share:,.2f}",
-        help=f"Headline method: {result.headline_terminal.method}"
-        + (" · showing a previous run; press Compute to refresh" if stale else ""),
+        help=f"Headline method: {result.headline_terminal.method}",
     )
     columns[1].metric("Current price", f"{dataset.last_price:,.2f}" if dataset.last_price else "n/a")
     columns[2].metric("Upside / downside", _pct(upside) if upside is not None else "n/a")
@@ -1776,8 +1676,6 @@ def _render_reverse_dcf(
     inputs: dict,
     reverse_result: reverse.ReverseDcfResult,
     history: fin.GrowthHistory,
-    *,
-    stale: bool = False,
 ) -> None:
     st.divider()
     st.subheader("Reverse DCF — what the market price implies")
@@ -1789,16 +1687,6 @@ def _render_reverse_dcf(
         f"a flat revenue growth rate across all {years} forecast years, with the other five "
         f"drivers exactly as shown above."
     )
-
-    # Repeated here for the same reason it is repeated in the valuation panel —
-    # the number being read is here, and a notice further up the page reads as
-    # nothing having happened.
-    if stale:
-        st.warning(
-            "**This is from the previous run and does not reflect the assumptions currently "
-            "shown above.** Press **Compute** to apply them.",
-            icon="⏳",
-        )
 
     solved = reverse_result.status is reverse.Status.SOLVED
     forecast = inputs["drivers"].revenue_growth[0]
@@ -1894,16 +1782,16 @@ def _render_reverse_dcf(
 def _render_reverse_whatif(
     dataset: dcf_model.CompanyDataset, inputs: dict, reverse_result: reverse.ReverseDcfResult
 ) -> None:
-    """A live target price against snapshotted assumptions.
+    """A second target price, solved against the same assumptions as the run above.
 
-    The assumptions still come from the computed snapshot — only the target may
-    be live, and its answer renders directly beneath the box it was typed into,
-    so there is no staleness ambiguity to create.
+    The assumptions come from the snapshot the page is showing rather than being
+    re-read from the widgets, so this answer and the implied rate above are
+    always two points on one curve.
     """
     with st.expander("Solve for a different price", expanded=False):
         st.caption(
-            "Answers *what growth would justify this price?* — using the assumptions from the "
-            "run above, not whatever the widgets currently show."
+            "Answers *what growth would justify this price?* — using the same assumptions "
+            "as the implied rate above, with only the target price changed."
         )
         default = float(dataset.last_price or 0.0)
         price = st.number_input(
@@ -2001,127 +1889,26 @@ def _render_historicals(dataset: dcf_model.CompanyDataset) -> None:
     figure.update_yaxes(tickformat=".0%", row=2, col=1)
     st.plotly_chart(figure, width="stretch")
 
-    _render_reported_figures(dataset)
-
-
-def _statement_frame(
-    dataset: dcf_model.CompanyDataset, code: str
-) -> tuple[pd.DataFrame, list[str], list[str]]:
-    """One statement as line items × fiscal years, plus which items were reported.
-
-    Transposed against the wire layout because a statement is read down the line
-    items, not across them. The client emits indicators in statement order, so
-    transposing preserves that order.
-
-    Returns ``(frame, populated, empty)`` where the two lists partition the line
-    items into those the company reported and those Sharadar carries as an
-    indicator but left blank for this company.
-    """
-    frame = dataset.statements_annual.frame(code)
-    if frame.empty or "Fiscal Year" not in frame.columns:
-        return pd.DataFrame(), [], []
-
-    items = [
-        column for column in frame.columns
-        if column not in _STATEMENT_META
-        and pd.api.types.is_numeric_dtype(frame[column])
-    ]
-    populated = [c for c in items if frame[c].notna().any()]
-    empty = [c for c in items if c not in populated]
-
-    table = frame.set_index("Fiscal Year")[items].T
-    table.columns = [str(int(year)) for year in table.columns]
-    return table, populated, empty
-
-
-def _render_reported_figures(dataset: dcf_model.CompanyDataset) -> None:
-    """Every line item Sharadar returns, one statement at a time.
-
-    The model reads a handful of concepts out of these statements; showing only
-    those would leave the reader unable to tell a figure that was reported from
-    one that was resolved to a different column, or to see what else was on the
-    filing. This is the ground truth the whole page is built on, unedited.
-    """
-    st.markdown("**Reported figures — everything Sharadar returns, unedited**")
-
-    statement_column, units_column = st.columns([2, 2], vertical_alignment="bottom")
-    with statement_column:
-        statement = st.radio(
-            "Statement",
-            list(_STATEMENTS),
-            horizontal=True,
-            key="dcf_hist_statement",
-            help="The three statements Sharadar returns for this company, exactly as "
-                 "returned. Concepts the model uses are resolved out of these.",
-        )
-    with units_column:
-        unit = st.radio(
-            "Units",
-            list(_UNITS),
-            index=1,
-            horizontal=True,
-            key="dcf_hist_units",
-            help="Display only — the underlying figures and every calculation are "
-                 "unchanged, and the export always carries the full precision.",
-        )
-
-    code = _STATEMENTS[statement]
-    divisor, suffix, decimals = _UNITS[unit]
-    table, populated, empty = _statement_frame(dataset, code)
-
-    if table.empty:
-        st.info(
-            f"Sharadar returned no {statement.lower()} for {dataset.ticker}. Nothing has "
-            f"been substituted."
-        )
-        return
-
-    show_empty = st.checkbox(
-        f"Show the {len(empty)} line item(s) Sharadar left empty for {dataset.ticker}",
-        value=False,
-        key=f"dcf_hist_empty_{code}",
-        help="Indicators Sharadar carries for every company but reported no "
-             "value for. An empty row is not a zero — it means nothing was reported, "
-             "and which items are missing is itself worth knowing.",
-    )
-
-    rows = populated + empty if show_empty else populated
-    scaled = table.loc[rows] / divisor
-
-    # Rendered as text rather than left numeric. A figure that was never reported
-    # has to be visibly different from one that was reported as zero, and this
-    # Streamlit build prints a missing number as the word "None" in every numeric
-    # path tried — column_config, a Styler with na_rep, nullable Float64, and a
-    # bare frame alike. Formatting here is the only way to guarantee what a
-    # reader sees, which for a ground-truth table is the whole point.
-    display = scaled.map(
-        lambda value: "—" if pd.isna(value) else f"{value:,.{decimals}f}"
-    )
-    display.index.name = f"Line item{suffix}"
-
-    st.dataframe(
-        display.style.set_properties(**{"text-align": "right"}),
-        width="stretch",
-        height=min(36 * len(rows) + 44, 620),
-    )
-
     st.caption(
-        f"**{statement}** · {len(populated)} of {len(populated) + len(empty)} line items "
-        f"reported, {len(empty)} left empty by Sharadar · figures in {unit.lower()} of "
-        f"{dataset.currency or 'the reporting currency'} · "
-        f"{'as-reported' if dataset.asreported else 'restated (default)'}. "
-        f"A dash is a figure Sharadar carries no value for at all. A **0.0** is "
-        f"ambiguous: Sharadar writes 0 both for a genuine nil and for a line item "
-        f"absent from the filing, and the two cannot be told apart here — the "
-        f"validation panel lists the ones that affect this valuation."
+        "These are the ratios the drivers are derived from, not the statements they "
+        "were derived from. For the line items themselves — all four statements, "
+        "sectioned, reconciled, annual or quarterly — see the **📄 Financials** tab."
     )
+    _render_filing_provenance(dataset)
 
-    _render_filing_provenance(dataset, code)
 
+def _render_filing_provenance(dataset: dcf_model.CompanyDataset) -> None:
+    """Which filing each fiscal year came from, and whether it was restated.
 
-def _render_filing_provenance(dataset: dcf_model.CompanyDataset, code: str) -> None:
-    """Which filing each fiscal year came from, and whether it was restated."""
-    frame = dataset.statements_annual.frame(code)
+    Kept on this tab rather than left to Financials, which lists the same dates
+    but not the filings themselves: this is the only path from a valuation back
+    to the documents behind it.
+
+    Read off the income statement, though any frame would do — the client
+    partitions one SF1 row per period into ``PL``/``BS``/``CF``, so all three
+    carry identical metadata.
+    """
+    frame = dataset.statements_annual.frame("PL")
     if frame.empty or "Fiscal Year" not in frame.columns:
         return
 
@@ -2153,9 +1940,9 @@ def _render_filing_provenance(dataset: dcf_model.CompanyDataset, code: str) -> N
         )
         st.caption(
             "Report date is the period end; publish date is when the filing reached "
-            "Sharadar. A restated year is one the company later revised — the model uses "
-            "restated figures by default so the time series is consistent, which the "
-            "toggle at the top of the page switches off."
+            "Sharadar. A restated year is one the company later revised — this model "
+            "always uses the restated figures, so that the time series the drivers are "
+            "averaged over is a consistent one."
         )
 
 

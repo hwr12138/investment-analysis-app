@@ -7,17 +7,24 @@ roughly the same scale.
 
 The layout is deliberately flat and the dependencies run one way:
 
-    formatting  ←  summary  ←  dataset
+    formatting  ←  summary, valuation  ←  dataset
 
 ``formatting`` is shared by every tab. Each tab module owns its own arithmetic
-and depends on nothing but ``formatting`` and the data layer. ``dataset`` sits
-on top because it assembles the snapshot the tabs read, which today means
-calling into ``summary`` to build the key statistics — the one upward edge, and
-the seam described in that module's docstring.
+and depends on nothing but ``formatting`` and the data layer — ``summary`` and
+``valuation`` do not know about each other. ``dataset`` sits on top because it
+assembles the snapshot the tabs read, which means calling into ``summary`` for
+the key statistics and ``valuation`` for the peer universe. Those are the only
+upward edges, and both exist for the same reason: the snapshot is built once per
+search, so work the tabs would otherwise repeat on every rerun happens there.
+
+``valuation`` also carries a name collision worth knowing about: it is unrelated
+to ``app/logic/dcf/valuation.py``. This one compares a company's multiples to its
+peers; that one discounts cash flows. Their test files disambiguate with a
+``test_research_`` prefix.
 
 Nothing here imports Streamlit. Two modules deliberately live *outside* this
-package: ``app/logic/statements.py``, because the DCF tab's reported-figures
-table is its intended second consumer and it is not owned by this page, and
-``app/logic/dcf/``, which stays independently reusable so batch screening
-remains an extension rather than a rewrite.
+package: ``app/logic/statements.py``, which the financials tab consumes but does
+not own, so a second consumer needs no move, and ``app/logic/dcf/``, which stays
+independently reusable so batch screening remains an extension rather than a
+rewrite.
 """

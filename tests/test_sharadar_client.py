@@ -295,6 +295,69 @@ def test_as_reported_and_restated_are_labelled_distinctly(
 
 
 # ---------------------------------------------------------------------------
+# The statement cache key
+# ---------------------------------------------------------------------------
+
+
+def test_omitting_a_default_keyword_still_hits_the_cache(monkeypatch):
+    """One request, however the caller spells the defaults.
+
+    ``st.cache_data`` keys on the arguments as written at the call site and does
+    *not* apply defaults, so ``fetch_statements(t, annual=True)`` and
+    ``fetch_statements(t, annual=True, ttm=False)`` would hash differently and
+    fetch the same ``MRY`` rows twice. The research page spells all three
+    keywords and the DCF spells two, so this cost one duplicate SF1 request per
+    dimension on every search until `fetch_statements` began forwarding
+    positionally to a private cached function.
+    """
+    calls = []
+
+    def spy(ticker, *, annual=True, ttm=False, asreported=False):
+        calls.append((ticker, annual, ttm, asreported))
+        return sc.StatementSet(
+            ticker=ticker, permaticker=1, name=ticker, currency="USD", template="",
+            dimension=sc.dimension_for(annual=annual, ttm=ttm, asreported=asreported),
+            period="FY", ttm=ttm, asreported=asreported, frames={},
+        )
+
+    monkeypatch.setattr(sc, "_fetch_statements", spy)
+    sc._cached_statements.clear()
+
+    sc.fetch_statements("TEST", annual=True, ttm=False, asreported=False)
+    sc.fetch_statements("TEST", annual=True, asreported=False)
+    sc.fetch_statements("TEST", annual=True)
+    sc.fetch_statements("TEST")
+
+    assert calls == [("TEST", True, False, False)]
+
+
+def test_a_genuinely_different_dimension_is_still_its_own_entry():
+    """The collapse above must not swallow a real difference."""
+    sc._cached_statements.clear()
+    calls = []
+
+    def spy(ticker, *, annual=True, ttm=False, asreported=False):
+        calls.append(sc.dimension_for(annual=annual, ttm=ttm, asreported=asreported))
+        return sc.StatementSet(
+            ticker=ticker, permaticker=1, name=ticker, currency="USD", template="",
+            dimension=calls[-1], period="FY", ttm=ttm, asreported=asreported, frames={},
+        )
+
+    original = sc._fetch_statements
+    sc._fetch_statements = spy
+    try:
+        sc.fetch_statements("TEST", annual=True)
+        sc.fetch_statements("TEST", annual=False)
+        sc.fetch_statements("TEST", annual=False, ttm=True)
+        sc.fetch_statements("TEST", annual=False, asreported=True)
+    finally:
+        sc._fetch_statements = original
+        sc._cached_statements.clear()
+
+    assert calls == ["MRY", "MRQ", "MRT", "ARQ"]
+
+
+# ---------------------------------------------------------------------------
 # Views over a StatementSet
 # ---------------------------------------------------------------------------
 

@@ -1,11 +1,13 @@
-"""Page-level controls: compute gating, unit scaling, and the cross-check label."""
+"""Page-level controls: recompute gating, unit scaling, and the cross-check label."""
 
 from __future__ import annotations
 
-import numpy as np
+import inspect
+
 import pandas as pd
 import pytest
 
+from app.logic.dcf import model as dcf_model
 from app.logic.dcf import reverse
 from app.logic.dcf import valuation as dcf
 from app.views.research import dcf as page
@@ -44,7 +46,13 @@ def _inputs(**overrides) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Compute gating
+# Recompute gating
+#
+# There is no Compute button: the tab values whatever the page has loaded, with
+# whatever the assumption panel currently shows. The fingerprint is what decides
+# when that has to be rebuilt, which makes every test below a correctness test —
+# a field missing from the tuple means the previous run's numbers stay on screen
+# looking current, and nothing on the tab would say so.
 # ---------------------------------------------------------------------------
 
 
@@ -75,7 +83,7 @@ def test_fingerprint_is_hashable_so_it_can_live_in_session_state():
     ],
 )
 def test_every_assumption_change_moves_the_fingerprint(field, value):
-    """Anything that changes the answer has to invalidate the displayed run."""
+    """Anything that changes the answer has to force a recompute."""
     baseline = page._assumption_fingerprint(_inputs())
     assert page._assumption_fingerprint(_inputs(**{field: value})) != baseline
 
@@ -103,7 +111,11 @@ def test_a_wacc_change_moves_the_fingerprint():
 
 
 def test_display_only_state_is_not_in_the_fingerprint():
-    """Switching the units toggle must not mark the results stale."""
+    """Switching the units selector must not re-run the model.
+
+    It reruns the script like any other widget, and the reverse solve underneath
+    a rebuild is some fifty model evaluations.
+    """
     fingerprint = page._assumption_fingerprint(_inputs())
     assert "Millions" not in str(fingerprint)
     assert "Billions" not in str(fingerprint)
@@ -118,6 +130,44 @@ def test_the_reverse_dcf_is_not_in_the_fingerprint():
     """
     baseline = page._assumption_fingerprint(_inputs())
     assert page._assumption_fingerprint(_inputs(reverse="anything at all")) == baseline
+
+
+def _stored(ticker="AAPL", fingerprint=("f",)) -> dict:
+    return {"company": ticker, "fingerprint": fingerprint}
+
+
+def test_an_unchanged_rerun_reuses_the_stored_run():
+    """The tab re-renders on every widget on the page, not just its own."""
+    assert not page._needs_run(_stored(), "AAPL", ("f",))
+
+
+def test_a_changed_assumption_recomputes_before_rendering():
+    assert page._needs_run(_stored(), "AAPL", ("something else",))
+
+
+def test_a_run_for_another_company_is_never_reused():
+    """There is no staleness notice: a mismatch has to recompute, not warn."""
+    assert page._needs_run(_stored("AAPL"), "MSFT", ("f",))
+
+
+def test_an_empty_session_always_runs():
+    assert page._needs_run(None, "AAPL", ("f",))
+
+
+# ---------------------------------------------------------------------------
+# Statement basis
+# ---------------------------------------------------------------------------
+
+
+def test_the_page_always_loads_the_restated_series():
+    """The basis toggle is gone, so the page inherits the engine's default.
+
+    Restated figures are what the driver averages need — a consistent time
+    series. If that default ever moved, every driver here would switch to the
+    as-filed series with nothing on screen to say so.
+    """
+    assert list(inspect.signature(page._load_company_cached).parameters) == ["ticker"]
+    assert inspect.signature(dcf_model.load_company).parameters["asreported"].default is False
 
 
 # ---------------------------------------------------------------------------
@@ -193,127 +243,24 @@ def test_an_implied_revenue_path_compounds_from_the_base():
 
 
 # ---------------------------------------------------------------------------
-# Units
+# Filing provenance
+#
+# All that survives of the tab's own statement viewer. The line items now live
+# on 📄 Financials, which lists the same report and publish dates but not the
+# filings — so this is the one path from a valuation back to the documents.
 # ---------------------------------------------------------------------------
-
-
-def test_unit_scales():
-    assert page._UNITS["As reported"][0] == 1.0
-    assert page._UNITS["Millions"][0] == 1e6
-    assert page._UNITS["Billions"][0] == 1e9
-
-
-def test_unit_headers_are_distinct_and_labelled():
-    suffixes = [suffix for _, suffix, _ in page._UNITS.values()]
-    assert suffixes == ["", " (m)", " (bn)"]
-
-
-def test_billions_scaling_of_a_real_figure():
-    divisor, suffix, decimals = page._UNITS["Billions"]
-    assert round(416_161_000_000 / divisor, decimals) == 416.16
-    assert suffix == " (bn)"
-
-
-def test_millions_scaling_of_a_real_figure():
-    divisor, _, decimals = page._UNITS["Millions"]
-    assert round(416_161_000_000 / divisor, decimals) == 416161.0
-
-
-# ---------------------------------------------------------------------------
-# Reported figures
-# ---------------------------------------------------------------------------
-
-
-def test_the_three_statements_map_to_frame_codes():
-    assert page._STATEMENTS == {
-        "Income statement": "PL", "Balance sheet": "BS", "Cash flow": "CF"
-    }
-
-
-def test_every_statement_offered_is_one_the_client_builds():
-    """A statement in the picker the client never builds would render blank."""
-    for code in page._STATEMENTS.values():
-        assert code in {"PL", "BS", "CF", "DERIVED"}
-
-
-def test_statement_metadata_is_not_shown_as_a_line_item():
-    """Report dates and restatement flags describe the filing, not the business."""
-    for column in ("Fiscal Year", "Report Date", "Publish Date", "Restated", "Source"):
-        assert column in page._STATEMENT_META
-
-
-def _statement(frame) -> dict:
-    dataset = type("D", (), {
-        "statements_annual": type("S", (), {"frame": staticmethod(lambda code: frame)})()
-    })()
-    table, populated, empty = page._statement_frame(dataset, "PL")
-    return {"table": table, "populated": populated, "empty": empty}
-
-
-def test_a_statement_is_transposed_so_line_items_read_down_the_page():
-    frame = pd.DataFrame({
-        "Fiscal Year": [2024, 2025],
-        "Fiscal Period": ["FY", "FY"],
-        "Revenue": [100.0, 120.0],
-        "Gross Profit": [40.0, 50.0],
-    })
-    out = _statement(frame)
-    assert list(out["table"].index) == ["Revenue", "Gross Profit"]
-    assert list(out["table"].columns) == ["2024", "2025"]
-    assert out["table"].loc["Revenue", "2025"] == 120.0
-
-
-def test_the_published_line_item_order_is_preserved():
-    """Column order is the statement's own order; reordering would misread it."""
-    frame = pd.DataFrame({
-        "Fiscal Year": [2025],
-        "Revenue": [100.0], "Cost of Revenue": [60.0], "Gross Profit": [40.0],
-    })
-    assert list(_statement(frame)["table"].index) == [
-        "Revenue", "Cost of Revenue", "Gross Profit"
-    ]
-
-
-def test_a_line_item_reported_in_any_year_counts_as_populated():
-    frame = pd.DataFrame({
-        "Fiscal Year": [2024, 2025],
-        "Revenue": [100.0, 120.0],
-        "Sometimes": [np.nan, 5.0],
-        "Never": [np.nan, np.nan],
-    })
-    out = _statement(frame)
-    assert out["populated"] == ["Revenue", "Sometimes"]
-    assert out["empty"] == ["Never"]
-
-
-def test_an_empty_line_item_is_kept_rather_than_dropped():
-    """That the provider carries a field and left it blank is itself a finding."""
-    frame = pd.DataFrame({
-        "Fiscal Year": [2025], "Revenue": [100.0], "Short Term Debt": [np.nan],
-    })
-    out = _statement(frame)
-    assert "Short Term Debt" in out["table"].index
-    assert out["empty"] == ["Short Term Debt"]
-
-
-def test_non_numeric_columns_never_reach_the_numeric_table():
-    frame = pd.DataFrame({
-        "Fiscal Year": [2025], "Revenue": [100.0], "Currency": ["USD"],
-    })
-    assert list(_statement(frame)["table"].index) == ["Revenue"]
-
-
-def test_a_missing_statement_yields_nothing_rather_than_an_error():
-    for frame in (pd.DataFrame(), pd.DataFrame({"Revenue": [1.0]})):
-        out = _statement(frame)
-        assert out["table"].empty
-        assert out["populated"] == [] and out["empty"] == []
 
 
 def test_a_missing_date_renders_as_a_dash_not_a_fabricated_one():
     assert page._date_text(None) == "—"
     assert page._date_text(pd.NaT) == "—"
     assert page._date_text(pd.Timestamp("2025-09-30")) == "2025-09-30"
+
+
+def test_the_tab_no_longer_carries_a_statement_viewer():
+    """It points at 📄 Financials instead. A second one would drift from it."""
+    for name in ("_statement_frame", "_render_reported_figures", "_STATEMENTS", "_UNITS"):
+        assert not hasattr(page, name), name
 
 
 # ---------------------------------------------------------------------------
@@ -375,8 +322,6 @@ def test_the_two_methods_really_do_cross_imply_each_other():
 
 
 def test_exit_multiple_is_the_default_headline_method():
-    from app.logic.dcf import model as dcf_model
-
     assert dcf_model.DEFAULT_HEADLINE_METHOD == "exit_multiple"
 
 
@@ -387,8 +332,6 @@ def test_the_radio_offers_the_default_first():
 
 
 def test_the_ui_and_the_engine_agree_on_the_default():
-    from app.logic.dcf import model as dcf_model
-
     first_label = list(page._HEADLINE_METHODS)[0]
     assert page._HEADLINE_METHODS[first_label] == dcf_model.DEFAULT_HEADLINE_METHOD
 

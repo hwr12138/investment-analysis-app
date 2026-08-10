@@ -522,9 +522,10 @@ def test_units_scale_money_and_share_counts(annual):
 def test_per_share_percent_and_ratio_rows_never_take_the_divisor(annual, unit_name):
     """The regression guard: scaling a whole frame turns EPS into 0.00.
 
-    ``research.dcf._render_reported_figures`` divides every row by the units
-    divisor, which is wrong for exactly these three unit kinds. The ``Unit``
-    enum exists so this module cannot inherit that.
+    The DCF tab's old raw table divided every row by the units divisor, which is
+    wrong for exactly these three unit kinds. The ``Unit`` enum exists so this
+    module cannot make that mistake — which is why the table was safe to delete
+    rather than port.
     """
     income = rows_by_key(build(st.INCOME_STATEMENT, annual, units=st.UNITS[unit_name]))
     derived = rows_by_key(build(st.DERIVED_FIGURES, annual, units=st.UNITS[unit_name]))

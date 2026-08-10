@@ -55,7 +55,7 @@ carries ten tabs:
 
 ```
 app/views/research/     __init__.py = the shell; one module per tab beside it
-app/logic/research/     formatting ← summary ← dataset
+app/logic/research/     formatting ← summary, valuation ← dataset
 ```
 
 `views/research/__init__.py` owns the ticker box, the search gate, the session snapshot and
@@ -67,16 +67,36 @@ also owns its CSS, so the rules travel with the markup they style.
 
 On the logic side the dependencies run one way — `formatting` is shared by every tab, each tab
 module owns its arithmetic, and `dataset` sits on top because it assembles the snapshot. Its
-call into `summary.build_key_stats` is the one upward edge.
+calls into `summary.build_key_stats` and `valuation.build_peer_universe` are the only upward
+edges, and both exist for the same reason: the snapshot is assembled once per search, so
+anything the tabs would otherwise recompute on every rerun is precomputed there.
 
 Two modules deliberately stay outside both packages. `app/logic/statements.py` declares the four
 SF1 statement layouts (sections, rows, subtotals, reconciliations) and evaluates them into a
-rendered table; the financials tab consumes it and the DCF tab's reported-figures table is the
-obvious second consumer, so it is not owned by this page. `app/logic/dcf/` stays independently
-reusable so batch screening remains an extension rather than a rewrite. Both are pure.
+rendered table; the financials tab is its only consumer today, and it sits outside so a second
+one needs no move. `app/logic/dcf/` stays independently reusable so batch screening remains an
+extension rather than a rewrite. Both are pure.
+
+**Statements are shown in exactly one place — the 📄 Financials tab.** The DCF tab used to carry
+a raw viewer of its own and now links there instead; it keeps only `_render_filing_provenance`,
+the per-year SEC filing links, which Financials does not show. Do not add a second statement
+table anywhere: the removed one scaled every row by the units divisor, which turned EPS and
+margins into `0.00`, and `logic/statements.py` carries a `Unit` enum precisely so a layout
+cannot repeat that.
 
 `views/research/dcf.py` is by far the largest tab body and is the module to split next if it
 grows again — assumptions, valuation, reverse and export are each separable.
+
+**The ⚖️ Valuation tab is trailing-only, and deliberately so.** Every metric is answered three
+ways — current, the company's own 5Y median, the industry median — and a metric that cannot fill
+all three columns is not shown. Forward multiples were dropped for exactly that reason: yfinance
+supplies forward EPS and revenue only per-ticker by scrape, so forward *industry* medians would
+cost thousands of scrapes, and a forward *5Y history* needs point-in-time consensus no source
+here has. That tab makes no yfinance call at all. Two rules govern the numbers: **only positive
+readings count** (a negative P/E is a loss, not a cheap stock; a zero yield is a non-payer), and
+the exclusion is applied **per metric, not per company** — a loss-maker still has an EV/Sales and
+still belongs in that median. **Medians, never means**, because a multiple whose denominator
+approaches zero prints in the thousands.
 
 ### The DCF engine
 
@@ -133,14 +153,19 @@ absent data, never for data that merely looks wrong), `CRITICAL` (red persistent
 absent reports *not evaluated* rather than passing.
 
 **Every tolerance lives in a `Tolerances` dataclass owned by its consumer** — `dcf/validation.py`
-`Tolerances` for the model, `logic/statements.py` `StatementTolerances` for the statements tab.
-Never a bare literal at a comparison site. The two are deliberately not shared: the model's
-thresholds gate whether a valuation is trustworthy, the statement ones gate whether a display row
-grows a marker, and coupling them would let a change made for a valuation reason silently change
-what the research page flags.
+`Tolerances` for the model, `logic/statements.py` `StatementTolerances` for the statements tab,
+`logic/research/valuation.py` `ValuationTolerances` for the peer medians. Never a bare literal at
+a comparison site. The three are deliberately not shared: the model's thresholds gate whether a
+valuation is trustworthy, the statement ones gate whether a display row grows a marker, and the
+valuation ones gate whether a peer group is big enough to have a median. Coupling them would let
+a change made for one reason silently move another.
 
 **Banks and insurers are rejected** before anything is computed, on SIC code (6000–6999), not on
-Sharadar's vendor `sector` label.
+Sharadar's vendor `sector` label. That gate is the DCF's, not the research page's:
+`logic/research/dataset.py` deliberately bypasses it so the page renders JPM, and the ⚖️
+Valuation tab compares banks on P/B, which is the point of the metric. Peer *grouping*, unlike
+the gate, uses the vendor `industry` label — it is the classification a reader recognises, and
+the two disagree often enough that which one is in use has to be a deliberate choice.
 
 **The API key never appears in an exception, log line, or export.** Nasdaq only accepts it as a
 query parameter, so errors raised from `sharadar_client` carry the table, ticker, and status —
@@ -151,24 +176,47 @@ while `SF1` reports them raw (a missed conversion passes every sanity check by a
 million), and rows arrive **unsorted** with truncation at 10,000 rows behind an opaque
 `meta.next_cursor_id` cursor.
 
+One Streamlit quirk it absorbs too: **`st.cache_data` keys on the arguments as written at the
+call site and does not apply defaults**, so `f(t, annual=True)` and `f(t, annual=True, ttm=False)`
+are separate entries for the same request. `fetch_statements` is therefore a plain wrapper that
+forwards **positionally** to the cached `_cached_statements`; the cache never sits directly on a
+function with keyword defaults. Before that, one search fetched `MRY` and `MRQ` twice each,
+because the research page spelled all three keywords and the DCF spelled two.
+
 ## UI conventions
 
-The DCF tab gates on an explicit **Compute** button: nothing is fetched until it is pressed, and
-changing an assumption does not re-run the model until it is pressed again. Session state is
-keyed `dcf_*`; loading a different ticker clears acknowledgements and overrides via
-`_session_reset`, recomputing the same one keeps them.
+The DCF tab has **no Compute gate**. It loads and values whatever ticker the page has searched,
+as soon as its body renders, and an assumption change is applied on the spot. Nothing on that tab
+is ever drawn from a run that does not match the controls on screen — which is why the staleness
+notice it used to carry is gone rather than merely unused. Statements are always the **restated**
+(`MR`) series; `dcf_model.load_company` still takes `asreported`, but the page does not offer the
+choice.
 
-That gate is what makes the tab safe to host: `st.tabs` renders every tab body on every rerun and
-reports **nothing to Python about which tab is open**, so an ungated tab would fetch whenever the
-reader changed the price window on Summary. It is the same reason the placeholder tabs render
-nothing, and the reason `logic/research/dataset.py` fetches eagerly for every tab — "load when
-opened" is not expressible until the tab strip becomes a control that reports its selection. A
-tab whose data is expensive gates behind its own button until then. The Peers tab is where that
-bill comes due: its cost is one `DAILY` request *per comparable*, not a fixed one.
+Two caches are what make that affordable, and both are load-bearing:
 
-The research page's own Search does **not** reset `dcf_*` state — the two searches are
-independent. A model computed for the previous company survives, and `_render_staleness_notice`
-says loudly which company the results on screen are for.
+- `_load_company_cached` — the fetch and normalisation, per ticker.
+- `_needs_run` against `_assumption_fingerprint` — the model, the checks and the workbook, per
+  distinct assumption set. A field missing from that tuple is a **correctness** bug: the previous
+  run's numbers would stay on screen looking current, with nothing to say so.
+
+The cost is real and was accepted deliberately: `st.tabs` renders every tab body on every rerun
+and reports **nothing to Python about which tab is open**, so the DCF's statements are fetched
+once per company searched whether or not anyone opens the tab. It is the same constraint that
+makes the placeholder tabs render nothing and `logic/research/dataset.py` fetch eagerly for every
+tab — "load when opened" is not expressible until the tab strip becomes a control that reports
+its selection. A tab whose data is expensive enough gates behind its own button until then.
+
+Peer comparison was expected to be where that bill came due, on the assumption that comparables
+cost one `DAILY` request each. **They do not.** `DAILY` filtered on a date with no ticker returns
+every listed company in a single page — measured at 5,446 rows in ~1.1s — so the cost is fixed.
+All three universe fetches (`fetch_universe_daily`, `fetch_universe_fundamentals`,
+`fetch_ticker_directory`) are keyed on a date alone, never on a ticker, so **one cache entry
+serves every company searched that day** and the second search pays nothing. Keep it that way: a
+universe fetch that took a ticker would turn a fixed cost back into a per-company one.
+
+Session state is keyed `dcf_*`. The tab clears its own acknowledgements and assumption overrides
+via `_session_reset` when it notices the page's ticker has moved; the research page's Search does
+**not** reach across and do it, so there is one place that decides when a model is stale.
 
 Severity banners sit above everything and do not collapse. The governing rule for that tab: it
 must be impossible to look at the output and not notice something is wrong.
@@ -189,7 +237,19 @@ View-level tests (`test_page_controls.py`, `test_acknowledgements.py`, `test_res
 import the view modules directly and monkeypatch `page.st.session_state` with a dict subclass,
 since there is no Streamlit runtime.
 
-The test files still map one-to-one onto the *old* module layout rather than the packages —
-`test_stock_research.py` covers all of `app/logic/research/`, and `test_research_page_controls.py`
-covers the shell plus three tab modules. Split them to mirror the packages when the next tab
-lands; both already carry section headers along the seams.
+The ⚖️ Valuation tab is the first to be tested per-module — `test_research_valuation.py` for the
+logic and `test_research_valuation_controls.py` for the view — which is the layout the rest should
+move to. Both carry the `research_` prefix because `test_valuation.py` was already taken by the
+**DCF** engine's `logic/dcf/valuation.py`: two unrelated modules share the name `valuation.py`,
+and the test files have to disambiguate what the modules themselves do not. The
+two older files still map onto the *pre-package* layout: `test_stock_research.py` covers all of
+`app/logic/research/` except valuation, and `test_research_page_controls.py` covers the shell
+plus three tab modules. Split them along their existing section headers when either is next
+touched substantially.
+
+`tests/conftest.py` also carries a miniature eleven-ticker universe for the peer medians. It is
+sized so every median is checkable by hand and every exclusion rule has something to exclude: a
+loss-maker, a non-payer, a delisted company DAILY still returns, a ticker that filed twice in the
+window, and an industry too small to have a median. `stub_universe` routes by table name so tests
+call the real fetchers — the millions conversion and the filing-date dedup then run for real
+rather than being reimplemented in the fixture and proved against themselves.

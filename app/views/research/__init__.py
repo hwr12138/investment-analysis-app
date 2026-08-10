@@ -18,12 +18,14 @@ Three behaviours are deliberate and load-bearing:
 * **Changing the price window never refetches.** The full history is fetched
   once per search and every window is a slice of it, so the period buttons are
   free.
-* **Tab bodies fetch nothing.** ``st.tabs`` renders all ten on every rerun and
-  tells Python nothing about which one is open, so anything that loaded data
-  would fire on page load and on every window change. The DCF tab needs data
-  the search does not fetch, which is why it keeps its own **Compute** button
-  rather than loading when the tab is opened. See
-  ``app.logic.research.dataset`` for what that costs and where it gives way.
+* **Tab bodies fetch nothing** — with one exception. ``st.tabs`` renders all ten
+  on every rerun and tells Python nothing about which one is open, so anything
+  that loaded data would fire on page load and on every window change. The DCF
+  tab needs statements this page's search does not fetch, and it fetches them
+  itself, ungated: that is a second set of Sharadar requests per company
+  searched, paid whether or not anyone opens the tab. Its own caches keep it to
+  once per company. See ``app.logic.research.dataset`` for what the same
+  constraint costs the tabs that do read the snapshot.
 """
 
 from __future__ import annotations
@@ -34,9 +36,9 @@ import streamlit as st
 
 from app.data import sharadar_client
 from app.logic.research import dataset as research
-from app.views.research import dcf, financials, placeholders, summary
+from app.views.research import dcf, financials, placeholders, summary, valuation
 
-#: Every tab, in display order — the one place the order is decided. The three
+#: Every tab, in display order — the one place the order is decided. The four
 #: built tabs are dispatched by name in :func:`render_page` and everything else
 #: must have a ``placeholders.PLACEHOLDERS`` entry, so a tab can be reordered
 #: here without touching the rendering, and a name that belongs to neither
@@ -67,10 +69,10 @@ _TAB_ORDER = (
 def _session_reset(ticker: str) -> None:
     """Clears per-company state. The selected window survives a new search.
 
-    Only this page's keys. In particular the DCF tab's ``dcf_*`` state is left
-    alone: it owns its own lifecycle and clears itself on its own **Compute**,
-    and throwing away a model the reader had to press a button for, because
-    they looked up another company, would lose real work.
+    Only this page's keys. The DCF tab's ``dcf_*`` state is left alone because
+    that tab owns its own lifecycle: it notices the ticker has moved on its next
+    render and clears itself. Reaching across from here would leave two places
+    that decide when a model is stale.
     """
     for key in list(st.session_state.keys()):
         if key in {"research_output"}:
@@ -177,6 +179,9 @@ def render_page() -> None:
         # `loaded`, not the ticker box: the DCF values the company the rest of
         # this page is showing, not one half-typed into the search field.
         dcf.render(loaded)
+
+    with tabs["⚖️ Valuation"]:
+        valuation.render(dataset)
 
     for name, (what, source) in placeholders.PLACEHOLDERS.items():
         with tabs[name]:

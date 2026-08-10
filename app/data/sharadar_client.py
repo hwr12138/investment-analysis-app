@@ -17,7 +17,11 @@ Six Sharadar tables are used:
 * ``ACTIONS`` — Corporate actions: dividends (the date *is* the ex-dividend
   date), splits, listings, ticker changes.
 
-Four things about this API are not obvious from its docs and were confirmed
+Most fetches here are keyed on a ticker. The three in the *cross-sectional
+universe* section at the foot of the module are keyed on a date instead, and
+return every listed company at once — see that section for why that is cheap.
+
+Five things about this API are not obvious from its docs and were confirmed
 against live AAPL and JPM responses. They are the reason this module exists
 rather than a handful of inline ``requests.get`` calls:
 
@@ -38,6 +42,9 @@ rather than a handful of inline ``requests.get`` calls:
 4. **Rows are unsorted by contract** and the API truncates at 10,000 rows,
    continuing through an opaque ``meta.next_cursor_id``. Every frame leaves
    here paginated to completion and sorted.
+5. **A non-trading date is not an error.** ``DAILY`` answers a weekend or a
+   holiday with zero rows rather than the previous session, so any date passed
+   to :func:`fetch_universe_daily` has to be one the market was open on.
 
 The API key is read from ``st.secrets`` and never leaves this module. Nasdaq
 only accepts it as a query parameter, so no exception raised here carries the
@@ -110,6 +117,10 @@ ZERO_FILLED_INDICATORS = frozenset(
 
 #: DAILY reports these in millions; SF1 reports the same quantities raw.
 _DAILY_MILLIONS = ("marketcap", "ev")
+
+#: Every numeric column DAILY carries. Coerced together so the per-ticker and
+#: universe-wide fetches cannot drift apart on which ones are numbers.
+_DAILY_NUMERIC = ("ev", "evebit", "evebitda", "marketcap", "pb", "pe", "ps")
 
 #: SIC codes 6000-6999 are Finance, Insurance and Real Estate. Banks and
 #: insurers do not have a meaningful operating-cash-flow-less-capex FCFF, so
@@ -685,6 +696,13 @@ def _fetch_statements(
 
 
 @st.cache_data(show_spinner=False, ttl=60 * 60 * 24 * 3)
+def _cached_statements(
+    ticker: str, annual: bool, ttm: bool, asreported: bool
+) -> StatementSet:
+    """The cache entry. Positional only — see :func:`fetch_statements`."""
+    return _fetch_statements(ticker, annual=annual, ttm=ttm, asreported=asreported)
+
+
 def fetch_statements(
     ticker: str,
     *,
@@ -697,8 +715,18 @@ def fetch_statements(
     ``asreported=True`` selects Sharadar's ``AR`` dimensions (excludes
     restatements, indexed to the SEC filing date); the default selects ``MR``
     (includes restatements, indexed to the report period).
+
+    The cache sits on ``_cached_statements`` rather than here, and this wrapper
+    exists only to fill the defaults in before the key is built. ``st.cache_data``
+    keys on the arguments *as written at the call site*, without applying
+    defaults: ``fetch_statements(t, annual=True)`` and
+    ``fetch_statements(t, annual=True, ttm=False)`` are the same request but
+    hashed differently, and each would fetch the same ``MRY`` rows separately.
+    That is not hypothetical — the research page passed all three keywords and
+    the DCF omitted ``ttm``, so one search fetched ``MRY`` and ``MRQ`` twice
+    each. Forwarding positionally makes every call form collapse onto one key.
     """
-    return _fetch_statements(ticker, annual=annual, ttm=ttm, asreported=asreported)
+    return _cached_statements(ticker, annual, ttm, asreported)
 
 
 # ---------------------------------------------------------------------------
@@ -842,29 +870,39 @@ def _price_table_for(ticker: str) -> str:
     )
 
 
-def _fetch_daily_metrics(ticker: str, start: str | None = None) -> pd.DataFrame:
-    """Daily valuation ratios, with market cap and EV rescaled to raw units.
+def _normalise_daily(frame: pd.DataFrame) -> pd.DataFrame:
+    """Types a raw DAILY response and rescales market cap and EV to raw units.
 
     DAILY publishes ``marketcap`` and ``ev`` in millions while SF1 publishes the
     same quantities raw. Everything downstream — the market-cap cross-check, the
-    equity bridge — works in raw units, and a missed conversion looks entirely
-    plausible while being wrong by a factor of a million.
+    equity bridge, the valuation tab's peer medians — works in raw units, and a
+    missed conversion looks entirely plausible while being wrong by a factor of
+    a million.
+
+    Shared by the per-ticker and universe-wide fetchers rather than inlined in
+    either. There is now more than one DAILY call site, so the conversion has to
+    live somewhere neither of them can forget it.
     """
-    params: dict = {"ticker": ticker}
-    if start:
-        params["date.gte"] = start
-    frame = _request_all("DAILY", params, ticker=ticker)
     if frame.empty or "date" not in frame.columns:
         return pd.DataFrame()
 
+    frame = frame.copy()
     frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
-    for column in ("ev", "evebit", "evebitda", "marketcap", "pb", "pe", "ps"):
+    for column in _DAILY_NUMERIC:
         if column in frame.columns:
             frame[column] = pd.to_numeric(frame[column], errors="coerce")
     for column in _DAILY_MILLIONS:
         if column in frame.columns:
             frame[column] = frame[column] * 1_000_000.0
     return frame.dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
+
+
+def _fetch_daily_metrics(ticker: str, start: str | None = None) -> pd.DataFrame:
+    """One company's daily valuation ratios, oldest first."""
+    params: dict = {"ticker": ticker}
+    if start:
+        params["date.gte"] = start
+    return _normalise_daily(_request_all("DAILY", params, ticker=ticker))
 
 
 @st.cache_data(show_spinner=False, ttl=60 * 60 * 12)
@@ -1086,3 +1124,123 @@ def fetch_actions(ticker: str, start: str | None = None) -> pd.DataFrame:
     here — so the sort is load-bearing, not defensive.
     """
     return _fetch_actions(ticker, start)
+
+
+# ---------------------------------------------------------------------------
+# Cross-sectional universe
+# ---------------------------------------------------------------------------
+#
+# Every other fetch here is keyed on a ticker. These three are keyed on a date,
+# and that difference is the whole point: one request returns the multiple for
+# every listed company, so a peer median costs the same whether the peer group
+# has four members or four hundred. Measured against the live API: DAILY for one
+# date is 5,446 rows on a single page in ~1.1s.
+#
+# Because the cache keys carry no ticker, one entry serves every company looked
+# up that day. A second search is free.
+
+#: Columns pulled from TICKERS for peer grouping. Projected rather than taking
+#: the default 30-odd, which is 2 MB against ~10 MB for the same 17,800 rows.
+_DIRECTORY_COLUMNS = "ticker,name,sector,industry,scalemarketcap,isdelisted"
+
+#: SF1 fields the universe snapshot needs: the trailing-twelve-month terms for
+#: the three multiples DAILY does not publish, plus the key used to pick one row
+#: per ticker. All three are whole-dollar aggregates rather than per-share
+#: figures, which is what keeps them immune to splits — Sharadar restates
+#: ``dps`` and ``price`` onto the current share basis but a ratio of two dollar
+#: totals never has to care.
+_UNIVERSE_SF1_COLUMNS = "ticker,calendardate,datekey,revenue,ncfo,ncfdiv"
+
+#: How far back the universe fundamentals request reaches. A quarter would miss
+#: everyone who has not filed yet — asking for ``calendardate=2026-06-30`` on
+#: 2026-08-09 returned 2,818 rows against 5,133 for the quarter before, because
+#: Q2 filings were still arriving. Two quarters of filing dates covers both
+#: cohorts, and the dedup below keeps the newer row.
+UNIVERSE_LOOKBACK_DAYS = 180
+
+
+def _fetch_universe_daily(as_of: str) -> pd.DataFrame:
+    """Every company's valuation ratios on one date.
+
+    ``as_of`` must be a **trading day**: Sharadar returns zero rows for a
+    weekend or a holiday rather than the previous session, so a caller passing
+    ``date.today()`` gets an empty universe every Saturday. Callers should pass
+    the last date they have already seen in a real DAILY response.
+    """
+    return _normalise_daily(_request_all("DAILY", {"date": as_of}))
+
+
+@st.cache_data(show_spinner=False, ttl=60 * 60 * 12)
+def fetch_universe_daily(as_of: str) -> pd.DataFrame:
+    """Cached universe-wide DAILY snapshot: ``ticker date ev evebit evebitda
+    marketcap pb pe ps``, with ``marketcap`` and ``ev`` in raw units.
+
+    Shares :func:`_normalise_daily` with :func:`fetch_daily_metrics`, which is
+    what keeps the millions conversion in one place across both call sites.
+    """
+    return _fetch_universe_daily(as_of)
+
+
+def _fetch_universe_fundamentals(since: str) -> pd.DataFrame:
+    """Each company's most recent trailing-twelve-month SF1 row.
+
+    ``ART`` rather than ``MRT``: as-reported time-indexes to the filing date, so
+    ``datekey.gte`` selects on when a figure became public rather than on the
+    period it covers. Filtering on the period would hand back numbers nobody
+    could have known at the time.
+
+    A company that filed twice inside the window appears twice; the later
+    ``datekey`` wins.
+    """
+    frame = _request_all(
+        "SF1",
+        {
+            "dimension": "ART",
+            "datekey.gte": since,
+            "qopts.columns": _UNIVERSE_SF1_COLUMNS,
+        },
+    )
+    if frame.empty or not {"ticker", "datekey"}.issubset(frame.columns):
+        return pd.DataFrame()
+
+    for column in ("revenue", "ncfo", "ncfdiv"):
+        if column in frame.columns:
+            frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    frame["datekey"] = pd.to_datetime(frame["datekey"], errors="coerce")
+
+    frame = frame.dropna(subset=["datekey"]).sort_values("datekey")
+    return frame.groupby("ticker", as_index=False).tail(1).reset_index(drop=True)
+
+
+@st.cache_data(show_spinner=False, ttl=60 * 60 * 12)
+def fetch_universe_fundamentals(since: str) -> pd.DataFrame:
+    """Cached universe-wide TTM fundamentals, one row per ticker."""
+    return _fetch_universe_fundamentals(since)
+
+
+def _fetch_ticker_directory() -> pd.DataFrame:
+    """Sector and industry for every company with SF1 fundamentals."""
+    frame = _request_all(
+        "TICKERS", {"table": "SF1", "qopts.columns": _DIRECTORY_COLUMNS}
+    )
+    if frame.empty or "ticker" not in frame.columns:
+        return pd.DataFrame()
+    for column in ("sector", "industry", "isdelisted"):
+        if column in frame.columns:
+            frame[column] = frame[column].astype("string").str.strip()
+    return frame.reset_index(drop=True)
+
+
+@st.cache_data(show_spinner=False, ttl=60 * 60 * 24 * 7)
+def fetch_ticker_directory() -> pd.DataFrame:
+    """Cached ticker → sector/industry directory. Classifications barely move.
+
+    Sharadar's ``industry`` is the vendor's own ~145-bucket classification, not
+    the SIC one. The two disagree, sometimes wildly — a blank-cheque shell is
+    ``Industrials`` here and ``Finance Insurance And Real Estate`` under SIC —
+    so which is used has to be a deliberate choice at the call site. The
+    financial-sector *gate* stays on SIC (see :data:`FINANCIAL_SIC_RANGE`);
+    peer grouping uses this, because it is the classification a reader
+    recognises.
+    """
+    return _fetch_ticker_directory()
