@@ -19,6 +19,7 @@ import pandas as pd
 import pytest
 
 from app.data import sharadar_client as sc
+from app.logic.research import comparison as comparison_lib
 from app.logic.research import valuation
 from app.provenance import Origin
 from tests.conftest import (
@@ -77,14 +78,30 @@ def test_both_daily_fetchers_share_one_conversion():
         assert "_normalise_daily" in inspect.getsource(fetcher)
 
 
-def test_universe_fundamentals_keeps_the_latest_filing(monkeypatch):
-    """TEST filed twice inside the window; the later ``datekey`` supersedes."""
+def test_a_restated_period_keeps_the_later_filing(monkeypatch):
+    """TEST filed twice for 2026-03-31; the later ``datekey`` supersedes.
+
+    This is a correction of one period, not two periods of history, so exactly
+    one row survives — and it has to be the corrected one.
+    """
     stub_universe(monkeypatch)
-    frame = sc._fetch_universe_fundamentals("2026-02-15")
-    assert len(frame) == len({row[0] for row in UNIVERSE_SF1_ROWS})
-    test = frame[frame["ticker"] == "TEST"].iloc[0]
-    assert test["revenue"] == pytest.approx(1.1e9)
-    assert test["datekey"] == pd.Timestamp("2026-05-01")
+    frame = sc._fetch_universe_fundamentals("2025-01-15")
+    latest = frame[
+        (frame["ticker"] == "TEST") & (frame["calendardate"] == pd.Timestamp("2026-03-31"))
+    ]
+    assert len(latest) == 1
+    assert latest.iloc[0]["revenue"] == pytest.approx(1.1e9)
+    assert latest.iloc[0]["datekey"] == pd.Timestamp("2026-05-01")
+
+
+def test_the_window_keeps_every_period_not_just_the_latest(monkeypatch):
+    """Growth needs both ends of a year-on-year, so the window is not collapsed."""
+    stub_universe(monkeypatch)
+    frame = sc._fetch_universe_fundamentals("2025-01-15")
+    periods = frame[frame["ticker"] == "TEST"]["calendardate"]
+    assert sorted(periods.dt.date.astype(str)) == ["2025-03-31", "2026-03-31"]
+    # Every ticker in the fixture files twice; only the restatement collapses.
+    assert len(frame) == len(UNIVERSE_SF1_ROWS) - 1
 
 
 def test_universe_requests_project_their_columns(monkeypatch):
@@ -127,14 +144,14 @@ def test_delisted_companies_are_dropped(peer_universe):
 
 
 def test_the_universe_carries_the_industry_label(peer_universe):
-    assert valuation.industry_of(peer_universe, "TEST") == CONSUMER
-    assert valuation.industry_of(peer_universe, "ALU1") == "Aluminum"
-    assert valuation.industry_of(peer_universe, "NOSUCH") == ""
+    assert comparison_lib.industry_of(peer_universe, "TEST") == CONSUMER
+    assert comparison_lib.industry_of(peer_universe, "ALU1") == "Aluminum"
+    assert comparison_lib.industry_of(peer_universe, "NOSUCH") == ""
 
 
 def test_an_empty_universe_is_empty_rather_than_wrong():
     """A failed fetch leaves the medians unavailable; it never substitutes."""
-    assert valuation.build_peer_universe(
+    assert comparison_lib.build_peer_universe(
         pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
     ).empty
 
@@ -393,9 +410,9 @@ def test_the_premium_is_relative_to_the_industry(peer_universe):
     """TEST's P/E of 20 against an industry median of 19 is ~5% dearer."""
     daily = _daily_history(pe=[20.0] * 400)
     comparison = _comparisons(peer_universe, daily=daily)["P/E (TTM)"]
-    assert comparison.premium_to_industry == pytest.approx(20.0 / 19.0 - 1.0)
+    assert comparison.industry_gap == pytest.approx(20.0 / 19.0 - 1.0)
 
 
 def test_no_premium_without_both_sides(peer_universe):
     comparison = _comparisons(peer_universe, industry="")["P/E (TTM)"]
-    assert comparison.premium_to_industry is None
+    assert comparison.industry_gap is None

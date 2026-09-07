@@ -7,15 +7,25 @@ roughly the same scale.
 
 The layout is deliberately flat and the dependencies run one way:
 
-    formatting  ←  summary, valuation  ←  dataset
+    formatting, comparison  ←  summary, valuation, growth  ←  dataset
 
-``formatting`` is shared by every tab. Each tab module owns its own arithmetic
-and depends on nothing but ``formatting`` and the data layer — ``summary`` and
-``valuation`` do not know about each other. ``dataset`` sits on top because it
-assembles the snapshot the tabs read, which means calling into ``summary`` for
-the key statistics and ``valuation`` for the peer universe. Those are the only
-upward edges, and both exist for the same reason: the snapshot is built once per
-search, so work the tabs would otherwise repeat on every rerun happens there.
+``formatting`` is shared by every tab. ``comparison`` is shared by the two that
+answer a metric against its peers and against its own past — ``valuation`` and
+``growth``, the ⚖️ tab's sub-tabs — and holds the record they both produce, the
+median-and-percentile summary, and the peer universe join. Beyond those, each tab
+module owns its own arithmetic and knows nothing of its siblings.
+
+``dataset`` sits on top because it assembles the snapshot the tabs read, calling
+into ``summary`` for the key statistics and ``comparison`` for the peer universe.
+Those are the only upward edges, and both exist for the same reason: the snapshot
+is built once per search, so work the tabs would otherwise repeat on every rerun
+happens there.
+
+What ``comparison`` deliberately does *not* hold is either sub-tab's notion of a
+usable number, because they are opposites. A valuation multiple must be positive
+to mean anything; a growth rate is meaningful at any sign but needs a positive
+*base*, or a narrowing loss reads as a collapse. Nor does it hold their
+tolerances: one counts trading sessions and the other filed quarters.
 
 ``valuation`` also carries a name collision worth knowing about: it is unrelated
 to ``app/logic/dcf/valuation.py``. This one compares a company's multiples to its

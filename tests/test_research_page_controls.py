@@ -175,10 +175,10 @@ _BUILT = ("📊 Summary", "📄 Financials", "💰 DCF", "⚖️ Valuation")
 
 
 def test_the_built_tabs_are_not_placeholders():
-    """Summary, Financials, DCF and Valuation are built; the other six are not."""
+    """Summary, Financials, DCF and Valuation are built; the other five are not."""
     for built in _BUILT:
         assert built not in placeholders.PLACEHOLDERS, built
-    assert len(placeholders.PLACEHOLDERS) == 6
+    assert len(placeholders.PLACEHOLDERS) == 5
 
 
 def test_every_tab_is_either_built_or_a_placeholder():

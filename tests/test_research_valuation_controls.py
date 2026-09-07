@@ -1,8 +1,9 @@
-"""The ⚖️ Valuation tab's rendering: the markup contract and what a gap says.
+"""The ⚖️ Valuation tab's rendering: the shell, the shared grid, and Valuation.
 
-Imports the view module directly and drives its private builders, the same way
+Imports the view modules directly and drives their builders, the same way
 ``test_research_page_controls`` does — there is no Streamlit runtime here, so
-anything calling ``st`` is exercised through the pieces below it.
+anything calling ``st`` is exercised through the pieces below it. The Growth
+sub-tab's own wording lives in ``test_research_growth_controls``.
 """
 
 from __future__ import annotations
@@ -14,7 +15,9 @@ import pandas as pd
 import pytest
 
 from app.logic.research import valuation as logic
-from app.views.research import valuation as view
+from app.views.research import valuation as shell
+from app.views.research.valuation import growth as growth_view
+from app.views.research.valuation import multiples, table
 
 CONSUMER = "Consumer Electronics"
 
@@ -43,35 +46,72 @@ def comparisons(peer_universe):
     )
 
 
+def _html(comparisons) -> str:
+    return table.comparison_table_html(comparisons, multiples._verdict)
+
+
 # ---------------------------------------------------------------------------
-# The markup contract
+# The shell
 # ---------------------------------------------------------------------------
 
 
-def test_the_tab_takes_the_snapshot(peer_universe):
+def test_the_tab_takes_the_snapshot():
     """It reads the peer universe off the snapshot; it must not fetch its own."""
-    assert list(inspect.signature(view.render).parameters) == ["dataset"]
-    source = inspect.getsource(view)
-    assert "sharadar_client" not in source
-    assert "fetch_" not in source
+    assert list(inspect.signature(shell.render).parameters) == ["dataset"]
+    for module in (shell, table, multiples, growth_view):
+        source = inspect.getsource(module)
+        assert "sharadar_client" not in source, module.__name__
+        assert "fetch_" not in source, module.__name__
+
+
+def test_both_sub_tabs_are_declared_in_order():
+    """Valuation opens; Growth reads as the follow-up to it."""
+    assert shell._SUB_TABS == ("Valuation", "Growth")
+
+
+def test_every_sub_tab_module_exposes_render():
+    for module in (multiples, growth_view):
+        assert callable(getattr(module, "render", None)), module.__name__
+        assert list(inspect.signature(module.render).parameters) == ["dataset"]
+
+
+def test_the_stylesheet_is_injected_once_by_the_shell():
+    """One tab, one stylesheet, however many sub-tabs it holds."""
+    assert "_VALUATION_CSS" in inspect.getsource(shell.render)
+    for module in (multiples, growth_view):
+        assert "<style>" not in inspect.getsource(module), module.__name__
+
+
+def test_the_css_is_namespaced_to_this_tab():
+    """Each tab owns its rules, so a dropped tab cannot orphan a shared block."""
+    classes = {
+        chunk.split("{")[0].strip()
+        for chunk in shell._VALUATION_CSS.split(".")
+        if chunk.strip().startswith("val-")
+    }
+    assert classes, "expected .val-* rules"
+
+
+# ---------------------------------------------------------------------------
+# The shared grid
+# ---------------------------------------------------------------------------
 
 
 def test_the_table_is_one_line_of_html(comparisons):
     """Streamlit parses the string as Markdown first; a blank line splits it."""
-    html = view._comparison_table_html(comparisons)
-    assert "\n" not in html
+    assert "\n" not in _html(comparisons)
 
 
 def test_the_table_scrolls_inside_its_own_box(comparisons):
     """Six numeric columns overflow a narrow viewport; the page must not."""
-    html = view._comparison_table_html(comparisons)
+    html = _html(comparisons)
     assert html.startswith('<div class="val-scroll">')
     assert html.endswith("</table></div>")
-    assert ".val-scroll { overflow-x: auto; }" in view._VALUATION_CSS
+    assert ".val-scroll { overflow-x: auto; }" in shell._VALUATION_CSS
 
 
 def test_every_metric_gets_a_row(comparisons):
-    html = view._comparison_table_html(comparisons)
+    html = _html(comparisons)
     for metric in logic.METRICS:
         assert metric.label in html, metric.label
     assert html.count("<tr>") == len(logic.METRICS) + 1  # + the header
@@ -80,19 +120,20 @@ def test_every_metric_gets_a_row(comparisons):
 def test_the_markup_is_escaped():
     """Vendor strings reach these cells, so nothing from Sharadar is markup."""
     hostile = logic.Metric(label="<script>x</script>", definition="d", daily_column="pe")
-    row = view._row(logic.Comparison(metric=hostile, current=1.0))
+    row = table.row_html(
+        _comparison(metric=hostile, current=1.0), multiples._verdict
+    )
     assert "<script>" not in row
     assert "&lt;script&gt;" in row
 
 
-def test_the_css_is_namespaced_to_this_tab():
-    """Each tab owns its rules, so a dropped tab cannot orphan a shared block."""
-    classes = {
-        chunk.split("{")[0].strip()
-        for chunk in view._VALUATION_CSS.split(".")
-        if chunk.strip().startswith("val-")
-    }
-    assert classes, "expected .val-* rules"
+def test_both_sub_tabs_render_the_same_column_headers():
+    """A reader crossing between them is reading one shape twice."""
+    assert [name for name, _ in table.HEADERS] == [
+        "Metric", "Current", "5Y median", "5Y percentile",
+        "Industry median", "vs industry",
+    ]
+    assert len(table.COLUMN_WIDTHS) == len(table.HEADERS)
 
 
 # ---------------------------------------------------------------------------
@@ -100,11 +141,17 @@ def test_the_css_is_namespaced_to_this_tab():
 # ---------------------------------------------------------------------------
 
 
+def _comparison(**kwargs):
+    from app.logic.research.comparison import Comparison
+
+    kwargs.setdefault("metric", logic.METRICS[0])
+    return Comparison(**kwargs)
+
+
 def test_a_missing_value_is_stated_rather_than_blank():
     """An empty cell reads as zero; 'not reported' does not."""
-    metric = logic.METRICS[0]
-    assert "not reported" in view._value(None, metric)
-    assert "val-missing" in view._value(None, metric)
+    cell = table.value_cell(None, logic.METRICS[0])
+    assert "not reported" in cell and "val-missing" in cell
 
 
 def test_a_thin_industry_renders_as_missing_not_as_zero(peer_universe):
@@ -119,7 +166,7 @@ def test_a_thin_industry_renders_as_missing_not_as_zero(peer_universe):
         )
         if c.metric.label == "P/E (TTM)"
     ][0]
-    cell = view._industry(comparison)
+    cell = table.industry_cell(comparison)
     assert "not reported" in cell
     assert "0" not in cell.replace("val-missing", "")
 
@@ -127,23 +174,29 @@ def test_a_thin_industry_renders_as_missing_not_as_zero(peer_universe):
 def test_the_peer_count_travels_with_the_median(comparisons):
     """A median of six is not a median of six hundred, and the cell says which."""
     pe = [c for c in comparisons if c.metric.label == "P/E (TTM)"][0]
-    assert "n = 6" in view._industry(pe)
+    assert "n = 6" in table.industry_cell(pe)
 
 
-def test_the_history_cell_states_how_many_sessions(comparisons):
+def test_the_history_cell_names_the_unit_it_counts(comparisons):
+    """The same column carries 1,255 sessions and 19 quarters."""
     pe = [c for c in comparisons if c.metric.label == "P/E (TTM)"][0]
-    assert "400 sessions" in view._history(pe)
+    assert "400 sessions" in table.history_cell(pe)
 
 
 # ---------------------------------------------------------------------------
-# The verdict column
+# The Valuation verdict
 # ---------------------------------------------------------------------------
 
 
 def _premium(label: str, current: float, median: float) -> str:
     metric = {m.label: m for m in logic.METRICS}[label]
-    return view._premium(
-        logic.Comparison(metric=metric, current=current, industry_median=median)
+    return multiples._verdict(
+        _comparison(
+            metric=metric,
+            current=current,
+            industry_median=median,
+            industry_gap=current / median - 1.0,
+        )
     )
 
 
@@ -170,8 +223,7 @@ def test_a_high_dividend_yield_reads_as_cheap_not_rich():
 
 
 def test_a_low_dividend_yield_reads_as_rich():
-    cell = _premium("Dividend Yield (TTM)", 0.01, 0.02)
-    assert "val-rich" in cell
+    assert "val-rich" in _premium("Dividend Yield (TTM)", 0.01, 0.02)
 
 
 def test_a_small_gap_is_called_in_line():
@@ -182,6 +234,4 @@ def test_a_small_gap_is_called_in_line():
 
 
 def test_no_verdict_without_an_industry_median():
-    metric = logic.METRICS[0]
-    cell = view._premium(logic.Comparison(metric=metric, current=20.0))
-    assert "not reported" in cell
+    assert "not reported" in multiples._verdict(_comparison(current=20.0))

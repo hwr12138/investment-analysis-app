@@ -48,14 +48,20 @@ To add a **tab** to Stock Research: create `app/logic/research/<tab>.py` for the
 `_TAB_ORDER` and dispatch it in `views/research/__init__.py`. Remove its entry from
 `placeholders.PLACEHOLDERS` in the same commit — a test fails if the two disagree.
 
+A tab that compares metrics against peers and against history should be a **sub-tab of ⚖️
+Valuation** rather than a new top-level one: declare its metrics and its own usable/base rule,
+and reuse `logic/research/comparison.py` and `views/research/valuation/table.py` for everything
+else. That is what Growth is, and it is why the top-level 🌱 Growth placeholder was removed.
+
 ### The Stock Research page
 
 The one feature that is a package on both layers rather than a pair of modules, because it
-carries ten tabs:
+carries nine tabs — one of which is itself a package, holding two sub-tabs:
 
 ```
-app/views/research/     __init__.py = the shell; one module per tab beside it
-app/logic/research/     formatting ← summary, valuation ← dataset
+app/views/research/            __init__.py = the shell; one module per tab beside it
+app/views/research/valuation/  the ⚖️ tab: shell + table + multiples + growth
+app/logic/research/            formatting, comparison ← summary, valuation, growth ← dataset
 ```
 
 `views/research/__init__.py` owns the ticker box, the search gate, the session snapshot and
@@ -65,11 +71,16 @@ ticker for `dcf`, which loads its own. There is no shared signature, because the
 explicit and a uniform one would hide that the DCF reads nothing from the snapshot. Each tab
 also owns its CSS, so the rules travel with the markup they style.
 
-On the logic side the dependencies run one way — `formatting` is shared by every tab, each tab
-module owns its arithmetic, and `dataset` sits on top because it assembles the snapshot. Its
-calls into `summary.build_key_stats` and `valuation.build_peer_universe` are the only upward
+On the logic side the dependencies run one way — `formatting` and `comparison` are shared, each
+tab module owns its arithmetic, and `dataset` sits on top because it assembles the snapshot. Its
+calls into `summary.build_key_stats` and `comparison.build_peer_universe` are the only upward
 edges, and both exist for the same reason: the snapshot is assembled once per search, so
 anything the tabs would otherwise recompute on every rerun is precomputed there.
+
+`logic/research/comparison.py` holds what the two ⚖️ sub-tabs genuinely share — the `Comparison`
+record, the median-and-percentile summary, the peer universe join, the industry lookup. What it
+deliberately does **not** hold is either tab's notion of a *usable* number or its `Tolerances`,
+because on both points the two are opposites; see the ⚖️ section below.
 
 Two modules deliberately stay outside both packages. `app/logic/statements.py` declares the four
 SF1 statement layouts (sections, rows, subtotals, reconciliations) and evaluates them into a
@@ -87,16 +98,49 @@ cannot repeat that.
 `views/research/dcf.py` is by far the largest tab body and is the module to split next if it
 grows again — assumptions, valuation, reverse and export are each separable.
 
-**The ⚖️ Valuation tab is trailing-only, and deliberately so.** Every metric is answered three
-ways — current, the company's own 5Y median, the industry median — and a metric that cannot fill
-all three columns is not shown. Forward multiples were dropped for exactly that reason: yfinance
-supplies forward EPS and revenue only per-ticker by scrape, so forward *industry* medians would
-cost thousands of scrapes, and a forward *5Y history* needs point-in-time consensus no source
-here has. That tab makes no yfinance call at all. Two rules govern the numbers: **only positive
-readings count** (a negative P/E is a loss, not a cheap stock; a zero yield is a non-payer), and
-the exclusion is applied **per metric, not per company** — a loss-maker still has an EV/Sales and
-still belongs in that median. **Medians, never means**, because a multiple whose denominator
-approaches zero prints in the thousands.
+### The ⚖️ Valuation tab and its two sub-tabs
+
+`Valuation` asks what the market pays for the company; `Growth` asks how fast the thing being
+paid for moves. Both answer per metric in the same three columns — current, the company's own 5Y
+median, the industry median — over one peer universe, and a metric that cannot fill all three is
+not shown. The package shell injects the one `.val-*` stylesheet and draws the sub-tab strip;
+`table.py` owns the grid and the four cells the bodies render identically. **This is the only
+nested `st.tabs` in the app**, so both bodies build on every rerun — affordable only because
+both are pure computation over the snapshot.
+
+**Trailing-only, deliberately.** Forward multiples were dropped because yfinance supplies forward
+EPS and revenue only per-ticker by scrape, so forward *industry* medians would cost thousands of
+scrapes and a forward *5Y history* needs point-in-time consensus no source here has. Neither
+sub-tab makes a yfinance call.
+
+**The two sub-tabs' central rule is inverted, and that is why they cannot share `_usable` or
+`_current`:**
+
+- *Valuation* — **only positive readings count**. A negative P/E is a loss, not a cheap stock; a
+  zero yield is a non-payer.
+- *Growth* — **a negative reading is the answer** (revenue falling 8% is what the reader came
+  for), but **the base must be positive**. Dividing by a negative base inverts the sign without
+  saying so: Intel's diluted EPS went −4.75 to −2.12, halving the loss, and the ratio prints
+  −55%. The same trap fires on JPM's operating cash flow, on Intel's EBIT/FCF/ROE, and on Apple's
+  working capital.
+
+Shared by both: the exclusion is applied **per metric, not per company** — a loss-maker still has
+an EV/Sales and a revenue growth rate, and belongs in both medians. **Medians, never means**,
+because a denominator approaching zero prints in the thousands.
+
+Three more things Growth has to get right, each verified against live data:
+
+- **`capex` is negative for every company and zero for banks**, so growth is taken on the
+  **magnitude** — "+20%" means more spending. Apple's −12.38bn → −10.04bn reads −18.9%.
+- **Pair periods on `Calendar Date`, never `Report Date`.** Companies on a 52/53-week fiscal
+  calendar close a day or two earlier each year — Apple's quarters end 2025-06-28 and 2026-06-27
+  — so an exact twelve-month match on the report date finds nothing and *every* growth rate reads
+  unavailable. This shipped once and was caught only against live data; there is a regression
+  test for it.
+- **The 5Y window counts filed quarters, not sessions** (~20 against ~1,255), which is why
+  `GrowthTolerances.min_observations` is 8 where the valuation tab's is 60, and why the view
+  prints the unit beside the count. The gap to the industry is likewise in **percentage points**,
+  not a ratio: dividing one rate by another says little and breaks when the median is negative.
 
 ### The DCF engine
 
@@ -154,11 +198,12 @@ absent reports *not evaluated* rather than passing.
 
 **Every tolerance lives in a `Tolerances` dataclass owned by its consumer** — `dcf/validation.py`
 `Tolerances` for the model, `logic/statements.py` `StatementTolerances` for the statements tab,
-`logic/research/valuation.py` `ValuationTolerances` for the peer medians. Never a bare literal at
-a comparison site. The three are deliberately not shared: the model's thresholds gate whether a
+and `ValuationTolerances`/`GrowthTolerances` for the two ⚖️ sub-tabs. Never a bare literal at a
+comparison site. They are deliberately not shared: the model's thresholds gate whether a
 valuation is trustworthy, the statement ones gate whether a display row grows a marker, and the
-valuation ones gate whether a peer group is big enough to have a median. Coupling them would let
-a change made for one reason silently move another.
+comparison ones gate whether a peer group is big enough to have a median. The last two are the
+sharpest case — `min_observations` counts trading sessions for the multiples and filed quarters
+for the growth rates, so one shared number would be wrong for one of them by a factor of sixty.
 
 **Banks and insurers are rejected** before anything is computed, on SIC code (6000–6999), not on
 Sharadar's vendor `sector` label. That gate is the DCF's, not the research page's:
@@ -211,8 +256,16 @@ cost one `DAILY` request each. **They do not.** `DAILY` filtered on a date with 
 every listed company in a single page — measured at 5,446 rows in ~1.1s — so the cost is fixed.
 All three universe fetches (`fetch_universe_daily`, `fetch_universe_fundamentals`,
 `fetch_ticker_directory`) are keyed on a date alone, never on a ticker, so **one cache entry
-serves every company searched that day** and the second search pays nothing. Keep it that way: a
-universe fetch that took a ticker would turn a fixed cost back into a per-company one.
+serves every company searched that day** and the second search pays nothing — measured at seven
+requests on the first search and zero on the next two. Keep it that way: a universe fetch that
+took a ticker would turn a fixed cost back into a per-company one.
+
+`fetch_universe_fundamentals` reaches back **eighteen months** (`UNIVERSE_LOOKBACK_DAYS`) and
+returns *every* period in the window rather than one row per ticker, because the growth
+comparison needs both ends of a year-on-year. 36,199 rows over four pages in ~4.8s, and it is a
+superset of what the multiples need, so widening it replaced a second fetch rather than adding
+one. The only collapse it still does is the **restatement**: two filings for the same
+`calendardate` keep the later `datekey`.
 
 Session state is keyed `dcf_*`. The tab clears its own acknowledgements and assumption overrides
 via `_session_reset` when it notices the page's ticker has moved; the research page's Search does
@@ -237,19 +290,23 @@ View-level tests (`test_page_controls.py`, `test_acknowledgements.py`, `test_res
 import the view modules directly and monkeypatch `page.st.session_state` with a dict subclass,
 since there is no Streamlit runtime.
 
-The ⚖️ Valuation tab is the first to be tested per-module — `test_research_valuation.py` for the
-logic and `test_research_valuation_controls.py` for the view — which is the layout the rest should
-move to. Both carry the `research_` prefix because `test_valuation.py` was already taken by the
-**DCF** engine's `logic/dcf/valuation.py`: two unrelated modules share the name `valuation.py`,
-and the test files have to disambiguate what the modules themselves do not. The
-two older files still map onto the *pre-package* layout: `test_stock_research.py` covers all of
-`app/logic/research/` except valuation, and `test_research_page_controls.py` covers the shell
-plus three tab modules. Split them along their existing section headers when either is next
-touched substantially.
+The ⚖️ Valuation tab is tested per-module, which is the layout the rest should move to —
+`test_research_valuation.py` and `test_research_growth.py` for the logic, and
+`..._controls.py` for each view. All four carry the `research_` prefix because
+`test_valuation.py` was already taken by the **DCF** engine's `logic/dcf/valuation.py`: two
+unrelated modules share the name `valuation.py`, and the test files have to disambiguate what the
+modules themselves do not. `test_research_valuation_controls.py` covers the package shell and the
+shared grid as well as the Valuation body; `test_research_growth_controls.py` covers only what
+Growth words differently. The two older files still map onto the *pre-package* layout:
+`test_stock_research.py` covers all of `app/logic/research/` except the comparison tabs, and
+`test_research_page_controls.py` covers the shell plus three tab modules. Split them along their
+existing section headers when either is next touched substantially.
 
-`tests/conftest.py` also carries a miniature eleven-ticker universe for the peer medians. It is
+`tests/conftest.py` also carries a miniature eleven-ticker universe for the peer medians, two
+periods per ticker so the year-on-year pairing has both ends. It is
 sized so every median is checkable by hand and every exclusion rule has something to exclude: a
-loss-maker, a non-payer, a delisted company DAILY still returns, a ticker that filed twice in the
-window, and an industry too small to have a median. `stub_universe` routes by table name so tests
-call the real fetchers — the millions conversion and the filing-date dedup then run for real
-rather than being reimplemented in the fixture and proved against themselves.
+loss-maker **whose loss narrows** (the case that prints backwards without the base gate), a
+non-payer, a company with zero capex, a delisted company DAILY still returns, a ticker that filed
+twice for the same period, and an industry too small to have a median. `stub_universe` routes by
+table name so tests call the real fetchers — the millions conversion and the restatement dedup
+then run for real rather than being reimplemented in the fixture and proved against themselves.

@@ -1,4 +1,4 @@
-"""Stock research page — one ticker, ten tabs, one module per tab.
+"""Stock research page — one ticker, nine tabs, one module per tab.
 
 The general-purpose "what is this company" page. This module is the shell: the
 ticker box, the search gate, the snapshot in session state, and the tab strip.
@@ -18,7 +18,7 @@ Three behaviours are deliberate and load-bearing:
 * **Changing the price window never refetches.** The full history is fetched
   once per search and every window is a slice of it, so the period buttons are
   free.
-* **Tab bodies fetch nothing** — with one exception. ``st.tabs`` renders all ten
+* **Tab bodies fetch nothing** — with one exception. ``st.tabs`` renders all nine
   on every rerun and tells Python nothing about which one is open, so anything
   that loaded data would fire on page load and on every window change. The DCF
   tab needs statements this page's search does not fetch, and it fetches them
@@ -54,7 +54,6 @@ _TAB_ORDER = (
     "💵 Dividends",
     "💰 DCF",
     "⚖️ Valuation",
-    "🌱 Growth",
     "💰 Profitability",
     "🧭 Peers",
     "🕰️ History",

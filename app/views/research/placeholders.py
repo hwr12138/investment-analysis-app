@@ -25,10 +25,6 @@ PLACEHOLDERS = {
         "`SHARADAR/ACTIONS` via `sharadar_client.fetch_actions` — already "
         "fetched for the ex-dividend tile on Summary.",
     ),
-    "🌱 Growth": (
-        "Revenue, earnings and free-cash-flow growth, with CAGRs.",
-        "`SHARADAR/SF1` annual and TTM.",
-    ),
     "💰 Profitability": (
         "Margins, ROE, ROIC and turnover, against history.",
         "`SHARADAR/SF1` DERIVED frame — `grossmargin`, `netmargin`, `roe`, "

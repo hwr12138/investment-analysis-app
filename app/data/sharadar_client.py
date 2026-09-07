@@ -1143,20 +1143,31 @@ def fetch_actions(ticker: str, start: str | None = None) -> pd.DataFrame:
 #: the default 30-odd, which is 2 MB against ~10 MB for the same 17,800 rows.
 _DIRECTORY_COLUMNS = "ticker,name,sector,industry,scalemarketcap,isdelisted"
 
-#: SF1 fields the universe snapshot needs: the trailing-twelve-month terms for
-#: the three multiples DAILY does not publish, plus the key used to pick one row
-#: per ticker. All three are whole-dollar aggregates rather than per-share
-#: figures, which is what keeps them immune to splits — Sharadar restates
-#: ``dps`` and ``price`` onto the current share basis but a ratio of two dollar
-#: totals never has to care.
-_UNIVERSE_SF1_COLUMNS = "ticker,calendardate,datekey,revenue,ncfo,ncfdiv"
+#: SF1 indicators the universe snapshot carries. ``revenue``/``ncfo``/``ncfdiv``
+#: feed the three multiples DAILY does not publish; the rest are the
+#: year-on-year growth terms. Projected rather than taking the full ~110, which
+#: is what keeps 36,000 rows to four pages.
+_UNIVERSE_SF1_INDICATORS = (
+    "revenue", "ncfo", "ncfdiv", "ebitda", "ebit", "epsdil",
+    "fcf", "roe", "workingcapital", "capex", "dps",
+)
 
-#: How far back the universe fundamentals request reaches. A quarter would miss
-#: everyone who has not filed yet — asking for ``calendardate=2026-06-30`` on
-#: 2026-08-09 returned 2,818 rows against 5,133 for the quarter before, because
-#: Q2 filings were still arriving. Two quarters of filing dates covers both
-#: cohorts, and the dedup below keeps the newer row.
-UNIVERSE_LOOKBACK_DAYS = 180
+_UNIVERSE_SF1_COLUMNS = "ticker,calendardate,datekey," + ",".join(
+    _UNIVERSE_SF1_INDICATORS
+)
+
+#: How far back the universe fundamentals request reaches.
+#:
+#: Six months would be enough for the *levels* the valuation multiples need — a
+#: quarter would not, because asking for ``calendardate=2026-06-30`` on
+#: 2026-08-09 returned 2,818 rows against 5,133 for the quarter before, with Q2
+#: filings still arriving. Eighteen months is what the **growth** comparison
+#: needs: every company's latest trailing-twelve-month figures *and* the ones
+#: four quarters earlier, in one request rather than two. Measured at 36,199
+#: rows over four pages in ~4.8s, with 5,470 of 6,054 tickers finding their
+#: exact year-ago quarter — the rest are recent listings with no year-on-year
+#: to report.
+UNIVERSE_LOOKBACK_DAYS = 550
 
 
 def _fetch_universe_daily(as_of: str) -> pd.DataFrame:
@@ -1182,15 +1193,22 @@ def fetch_universe_daily(as_of: str) -> pd.DataFrame:
 
 
 def _fetch_universe_fundamentals(since: str) -> pd.DataFrame:
-    """Each company's most recent trailing-twelve-month SF1 row.
+    """Every company's trailing-twelve-month SF1 rows across the window.
 
     ``ART`` rather than ``MRT``: as-reported time-indexes to the filing date, so
     ``datekey.gte`` selects on when a figure became public rather than on the
     period it covers. Filtering on the period would hand back numbers nobody
     could have known at the time.
 
-    A company that filed twice inside the window appears twice; the later
-    ``datekey`` wins.
+    **Several rows per ticker, not one.** Growth is a year-on-year comparison
+    and needs both ends of it, so the whole window is returned and the callers
+    pick the periods they want — the latest for the multiples, the latest and
+    its year-ago twin for the growth rates.
+
+    The one collapse that does happen here is the **restatement**: a company
+    that filed twice for the *same* ``calendardate`` keeps only the later
+    ``datekey``. That is a correction of one period, not two periods of history,
+    and letting both through would double-count a quarter.
     """
     frame = _request_all(
         "SF1",
@@ -1200,21 +1218,23 @@ def _fetch_universe_fundamentals(since: str) -> pd.DataFrame:
             "qopts.columns": _UNIVERSE_SF1_COLUMNS,
         },
     )
-    if frame.empty or not {"ticker", "datekey"}.issubset(frame.columns):
+    if frame.empty or not {"ticker", "datekey", "calendardate"}.issubset(frame.columns):
         return pd.DataFrame()
 
-    for column in ("revenue", "ncfo", "ncfdiv"):
+    for column in _UNIVERSE_SF1_INDICATORS:
         if column in frame.columns:
             frame[column] = pd.to_numeric(frame[column], errors="coerce")
-    frame["datekey"] = pd.to_datetime(frame["datekey"], errors="coerce")
+    for column in ("datekey", "calendardate"):
+        frame[column] = pd.to_datetime(frame[column], errors="coerce")
 
-    frame = frame.dropna(subset=["datekey"]).sort_values("datekey")
-    return frame.groupby("ticker", as_index=False).tail(1).reset_index(drop=True)
+    frame = frame.dropna(subset=["datekey", "calendardate"]).sort_values("datekey")
+    frame = frame.groupby(["ticker", "calendardate"], as_index=False).tail(1)
+    return frame.sort_values(["ticker", "calendardate"]).reset_index(drop=True)
 
 
 @st.cache_data(show_spinner=False, ttl=60 * 60 * 12)
 def fetch_universe_fundamentals(since: str) -> pd.DataFrame:
-    """Cached universe-wide TTM fundamentals, one row per ticker."""
+    """Cached universe-wide TTM fundamentals, one row per ticker and period."""
     return _fetch_universe_fundamentals(since)
 
 

@@ -42,7 +42,9 @@ from datetime import date
 import pandas as pd
 
 from app.data import sharadar_client
-from app.logic.research.formatting import _missing, format_pct, format_ratio
+from app.logic.research import comparison as shared
+from app.logic.research.comparison import Comparison
+from app.logic.research.formatting import format_pct, format_ratio
 from app.provenance import Origin
 
 #: Where a term in a derived multiple is read from. ``DAILY`` terms are
@@ -180,97 +182,6 @@ METRICS: tuple[Metric, ...] = (
 )
 
 
-@dataclass(frozen=True)
-class Comparison:
-    """One metric, answered three ways, with the reason for each absence.
-
-    ``None`` on any of the three values means *not obtainable*, and the matching
-    ``*_reason`` says why. Nothing is substituted — that is the same rule the DCF
-    engine's ``Sourced`` enforces, applied to a display record that carries three
-    numbers instead of one.
-    """
-
-    metric: Metric
-    current: float | None = None
-    current_reason: str = ""
-    history_median: float | None = None
-    history_observations: int = 0
-    history_reason: str = ""
-    percentile: float | None = None
-    industry_median: float | None = None
-    peer_count: int = 0
-    industry_reason: str = ""
-
-    @property
-    def origin(self) -> Origin:
-        """Vendor multiples are reported; the ones divided here are derived."""
-        if self.current is None:
-            return Origin.UNAVAILABLE
-        return Origin.REPORTED if self.metric.vendor else Origin.DERIVED
-
-    @property
-    def premium_to_industry(self) -> float | None:
-        """Current reading over the industry median, as a fraction.
-
-        ``0.25`` means the company trades 25% above its industry. Direction is
-        not flipped for the dividend yield — the number is what it is, and the
-        view labels it.
-        """
-        if self.current is None or not self.industry_median:
-            return None
-        return self.current / self.industry_median - 1.0
-
-
-# ---------------------------------------------------------------------------
-# The peer universe
-# ---------------------------------------------------------------------------
-
-
-def build_peer_universe(
-    daily: pd.DataFrame, fundamentals: pd.DataFrame, directory: pd.DataFrame
-) -> pd.DataFrame:
-    """Joins the three universe snapshots into one row per listed company.
-
-    Returns the columns the metrics need — the five vendor multiples, the three
-    dollar aggregates behind the derived ones, and the industry label — or an
-    empty frame if any of the three fetches came back empty. Empty is a
-    legitimate outcome that leaves every industry median reporting itself
-    unavailable; it is never a reason to fall back to something else.
-    """
-    if daily.empty or directory.empty or "ticker" not in daily.columns:
-        return pd.DataFrame()
-
-    keep = [
-        c
-        for c in ("ticker", "date", "pe", "ps", "pb", "evebit", "evebitda", "ev", "marketcap")
-        if c in daily.columns
-    ]
-    universe = daily[keep].copy()
-
-    listed = directory[directory.get("isdelisted", "N") == "N"]
-    columns = [c for c in ("ticker", "sector", "industry") if c in listed.columns]
-    universe = universe.merge(listed[columns], on="ticker", how="inner")
-
-    if not fundamentals.empty and "ticker" in fundamentals.columns:
-        terms = [
-            c for c in ("ticker", "revenue", "ncfo", "ncfdiv") if c in fundamentals.columns
-        ]
-        universe = universe.merge(fundamentals[terms], on="ticker", how="left")
-
-    return universe.reset_index(drop=True)
-
-
-def _empty_dated() -> pd.Series:
-    """An empty series that is still date-indexed.
-
-    A bare ``pd.Series(dtype="float64")`` carries a ``RangeIndex``, and slicing
-    that against a ``Timestamp`` raises rather than returning nothing — so the
-    company with no history would crash the tab instead of reporting itself
-    unavailable. Every empty return here is dated for that reason.
-    """
-    return pd.Series(dtype="float64", index=pd.DatetimeIndex([]))
-
-
 def _universe_series(universe: pd.DataFrame, metric: Metric) -> pd.Series:
     """The metric's reading for every company in the universe.
 
@@ -333,13 +244,13 @@ def company_series(
     then.
     """
     if daily.empty or "date" not in daily.columns:
-        return _empty_dated()
+        return shared.empty_dated()
 
     frame = daily.sort_values("date")
 
     if metric.vendor:
         if metric.daily_column not in frame.columns:
-            return _empty_dated()
+            return shared.empty_dated()
         values = pd.to_numeric(frame[metric.daily_column], errors="coerce")
         return pd.Series(values.to_numpy(), index=pd.DatetimeIndex(frame["date"]))
 
@@ -348,10 +259,10 @@ def company_series(
     sf1_term = denominator if numerator.source == DAILY else numerator
 
     if daily_term.column not in frame.columns:
-        return _empty_dated()
+        return shared.empty_dated()
     history = _ttm_terms(statements_ttm, sf1_term.column)
     if history.empty:
-        return _empty_dated()
+        return shared.empty_dated()
 
     merged = pd.merge_asof(
         frame[["date", daily_term.column]],
@@ -403,7 +314,7 @@ def build_comparison(
     """
     tolerances = tolerances or ValuationTolerances()
     today = today or date.today()
-    peers = _industry_peers(peer_universe, industry)
+    peers = shared.industry_peers(peer_universe, industry)
     cutoff = pd.Timestamp(today) - pd.DateOffset(years=tolerances.lookback_years)
 
     return [
@@ -411,11 +322,6 @@ def build_comparison(
         for metric in METRICS
     ]
 
-
-def _industry_peers(universe: pd.DataFrame, industry: str) -> pd.DataFrame:
-    if universe.empty or not industry or "industry" not in universe.columns:
-        return pd.DataFrame()
-    return universe[universe["industry"] == industry]
 
 
 def _compare(
@@ -431,34 +337,41 @@ def _compare(
     usable = _usable(series)
 
     current, current_reason = _current(series, usable, metric)
-    window = usable[usable.index >= cutoff]
-
-    history_median: float | None = None
-    percentile: float | None = None
-    history_reason = ""
-    if len(window) < tolerances.min_observations:
-        history_reason = (
-            f"Only {len(window)} usable session(s) in the last "
-            f"{tolerances.lookback_years} years; {tolerances.min_observations} needed."
-        )
-    else:
-        history_median = float(window.median())
-        if current is not None:
-            percentile = float((window < current).mean())
-
-    industry_median, peer_count, industry_reason = _industry(metric, peers, industry, tolerances)
+    history_median, observations, percentile, history_reason = shared.summarise_history(
+        usable,
+        current,
+        cutoff,
+        min_observations=tolerances.min_observations,
+        lookback_years=tolerances.lookback_years,
+        unit="session",
+    )
+    median, peer_count, industry_reason = _industry(metric, peers, industry, tolerances)
 
     return Comparison(
         metric=metric,
         current=current,
         current_reason=current_reason,
         history_median=history_median,
-        history_observations=len(window),
+        history_observations=observations,
+        history_unit="sessions",
         history_reason=history_reason,
         percentile=percentile,
-        industry_median=industry_median,
+        industry_median=median,
         peer_count=peer_count,
         industry_reason=industry_reason,
+        # Vendor multiples are read straight off Sharadar; the ones divided here
+        # are arithmetic over reported figures.
+        origin=(
+            Origin.UNAVAILABLE
+            if current is None
+            else Origin.REPORTED if metric.vendor else Origin.DERIVED
+        ),
+        # A ratio, not a difference: "25% dearer than its industry" is how a
+        # multiple is read. The growth tab compares in percentage points instead,
+        # which is why this is set by the builder rather than by `Comparison`.
+        industry_gap=(
+            None if current is None or not median else current / median - 1.0
+        ),
     )
 
 
@@ -501,33 +414,9 @@ def _current(
 def _industry(
     metric: Metric, peers: pd.DataFrame, industry: str, tolerances: ValuationTolerances
 ) -> tuple[float | None, int, str]:
-    if not industry:
-        return None, 0, "No industry classification for this company."
-    if peers.empty:
-        return None, 0, f"No peer data loaded for {industry}."
+    """The industry median, over the peers whose reading is usable."""
+    values = _usable(_universe_series(peers, metric)) if not peers.empty else pd.Series(dtype="float64")
+    return shared.industry_median(
+        values, peers, industry, min_peers=tolerances.min_peers
+    )
 
-    usable = _usable(_universe_series(peers, metric))
-    count = len(usable)
-    if count < tolerances.min_peers:
-        return None, count, (
-            f"Only {count} of {len(peers)} companies in {industry} have a usable "
-            f"reading; {tolerances.min_peers} needed for a median."
-        )
-    return float(usable.median()), count, ""
-
-
-def industry_of(peer_universe: pd.DataFrame, ticker: str) -> str:
-    """The industry Sharadar puts one ticker in, or ``""``.
-
-    Read from the universe rather than from the company's own profile so the
-    company and its peers are always grouped by the same field — a label taken
-    from one source and compared against buckets built from another is a
-    comparison against the wrong set.
-    """
-    if peer_universe.empty or "industry" not in peer_universe.columns:
-        return ""
-    match = peer_universe[peer_universe["ticker"] == ticker.strip().upper()]
-    if match.empty:
-        return ""
-    value = match.iloc[0]["industry"]
-    return "" if _missing(value) else str(value)

@@ -34,7 +34,7 @@ from datetime import date
 import pandas as pd
 
 from app.data import sharadar_client
-from app.logic.research import valuation
+from app.logic.research import comparison
 from app.logic.research.summary import (
     BENCHMARK,
     StatTile,
@@ -187,7 +187,7 @@ def _peer_universe(daily: pd.DataFrame, today: date) -> pd.DataFrame:
     since = (
         pd.Timestamp(today) - pd.Timedelta(days=sharadar_client.UNIVERSE_LOOKBACK_DAYS)
     ).date()
-    return valuation.build_peer_universe(
+    return comparison.build_peer_universe(
         _tolerant(lambda: sharadar_client.fetch_universe_daily(as_of.date().isoformat())),
         _tolerant(lambda: sharadar_client.fetch_universe_fundamentals(since.isoformat())),
         _tolerant(sharadar_client.fetch_ticker_directory),

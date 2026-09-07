@@ -525,27 +525,61 @@ UNIVERSE_DAILY_ROWS = [
 ]
 
 #: ``SHARADAR/SF1`` at ``dimension=ART`` with the universe column projection.
-#: ``ncfdiv`` is negative — a cash outflow — which is why the yield negates it.
-#: PEER3 pays nothing, so its zero has to be excluded rather than counted as a
-#: yield of nought.
+#:
+#: ``ncfdiv`` is negative — a cash outflow — which is why the yield negates it,
+#: and ``capex`` is negative for the same reason, which is why growth takes its
+#: magnitude. PEER3 pays nothing, so its zero has to be excluded rather than
+#: counted as a yield or a growth rate of nought.
 UNIVERSE_SF1_COLUMNS = [
-    "ticker", "calendardate", "datekey", "revenue", "ncfo", "ncfdiv",
+    "ticker", "calendardate", "datekey",
+    "revenue", "ncfo", "ncfdiv", "ebitda", "ebit", "epsdil",
+    "fcf", "roe", "workingcapital", "capex", "dps",
 ]
 
-#: TEST appears **twice**, at two filing dates. The later row supersedes; if the
-#: dedup picks the wrong one every derived multiple for the company moves.
+#: The period every ``_prior`` value is paired against, and the one the levels
+#: are read from. Twelve months apart exactly, which is what the pairing looks
+#: for; a fixture whose two periods were fifteen months apart would silently
+#: exercise nothing.
+_SF1_BASE_PERIOD = "2025-03-31"
+_SF1_LATEST_PERIOD = "2026-03-31"
+
+#: Two periods per ticker, so the year-on-year pairing has both ends, and every
+#: degenerate base the growth gate exists to catch:
+#:
+#:   LOSS   — negative bases on ebitda/ebit/epsdil/fcf/roe/workingcapital, with
+#:            the loss *narrowing* (epsdil −4.00 → −2.00). The naive ratio prints
+#:            −50%, which reads as collapse when the company in fact improved.
+#:            Its revenue base is positive, so it still counts toward revenue
+#:            growth — the exclusion is per metric, not per company.
+#:   PEER3  — zero capex and zero dividend in the base period, the bank and the
+#:            non-payer. A zero base is undefined; a zero *current* is not.
+#:   PEER1  — every metric halved, so the medians have something below zero.
+#:   TEST   — filed **twice for the same period**. The later ``datekey``
+#:            supersedes; the earlier carries wrong figures, so a broken
+#:            restatement dedup moves every number on the page.
 UNIVERSE_SF1_ROWS = [
-    ["TEST", "2025-12-31", "2026-01-15", 9.9e8, 1.0e8, -1.0e7],
-    ["TEST", "2026-03-31", "2026-05-01", 1.1e9, 2.0e8, -4.0e7],
-    ["PEER1", "2026-03-31", "2026-05-04", 1.1e9, 2.0e8, -2.0e7],
-    ["PEER2", "2026-03-31", "2026-05-06", 1.0e9, 2.0e8, -3.0e7],
-    ["PEER3", "2026-03-31", "2026-05-07", 1.0e9, 2.0e8, 0.0],
-    ["PEER4", "2026-03-31", "2026-05-08", 1.0e9, 2.0e8, -5.2e7],
-    ["PEER5", "2026-03-31", "2026-05-11", 1.0e9, 2.0e8, -1.2e8],
-    ["LOSS", "2026-03-31", "2026-05-12", 5.0e8, -1.0e8, 0.0],
-    ["ALU1", "2026-03-31", "2026-05-13", 4.0e8, 5.0e7, -5.0e6],
-    ["ALU2", "2026-03-31", "2026-05-14", 4.0e8, 6.0e7, -6.0e6],
-    ["ALU3", "2026-03-31", "2026-05-15", 4.0e8, 7.0e7, -7.0e6],
+    # ticker, calendardate, datekey, revenue, ncfo, ncfdiv, ebitda, ebit, epsdil, fcf, roe, workingcapital, capex, dps
+    ["TEST", _SF1_BASE_PERIOD, "2025-05-02", 1.0e9, 1.6e8, -3.0e7, 2.0e8, 1.5e8, 1.00, 1.0e8, 0.20, 5.0e7, -1.0e8, 0.20],
+    ["TEST", _SF1_LATEST_PERIOD, "2026-04-20", 9.9e8, 1.0e8, -1.0e7, 1.0e8, 1.0e8, 0.90, 1.0e8, 0.10, 1.0e7, -1.0e8, 0.10],
+    ["TEST", _SF1_LATEST_PERIOD, "2026-05-01", 1.1e9, 2.0e8, -4.0e7, 2.4e8, 1.8e8, 1.20, 1.2e8, 0.25, 6.0e7, -1.2e8, 0.22],
+    ["PEER1", _SF1_BASE_PERIOD, "2025-05-05", 2.2e9, 4.0e8, -2.0e7, 4.0e8, 3.0e8, 2.00, 2.0e8, 0.40, 1.0e8, -2.0e8, 0.10],
+    ["PEER1", _SF1_LATEST_PERIOD, "2026-05-04", 1.1e9, 2.0e8, -2.0e7, 2.0e8, 1.5e8, 1.00, 1.0e8, 0.20, 5.0e7, -1.0e8, 0.10],
+    ["PEER2", _SF1_BASE_PERIOD, "2025-05-07", 8.0e8, 1.0e8, -3.0e7, 1.0e8, 8.0e7, 0.80, 5.0e7, 0.10, 4.0e7, -5.0e7, 0.15],
+    ["PEER2", _SF1_LATEST_PERIOD, "2026-05-06", 1.0e9, 2.0e8, -3.0e7, 1.5e8, 1.2e8, 1.00, 7.5e7, 0.15, 5.0e7, -7.5e7, 0.18],
+    ["PEER3", _SF1_BASE_PERIOD, "2025-05-08", 5.0e8, 1.0e8, 0.0, 1.0e8, 8.0e7, 0.50, 5.0e7, 0.10, 2.5e7, 0.0, 0.0],
+    ["PEER3", _SF1_LATEST_PERIOD, "2026-05-07", 1.0e9, 2.0e8, 0.0, 2.0e8, 1.6e8, 1.00, 1.0e8, 0.20, 5.0e7, -5.0e7, 0.0],
+    ["PEER4", _SF1_BASE_PERIOD, "2025-05-09", 8.0e8, 1.6e8, -5.2e7, 1.6e8, 1.2e8, 0.80, 8.0e7, 0.16, 4.0e7, -8.0e7, 0.40],
+    ["PEER4", _SF1_LATEST_PERIOD, "2026-05-08", 1.0e9, 2.0e8, -5.2e7, 2.0e8, 1.5e8, 1.00, 1.0e8, 0.20, 5.0e7, -1.0e8, 0.44],
+    ["PEER5", _SF1_BASE_PERIOD, "2025-05-12", 6.25e8, 1.0e8, -1.2e8, 1.0e8, 8.0e7, 0.50, 5.0e7, 0.10, 2.5e7, -5.0e7, 0.50],
+    ["PEER5", _SF1_LATEST_PERIOD, "2026-05-11", 1.0e9, 2.0e8, -1.2e8, 2.0e8, 1.6e8, 1.00, 1.0e8, 0.20, 5.0e7, -1.0e8, 0.60],
+    ["LOSS", _SF1_BASE_PERIOD, "2025-05-13", 1.0e9, -5.0e7, 0.0, -5.0e7, -1.0e8, -4.00, -8.0e7, -0.20, -2.0e7, -4.0e7, 0.0],
+    ["LOSS", _SF1_LATEST_PERIOD, "2026-05-12", 5.0e8, -1.0e8, 0.0, -2.5e7, -5.0e7, -2.00, -4.0e7, -0.10, -1.0e7, -2.0e7, 0.0],
+    ["ALU1", _SF1_BASE_PERIOD, "2025-05-14", 3.2e8, 4.0e7, -4.0e6, 5.0e7, 4.0e7, 0.40, 3.0e7, 0.08, 2.0e7, -2.0e7, 0.08],
+    ["ALU1", _SF1_LATEST_PERIOD, "2026-05-13", 4.0e8, 5.0e7, -5.0e6, 6.0e7, 5.0e7, 0.50, 3.5e7, 0.10, 2.5e7, -2.5e7, 0.10],
+    ["ALU2", _SF1_BASE_PERIOD, "2025-05-15", 3.2e8, 5.0e7, -5.0e6, 5.0e7, 4.0e7, 0.40, 3.0e7, 0.08, 2.0e7, -2.0e7, 0.08],
+    ["ALU2", _SF1_LATEST_PERIOD, "2026-05-14", 4.0e8, 6.0e7, -6.0e6, 6.0e7, 5.0e7, 0.50, 3.5e7, 0.10, 2.5e7, -2.5e7, 0.10],
+    ["ALU3", _SF1_BASE_PERIOD, "2025-05-16", 3.2e8, 6.0e7, -6.0e6, 5.0e7, 4.0e7, 0.40, 3.0e7, 0.08, 2.0e7, -2.0e7, 0.08],
+    ["ALU3", _SF1_LATEST_PERIOD, "2026-05-15", 4.0e8, 7.0e7, -7.0e6, 6.0e7, 5.0e7, 0.50, 3.5e7, 0.10, 2.5e7, -2.5e7, 0.10],
 ]
 
 #: ``SHARADAR/TICKERS`` under the directory projection. GONE is delisted and has
@@ -620,10 +654,10 @@ def stub_universe(monkeypatch) -> None:
 def peer_universe(monkeypatch):
     """The joined universe frame, as ``ResearchDataset.peer_universe`` holds it."""
     from app.data import sharadar_client as sc
-    from app.logic.research import valuation
+    from app.logic.research import comparison
 
     stub_universe(monkeypatch)
-    return valuation.build_peer_universe(
+    return comparison.build_peer_universe(
         sc._fetch_universe_daily("2026-08-05"),
         sc._fetch_universe_fundamentals("2026-02-15"),
         sc._fetch_ticker_directory(),
