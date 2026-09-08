@@ -25,7 +25,14 @@ from app.logic.research import dataset as research_dataset
 from app.logic.research import summary as research_summary
 from app.provenance import Origin
 from app.views import research as page
-from app.views.research import dcf, financials, placeholders, summary, valuation
+from app.views.research import (
+    dcf,
+    financials,
+    insiders,
+    placeholders,
+    summary,
+    valuation,
+)
 from tests.conftest import SF1_COLUMNS, _ANNUAL_ROWS, _TTM_ROW, blank, sf1_payload
 
 
@@ -68,6 +75,7 @@ def _dataset(ticker: str = "AAPL") -> research_dataset.ResearchDataset:
         ohlcv=ohlcv,
         daily=pd.DataFrame(),
         actions=pd.DataFrame(),
+        insiders=pd.DataFrame(),
         statements_ttm={},
         statements_annual={},
         statements_quarterly={},
@@ -171,13 +179,21 @@ def test_every_placeholder_names_what_it_will_show_and_where_it_comes_from():
 
 #: The tabs this module renders itself, plus the one it delegates to the DCF
 #: module. Everything else in `_TAB_ORDER` has to be a placeholder.
-_BUILT = ("📊 Summary", "📄 Financials", "💰 DCF", "⚖️ Valuation")
+_BUILT = (
+    "📊 Summary",
+    "📄 Financials",
+    "💰 DCF",
+    "⚖️ Valuation",
+    "👤 Insiders",
+)
 
 
 def test_the_built_tabs_are_not_placeholders():
-    """Summary, Financials, DCF and Valuation are built; the other five are not."""
+    """Summary, Financials, DCF, Valuation and Insiders are built; the rest are not."""
     for built in _BUILT:
         assert built not in placeholders.PLACEHOLDERS, built
+    # Still five: Insiders was never a placeholder, so nothing was promoted and
+    # no unrelated entry should be deleted to keep this number moving.
     assert len(placeholders.PLACEHOLDERS) == 5
 
 
@@ -186,6 +202,13 @@ def test_every_tab_is_either_built_or_a_placeholder():
     ``KeyError`` at render time and a placeholder with no slot never shows."""
     assert set(page._TAB_ORDER) == set(_BUILT) | set(placeholders.PLACEHOLDERS)
     assert len(page._TAB_ORDER) == len(set(page._TAB_ORDER))
+
+
+def test_the_insiders_tab_follows_the_valuation_pair():
+    """It is the check on what DCF and Valuation concluded, so it reads after
+    them rather than among the company's own numbers."""
+    order = list(page._TAB_ORDER)
+    assert order[order.index("⚖️ Valuation") + 1] == "👤 Insiders"
 
 
 def test_the_dcf_tab_sits_directly_before_the_valuation_tab():
@@ -201,7 +224,7 @@ def test_summary_is_the_tab_that_opens():
 
 def test_every_built_tab_module_exposes_render():
     """The shell dispatches by that name and nothing else."""
-    for module in (summary, financials, dcf, valuation, placeholders):
+    for module in (summary, financials, dcf, valuation, insiders, placeholders):
         assert callable(getattr(module, "render", None)), module.__name__
     assert not hasattr(dcf, "render_page")
 

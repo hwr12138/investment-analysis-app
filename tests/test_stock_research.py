@@ -452,6 +452,9 @@ def stub_fetches(monkeypatch):
                         lambda *a, **k: _actions([]))
     monkeypatch.setattr(research_dataset.sharadar_client, "fetch_index_prices",
                         lambda *a, **k: pd.Series(dtype="float64"))
+    monkeypatch.setattr(research_dataset.sharadar_client,
+                        "fetch_insider_transactions",
+                        lambda *a, **k: pd.DataFrame())
 
     def statements(ticker, *, annual=True, ttm=False, asreported=False):
         return _statement_set(

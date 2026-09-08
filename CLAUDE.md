@@ -56,12 +56,13 @@ else. That is what Growth is, and it is why the top-level 🌱 Growth placeholde
 ### The Stock Research page
 
 The one feature that is a package on both layers rather than a pair of modules, because it
-carries nine tabs — one of which is itself a package, holding two sub-tabs:
+carries ten tabs — one of which is itself a package, holding two sub-tabs:
 
 ```
 app/views/research/            __init__.py = the shell; one module per tab beside it
 app/views/research/valuation/  the ⚖️ tab: shell + table + multiples + growth
-app/logic/research/            formatting, comparison ← summary, valuation, growth ← dataset
+app/logic/research/            formatting, comparison ← summary, valuation, growth,
+                               insiders ← dataset
 ```
 
 `views/research/__init__.py` owns the ticker box, the search gate, the session snapshot and
@@ -182,6 +183,18 @@ Origin.UNAVAILABLE, reason)` — never a plausible-looking constant, never zero.
 periods and report how many they actually used. Nothing is zero-filled, interpolated, or carried
 forward.
 
+**SF2 signs the shares, not the value.** Insider dollar flow is
+`transactionshares × transactionpricepershare` — computed in `logic/research/insiders.py` and
+nowhere else. `transactionvalue` is an unsigned magnitude *and* null on 48% of rows, so summing
+it counts every sale as a purchase and misses half the trades. Nor may every transaction code be
+summed: only `P` and `S` are decisions at a market price, and compensation mechanics outnumber
+open-market purchases forty-five to one. Both mistakes return the **wrong sign**, not a noisy
+number — TSLA's trailing year reads −$5,988m over all codes and +$22,635m over `transactionvalue`
+against a true **+$880m**. A third trap sits beside them: SEP's close is split-adjusted and SF2's
+filed price never is, so plotting the two together needs `insiders.split_adjusted_price` or every
+pre-split marker floats above the line. SF2 is deliberately **not** in `SIGN_FLIPPED` — that set
+negates positive magnitudes, and `transactionshares` is already correct.
+
 **Costs are negative** everywhere downstream of ingest. `sharadar_client.SIGN_FLIPPED` negates
 the indicators Sharadar publishes as positive magnitudes (`cor`, `opex`, `sgna`, `rnd`, `taxexp`,
 `intexp`). `capex` is *not* in that set — Sharadar already signs it negative.
@@ -292,12 +305,21 @@ since there is no Streamlit runtime.
 
 The ⚖️ Valuation tab is tested per-module, which is the layout the rest should move to —
 `test_research_valuation.py` and `test_research_growth.py` for the logic, and
-`..._controls.py` for each view. All four carry the `research_` prefix because
+`..._controls.py` for each view. All six carry the `research_` prefix because
 `test_valuation.py` was already taken by the **DCF** engine's `logic/dcf/valuation.py`: two
 unrelated modules share the name `valuation.py`, and the test files have to disambiguate what the
 modules themselves do not. `test_research_valuation_controls.py` covers the package shell and the
 shared grid as well as the Valuation body; `test_research_growth_controls.py` covers only what
-Growth words differently. The two older files still map onto the *pre-package* layout:
+Growth words differently.
+
+👤 Insiders follows the same split. The fixture behind it is a sixteen-row company in
+`conftest.py` priced at $100, built so that the naive total is **negative** and the correct one
+**positive** — that one assertion is the file's reason for existing. Every other row breaks
+exactly one thing: a restatement that duplicates a trade, a holdings-only pair carrying a bare
+`N` and a bare `D`, a quarter-straddling filing, an unpriced grant, a stale owner, a reported
+value that disagrees with shares times price, and a transaction code nobody has classified.
+
+The two older files still map onto the *pre-package* layout:
 `test_stock_research.py` covers all of `app/logic/research/` except the comparison tabs, and
 `test_research_page_controls.py` covers the shell plus three tab modules. Split them along their
 existing section headers when either is next touched substantially.

@@ -1,4 +1,4 @@
-"""Stock research page — one ticker, nine tabs, one module per tab.
+"""Stock research page — one ticker, ten tabs, one module per tab.
 
 The general-purpose "what is this company" page. This module is the shell: the
 ticker box, the search gate, the snapshot in session state, and the tab strip.
@@ -18,7 +18,7 @@ Three behaviours are deliberate and load-bearing:
 * **Changing the price window never refetches.** The full history is fetched
   once per search and every window is a slice of it, so the period buttons are
   free.
-* **Tab bodies fetch nothing** — with one exception. ``st.tabs`` renders all nine
+* **Tab bodies fetch nothing** — with one exception. ``st.tabs`` renders all ten
   on every rerun and tells Python nothing about which one is open, so anything
   that loaded data would fire on page load and on every window change. The DCF
   tab needs statements this page's search does not fetch, and it fetches them
@@ -36,9 +36,16 @@ import streamlit as st
 
 from app.data import sharadar_client
 from app.logic.research import dataset as research
-from app.views.research import dcf, financials, placeholders, summary, valuation
+from app.views.research import (
+    dcf,
+    financials,
+    insiders,
+    placeholders,
+    summary,
+    valuation,
+)
 
-#: Every tab, in display order — the one place the order is decided. The four
+#: Every tab, in display order — the one place the order is decided. The five
 #: built tabs are dispatched by name in :func:`render_page` and everything else
 #: must have a ``placeholders.PLACEHOLDERS`` entry, so a tab can be reordered
 #: here without touching the rendering, and a name that belongs to neither
@@ -47,6 +54,13 @@ from app.views.research import dcf, financials, placeholders, summary, valuation
 #: 💰 DCF sits directly before ⚖️ Valuation because the two answer the same
 #: question from opposite directions — intrinsic value from the cash flows, and
 #: what the market is paying for them — so they read as a pair.
+#:
+#: 👤 Insiders follows that pair because it is the check on what the pair
+#: concluded. The reader arrives having just formed a view of what the company
+#: is worth and what it costs, and "what are the people with the best
+#: information doing about it" is only a question once that view exists. Ahead
+#: of the pair it is a curiosity; after Peers and History it reads as an
+#: appendix.
 _TAB_ORDER = (
     "📊 Summary",
     "📄 Financials",
@@ -54,6 +68,7 @@ _TAB_ORDER = (
     "💵 Dividends",
     "💰 DCF",
     "⚖️ Valuation",
+    "👤 Insiders",
     "💰 Profitability",
     "🧭 Peers",
     "🕰️ History",
@@ -181,6 +196,9 @@ def render_page() -> None:
 
     with tabs["⚖️ Valuation"]:
         valuation.render(dataset)
+
+    with tabs["👤 Insiders"]:
+        insiders.render(dataset)
 
     for name, (what, source) in placeholders.PLACEHOLDERS.items():
         with tabs[name]:

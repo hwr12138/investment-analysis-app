@@ -487,6 +487,207 @@ def actions_response() -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Insider filings
+# ---------------------------------------------------------------------------
+#
+# Sixteen line items against a reference date of 2026-08-05, priced at $100 so
+# every total below is checkable by hand. Every one of them exists to break
+# something:
+#
+#   The sign flip. Summed over every transaction code the window nets
+#     **-789,350,000**; over open-market P and S alone it nets **+13,350,000**.
+#     One row does that — BIGHOLDER LP's -$800m gift — and it is the fixture's
+#     reason for existing. It is the TSLA case in miniature, where the same
+#     mistake read -$4,218m against a true +$220m.
+#   The unsigned value. Summing ``transactionvalue`` over the same P/S rows
+#     gives **+26,800,000**, because a $6m sale is stored as +6,000,000. That is
+#     wrong independently of the code filter, so the two traps are separable.
+#   Holdings-only rows. QUIET HOLDER files a Form 3 with a bare ``N`` and a bare
+#     ``D`` — no transaction, no shares, and a derivative balance that must not
+#     reach a share count.
+#   The restatement. LATE FILER's sale is reported twice, once under ``4`` and
+#     again under ``RESTATED - 4``; both survive a naive read and double-count
+#     one trade.
+#   The quarter straddle. That same sale is dated 30 June and filed 2 July, so
+#     bucketing on the filing date puts it in the wrong quarter.
+#   The cluster boundary. Three buyers inside fourteen days qualify; TINY BUYER
+#     is inside the window but under the value floor, and SOLO BUYER is over the
+#     floor but seven weeks late. Neither may join.
+#   Everything else. An unpriced grant, a stale owner last seen in 2021, a
+#     reported value that disagrees with shares times price, a derivative leg of
+#     an option exercise, and a transaction code nobody has classified yet.
+
+#: ``SHARADAR/SF2`` columns. As with SF1 and ACTIONS the order is deliberately
+#: not the order the client reads them in. ``issuername`` is present and null on
+#: every row, exactly as the live table has it, so a test can prove nothing
+#: downstream reaches for it even when a response ignores the projection.
+SF2_COLUMNS = [
+    "ownername",
+    "ticker",
+    "transactioncode",
+    "filingdate",
+    "formtype",
+    "issuername",
+    "officertitle",
+    "isdirector",
+    "isofficer",
+    "istenpercentowner",
+    "transactiondate",
+    "securityadcode",
+    "sharesownedbeforetransaction",
+    "transactionshares",
+    "sharesownedfollowingtransaction",
+    "transactionpricepershare",
+    "transactionvalue",
+    "securitytitle",
+    "directorindirect",
+    "natureofownership",
+    "rownum",
+]
+
+
+def _sf2_row(
+    owner,
+    code,
+    filed,
+    transacted,
+    adcode,
+    before,
+    shares,
+    following,
+    price,
+    value,
+    *,
+    form="4",
+    title=None,
+    director="N",
+    officer="N",
+    tenpct="N",
+    security="Com",
+    holding="D",
+    nature=None,
+    rownum=1,
+):
+    """One line item, in :data:`SF2_COLUMNS` order."""
+    return [
+        owner,
+        "TEST",
+        code,
+        filed,
+        form,
+        None,  # issuername — null on 100% of live rows
+        title,
+        director,
+        officer,
+        tenpct,
+        transacted,
+        adcode,
+        before,
+        shares,
+        following,
+        price,
+        value,
+        security,
+        holding,
+        nature,
+        rownum,
+    ]
+
+
+#: Emitted unsorted, as the API returns them.
+SF2_ROWS = [
+    # The lone gift that inverts every naive total. A 10% owner, so the row is
+    # also the case for labelling that role rather than filtering it out.
+    _sf2_row("BIGHOLDER LP", "G", "2026-06-17", "2026-06-15", "ND",
+             88_000_000, -8_000_000, 80_000_000, 100.00, 800_000_000,
+             tenpct="Y", holding="I", nature="Charitable trust"),
+    # An option exercise's derivative leg. Priced at the strike, not the market.
+    _sf2_row("JANE OFFICER", "M", "2026-07-06", "2026-07-02", "DD",
+             250_000, -50_000, 200_000, 12.00, 600_000,
+             title="CFO", officer="Y", security="Opt", rownum=2),
+    # Cluster member two.
+    _sf2_row("SAM DIRECTOR", "P", "2026-06-18", "2026-06-16", "NA",
+             40_000, 60_000, 100_000, 100.00, 6_000_000, director="Y"),
+    # Inside the cluster window, but under the value floor.
+    _sf2_row("TINY BUYER", "P", "2026-06-15", "2026-06-12", "NA",
+             900, 100, 1_000, 100.00, 10_000, title="VP", officer="Y"),
+    # Stale: last seen five years ago, so the roster must drop and count it.
+    _sf2_row("OLD TIMER", "S", "2021-05-12", "2021-05-10", "ND",
+             9_000, -1_000, 8_000, 40.00, 40_000, director="Y"),
+    # Reported value disagrees with shares times price: 250,000 against 200,000.
+    _sf2_row("JANE OFFICER", "S", "2026-04-17", "2026-04-15", "ND",
+             92_000, -2_000, 90_000, 100.00, 250_000, title="CFO", officer="Y"),
+    # Holdings only, non-derivative. Bare ``N``, no code, no shares.
+    _sf2_row("QUIET HOLDER", None, "2026-03-02", None, "N",
+             12_000, 0, 12_000, None, None, form="3", director="Y"),
+    # Cluster member one, and the largest open-market buy in the fixture.
+    _sf2_row("JANE OFFICER", "P", "2026-06-12", "2026-06-10", "NA",
+             30_000, 120_000, 150_000, 100.00, 12_000_000,
+             title="CFO", officer="Y"),
+    # The straddle: transacted 30 June, filed 2 July.
+    _sf2_row("LATE FILER", "S", "2026-07-02", "2026-06-30", "ND",
+             20_000, -5_000, 15_000, 100.00, 500_000, title="SVP", officer="Y"),
+    # Holdings only, derivative. Bare ``D``; 500,000 option contracts that must
+    # never be added to a share balance.
+    _sf2_row("QUIET HOLDER", None, "2026-03-02", None, "D",
+             500_000, 0, 500_000, None, None,
+             form="3", director="Y", security="Opt", rownum=2),
+    # A grant with no price: there is no dollar flow, and zero is not the answer.
+    _sf2_row("SAM DIRECTOR", "A", "2026-05-22", "2026-05-20", "NA",
+             30_000, 10_000, 40_000, None, None, director="Y"),
+    # Cluster member three, which is what tips it over `cluster_min_buyers`.
+    _sf2_row("ANA DIRECTOR", "P", "2026-06-19", "2026-06-18", "NA",
+             5_000, 20_000, 25_000, 100.00, 2_000_000, director="Y"),
+    # Over the value floor but seven weeks after the cluster.
+    _sf2_row("SOLO BUYER", "P", "2026-08-03", "2026-08-01", "NA",
+             600, 400, 1_000, 100.00, 40_000, title="VP", officer="Y"),
+    # A sale whose reported value is unsigned: +6,000,000 for 60,000 shares out.
+    _sf2_row("JANE OFFICER", "S", "2026-07-06", "2026-07-02", "ND",
+             150_000, -60_000, 90_000, 100.00, 6_000_000,
+             title="CFO", officer="Y"),
+    # Shares withheld to pay the tax on the exercise above. Filed same day,
+    # higher `rownum` — so this, not the sale, is Jane's end-of-day balance.
+    _sf2_row("JANE OFFICER", "F", "2026-07-06", "2026-07-02", "ND",
+             90_000, -18_000, 72_000, 100.00, 1_800_000,
+             title="CFO", officer="Y", rownum=3),
+    # A code nobody has classified. Surfaced, never dropped.
+    _sf2_row("FUTURE FILER", "Z", "2026-05-07", "2026-05-05", "ND",
+             10_000, -3_000, 7_000, 100.00, 300_000, director="Y"),
+    # The restatement of LATE FILER's sale above. Same trade, later filing.
+    _sf2_row("LATE FILER", "S", "2026-07-10", "2026-06-30", "ND",
+             20_000, -5_000, 15_000, 100.00, 500_000,
+             form="RESTATED - 4", title="SVP", officer="Y"),
+]
+
+
+def sf2_payload(rows: list | None = None, *, cursor: str | None = None) -> dict:
+    """Wraps insider rows in the datatable envelope."""
+    rows = SF2_ROWS if rows is None else rows
+    return _envelope(SF2_COLUMNS, rows, cursor)
+
+
+@pytest.fixture
+def insiders_response() -> dict:
+    """A complete ``SHARADAR/SF2`` response for the fixture company."""
+    return sf2_payload()
+
+
+@pytest.fixture
+def insider_frame(monkeypatch):
+    """The frame as ``ResearchDataset.insiders`` holds it.
+
+    Routed through the real ``_fetch_insider_transactions`` rather than built
+    here, on the ``stub_universe`` doctrine: the sort, the coercions, the
+    restatement dedup and the column projection then run for real instead of
+    being reimplemented in the fixture and proved against themselves.
+    """
+    from app.data import sharadar_client as sc
+
+    monkeypatch.setattr(sc, "_get", lambda table, query, **kwargs: sf2_payload())
+    return sc._fetch_insider_transactions("TEST")
+
+
+# ---------------------------------------------------------------------------
 # The cross-sectional universe
 # ---------------------------------------------------------------------------
 #
@@ -645,6 +846,8 @@ def stub_universe(monkeypatch) -> None:
             return universe_sf1_payload()
         if table == "TICKERS":
             return directory_payload()
+        if table == "SF2":
+            return sf2_payload()
         raise AssertionError(f"unexpected table {table}")
 
     monkeypatch.setattr(sc, "_get", route)

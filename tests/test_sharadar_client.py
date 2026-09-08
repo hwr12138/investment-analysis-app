@@ -213,6 +213,145 @@ def test_no_actions_returns_an_empty_frame_rather_than_raising(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Insider transactions
+# ---------------------------------------------------------------------------
+
+
+def test_insider_rows_are_sorted_by_filing_date(monkeypatch, insiders_response):
+    monkeypatch.setattr(sc, "_get", lambda *a, **k: insiders_response)
+    frame = sc._fetch_insider_transactions("TEST")
+    dates = frame["filingdate"].tolist()
+    assert dates == sorted(dates)
+
+
+def test_two_lines_in_one_filing_are_ordered_by_row_number(
+    monkeypatch, insiders_response
+):
+    """Each line carries a running balance; only the last one is end-of-day."""
+    monkeypatch.setattr(sc, "_get", lambda *a, **k: insiders_response)
+    frame = sc._fetch_insider_transactions("TEST")
+    same_day = frame[
+        (frame["ownername"] == "JANE OFFICER")
+        & (frame["filingdate"] == pd.Timestamp("2026-07-06"))
+    ]
+    assert same_day["rownum"].tolist() == [1, 2, 3]
+    assert same_day["sharesownedfollowingtransaction"].iloc[-1] == 72_000
+
+
+def test_insider_dates_and_numbers_are_typed(monkeypatch, insiders_response):
+    monkeypatch.setattr(sc, "_get", lambda *a, **k: insiders_response)
+    frame = sc._fetch_insider_transactions("TEST")
+    assert str(frame["filingdate"].dtype).startswith("datetime64")
+    assert str(frame["transactiondate"].dtype).startswith("datetime64")
+    # Numeric, but not necessarily float: ``transactionshares`` comes back
+    # integral when no row in the response is null, and float when one is.
+    assert frame["transactionshares"].dtype.kind in "if"
+    assert frame["transactionpricepershare"].dtype.kind == "f"
+
+
+def test_a_restated_filing_supersedes_the_row_it_corrects(
+    monkeypatch, insiders_response
+):
+    """Ninety of 142 live restated rows repeated an existing trade verbatim."""
+    monkeypatch.setattr(sc, "_get", lambda *a, **k: insiders_response)
+    frame = sc._fetch_insider_transactions("TEST")
+    sale = frame[
+        (frame["ownername"] == "LATE FILER")
+        & (frame["transactiondate"] == pd.Timestamp("2026-06-30"))
+    ]
+    assert len(sale) == 1
+    assert sale["formtype"].iloc[0] == "RESTATED - 4"
+
+
+def test_holdings_rows_are_never_deduplicated_against_each_other(
+    monkeypatch, insiders_response
+):
+    """Every field of the transaction key is null or zero on a Form 3 line, so
+    one blanket dedup would collapse a company's whole holdings history."""
+    monkeypatch.setattr(sc, "_get", lambda *a, **k: insiders_response)
+    frame = sc._fetch_insider_transactions("TEST")
+    quiet = frame[frame["ownername"] == "QUIET HOLDER"]
+    assert len(quiet) == 2
+    assert set(quiet["securityadcode"]) == {"N", "D"}
+
+
+def test_the_transaction_value_column_is_left_unsigned(
+    monkeypatch, insiders_response
+):
+    """The client does not repair it. Quirk 6 documents it; the logic layer
+    ignores the column entirely and multiplies shares by price instead."""
+    monkeypatch.setattr(sc, "_get", lambda *a, **k: insiders_response)
+    frame = sc._fetch_insider_transactions("TEST")
+    sale = frame[
+        (frame["ownername"] == "JANE OFFICER")
+        & (frame["transactioncode"] == "S")
+        & (frame["transactionshares"] == -60_000)
+    ].iloc[0]
+    assert sale["transactionshares"] == -60_000
+    assert sale["transactionvalue"] == 6_000_000  # positive, as sent
+
+
+def test_sf2_columns_are_not_in_sign_flipped():
+    """That set negates positive magnitudes; ``transactionshares`` is already
+    correct and negating it would invert every trade."""
+    assert not sc.SIGN_FLIPPED & {"transactionshares", "transactionvalue"}
+
+
+def test_insider_codes_are_upper_cased_on_ingest(monkeypatch):
+    """Consumers test frozenset membership, which cannot miss on case."""
+    from tests.conftest import SF2_COLUMNS, SF2_ROWS, sf2_payload
+
+    lowered = [list(row) for row in SF2_ROWS]
+    code = SF2_COLUMNS.index("transactioncode")
+    for row in lowered:
+        if row[code]:
+            row[code] = row[code].lower()
+    monkeypatch.setattr(sc, "_get", lambda *a, **k: sf2_payload(lowered))
+    frame = sc._fetch_insider_transactions("TEST")
+    assert "p" not in set(frame["transactioncode"].dropna())
+    assert "P" in set(frame["transactioncode"].dropna())
+
+
+def test_the_insider_fetch_filters_on_the_filing_date(monkeypatch, insiders_response):
+    """``transactiondate`` is not one of SF2's filterable parameters, so the
+    window has to be requested on the filing date and trimmed downstream."""
+    seen: list[dict] = []
+
+    def capture(table, query, **kwargs):
+        seen.append(query)
+        return insiders_response
+
+    monkeypatch.setattr(sc, "_get", capture)
+    sc._fetch_insider_transactions("TEST", "2021-08-05")
+    assert seen[0]["filingdate.gte"] == "2021-08-05"
+    assert "transactiondate.gte" not in seen[0]
+
+
+def test_the_insider_projection_omits_the_always_null_issuer_name(
+    monkeypatch, insiders_response
+):
+    """Null on 0 of 31,724 live rows; ``fetch_ticker_meta`` is the name source."""
+    seen: list[dict] = []
+
+    def capture(table, query, **kwargs):
+        seen.append(query)
+        return insiders_response
+
+    monkeypatch.setattr(sc, "_get", capture)
+    sc._fetch_insider_transactions("TEST")
+    projection = seen[0]["qopts.columns"]
+    assert "issuername" not in projection
+    assert "rownum" in projection  # part of the primary key, kept deliberately
+
+
+def test_no_insider_filings_returns_an_empty_frame_rather_than_raising(monkeypatch):
+    """A company whose insiders have never filed is ordinary, not an error."""
+    empty = {"datatable": {"columns": [], "data": []}, "meta": {"next_cursor_id": None}}
+    monkeypatch.setattr(sc, "_get", lambda *a, **k: empty)
+    assert sc._fetch_insider_transactions("TEST").empty
+
+
+# ---------------------------------------------------------------------------
 # Zero-versus-missing
 # ---------------------------------------------------------------------------
 

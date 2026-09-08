@@ -47,6 +47,18 @@ from app.logic.research.summary import (
 #: rows for a company listed throughout, which is one page.
 HISTORY_FLOOR = "1990-01-01"
 
+#: Years of insider filings fetched. Requested on ``filingdate``, the only date
+#: SF2 lets a caller filter on — ``transactiondate`` is not a filterable
+#: parameter — which makes it a superset rather than a compromise: a Form 4
+#: follows the trade it reports, so every transaction in the window is in the
+#: filing window too. The surplus is old trades filed late, and
+#: ``logic/research/insiders`` trims it on the transaction date.
+#:
+#: Roughly one request per ticker — 13,295 rows for twelve tickers over five
+#: years arrived in two — which is cheaper than the four statement fetches
+#: below, so this goes in the eager fetch rather than behind a button.
+INSIDER_LOOKBACK_YEARS = 5
+
 
 @dataclass(frozen=True)
 class ResearchDataset:
@@ -57,6 +69,13 @@ class ResearchDataset:
     ohlcv: pd.DataFrame
     daily: pd.DataFrame
     actions: pd.DataFrame
+    #: Every Form 3/4/5 line item filed in the last :data:`INSIDER_LOOKBACK_YEARS`
+    #: years, as SF2 publishes them. **Raw on purpose**: ``transactionvalue`` is
+    #: unsigned here and the holdings-only rows are still in, because
+    #: ``logic/research/insiders`` owns every interpretation. Empty when SF2
+    #: could not be fetched, or when nobody has filed — which is an ordinary
+    #: outcome for a small company, not an error.
+    insiders: pd.DataFrame
     #: The four SF1 frames at each dimension the page shows. Empty when that
     #: dimension could not be fetched — see :func:`_statement_frames`.
     statements_ttm: dict[str, pd.DataFrame]
@@ -115,6 +134,15 @@ def load_research(ticker: str, *, today: date | None = None) -> ResearchDataset:
     daily = _tolerant(lambda: sharadar_client.fetch_daily_metrics(ticker))
     actions = _tolerant(lambda: sharadar_client.fetch_actions(ticker))
 
+    insider_since = (
+        pd.Timestamp(today) - pd.DateOffset(years=INSIDER_LOOKBACK_YEARS)
+    ).date()
+    insiders = _tolerant(
+        lambda: sharadar_client.fetch_insider_transactions(
+            ticker, insider_since.isoformat()
+        )
+    )
+
     statements_ttm = _statement_frames(ticker, annual=False, ttm=True)
     statements_annual = _statement_frames(ticker, annual=True)
     statements_quarterly = _statement_frames(ticker, annual=False)
@@ -158,6 +186,7 @@ def load_research(ticker: str, *, today: date | None = None) -> ResearchDataset:
         ohlcv=ohlcv,
         daily=daily,
         actions=actions,
+        insiders=insiders,
         statements_ttm=statements_ttm,
         statements_annual=statements_annual,
         statements_quarterly=statements_quarterly,
