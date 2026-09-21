@@ -230,29 +230,12 @@ def split_adjusted_price(frame: pd.DataFrame, actions: pd.DataFrame) -> pd.Serie
     Only the *position* needs this. The dollar flow is shares times price and
     both are as-filed, so their product is the real amount and is invariant: this
     is deliberately not applied anywhere in :func:`signed_flow`.
+
+    **Divides**, where the holdings tab's share counts multiply — see
+    :func:`app.data.sharadar_client.split_factors`, which both sit on.
     """
     price = pd.to_numeric(frame["transactionpricepershare"], errors="coerce")
-    if actions.empty or not {"action", "date", "value"}.issubset(actions.columns):
-        return price
-
-    splits = actions[actions["action"] == sharadar_client.SPLIT_ACTION]
-    splits = splits[pd.to_numeric(splits["value"], errors="coerce").gt(0)]
-    if splits.empty:
-        return price
-
-    when = pd.to_datetime(splits["date"], errors="coerce")
-    ratios = pd.to_numeric(splits["value"], errors="coerce")
-    order = when.argsort()
-    when, ratios = when.iloc[order], ratios.iloc[order]
-
-    # Product of every split *after* each transaction date: reverse-cumulative,
-    # indexed by how many splits precede the trade.
-    trailing = ratios[::-1].cumprod()[::-1].tolist() + [1.0]
-    transacted = pd.to_datetime(frame["transactiondate"], errors="coerce")
-    position = when.values.searchsorted(transacted.values, side="left")
-    factor = pd.Series(
-        [trailing[int(i)] for i in position], index=frame.index, dtype="float64"
-    )
+    factor = sharadar_client.split_factors(actions, frame["transactiondate"])
     return price / factor
 
 

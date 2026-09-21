@@ -28,6 +28,7 @@ from app.views import research as page
 from app.views.research import (
     dcf,
     financials,
+    holdings,
     insiders,
     placeholders,
     summary,
@@ -185,6 +186,7 @@ _BUILT = (
     "💰 DCF",
     "⚖️ Valuation",
     "👤 Insiders",
+    "🏛️ Holdings",
 )
 
 
@@ -192,8 +194,9 @@ def test_the_built_tabs_are_not_placeholders():
     """Summary, Financials, DCF, Valuation and Insiders are built; the rest are not."""
     for built in _BUILT:
         assert built not in placeholders.PLACEHOLDERS, built
-    # Still five: Insiders was never a placeholder, so nothing was promoted and
-    # no unrelated entry should be deleted to keep this number moving.
+    # Still five: neither Insiders nor Holdings was ever a placeholder, so
+    # nothing was promoted and no unrelated entry should be deleted to keep
+    # this number moving.
     assert len(placeholders.PLACEHOLDERS) == 5
 
 
@@ -211,6 +214,12 @@ def test_the_insiders_tab_follows_the_valuation_pair():
     assert order[order.index("⚖️ Valuation") + 1] == "👤 Insiders"
 
 
+def test_the_holdings_tab_follows_the_insiders_tab():
+    """The two ownership tabs read as a pair: inside the company, then outside."""
+    order = list(page._TAB_ORDER)
+    assert order[order.index("👤 Insiders") + 1] == "🏛️ Holdings"
+
+
 def test_the_dcf_tab_sits_directly_before_the_valuation_tab():
     """Intrinsic value and what the market pays for it read as a pair."""
     order = list(page._TAB_ORDER)
@@ -224,7 +233,9 @@ def test_summary_is_the_tab_that_opens():
 
 def test_every_built_tab_module_exposes_render():
     """The shell dispatches by that name and nothing else."""
-    for module in (summary, financials, dcf, valuation, insiders, placeholders):
+    for module in (
+        summary, financials, dcf, valuation, insiders, holdings, placeholders
+    ):
         assert callable(getattr(module, "render", None)), module.__name__
     assert not hasattr(dcf, "render_page")
 

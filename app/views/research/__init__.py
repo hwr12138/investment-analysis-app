@@ -1,4 +1,4 @@
-"""Stock research page — one ticker, ten tabs, one module per tab.
+"""Stock research page — one ticker, eleven tabs, one module per tab.
 
 The general-purpose "what is this company" page. This module is the shell: the
 ticker box, the search gate, the snapshot in session state, and the tab strip.
@@ -18,14 +18,22 @@ Three behaviours are deliberate and load-bearing:
 * **Changing the price window never refetches.** The full history is fetched
   once per search and every window is a slice of it, so the period buttons are
   free.
-* **Tab bodies fetch nothing** — with one exception. ``st.tabs`` renders all ten
-  on every rerun and tells Python nothing about which one is open, so anything
-  that loaded data would fire on page load and on every window change. The DCF
-  tab needs statements this page's search does not fetch, and it fetches them
-  itself, ungated: that is a second set of Sharadar requests per company
-  searched, paid whether or not anyone opens the tab. Its own caches keep it to
-  once per company. See ``app.logic.research.dataset`` for what the same
-  constraint costs the tabs that do read the snapshot.
+* **Tab bodies fetch nothing** — with two exceptions, which take opposite
+  routes. ``st.tabs`` renders all eleven bodies on every rerun and tells Python
+  nothing about which one is open, so anything that loaded data would fire on
+  page load and on every window change.
+
+  💰 DCF needs statements this page's search does not fetch, and it fetches them
+  **ungated**: a second set of Sharadar requests per company searched, paid
+  whether or not anyone opens the tab, with its own caches keeping it to once
+  per company. 🏛️ Holdings needs a third set — four requests and about ten
+  seconds for a register most searches never look at — and takes the other
+  route: **nothing is fetched until a button is pressed.** That is the rule
+  CLAUDE.md's UI conventions have stated since before any tab followed it, and
+  Holdings is the first that does.
+
+  See ``app.logic.research.dataset`` for what the same constraint costs the
+  tabs that do read the snapshot.
 """
 
 from __future__ import annotations
@@ -39,6 +47,7 @@ from app.logic.research import dataset as research
 from app.views.research import (
     dcf,
     financials,
+    holdings,
     insiders,
     placeholders,
     summary,
@@ -61,6 +70,14 @@ from app.views.research import (
 #: information doing about it" is only a question once that view exists. Ahead
 #: of the pair it is a curiosity; after Peers and History it reads as an
 #: appendix.
+#:
+#: 🏛️ Holdings sits beside 👤 Insiders for the same reason those two sit where
+#: they do: they are an ownership pair. One asks what the people *inside* the
+#: company are doing with its stock, the other what the institutions *outside*
+#: it are, and they share a shape — a position table, a history, and a
+#: reconciliation of everything excluded — so a reader crossing between them
+#: reads one form twice. Holdings comes second because a 13F register is context
+#: for a view, not a substitute for one.
 _TAB_ORDER = (
     "📊 Summary",
     "📄 Financials",
@@ -69,6 +86,7 @@ _TAB_ORDER = (
     "💰 DCF",
     "⚖️ Valuation",
     "👤 Insiders",
+    "🏛️ Holdings",
     "💰 Profitability",
     "🧭 Peers",
     "🕰️ History",
@@ -199,6 +217,9 @@ def render_page() -> None:
 
     with tabs["👤 Insiders"]:
         insiders.render(dataset)
+
+    with tabs["🏛️ Holdings"]:
+        holdings.render(dataset)
 
     for name, (what, source) in placeholders.PLACEHOLDERS.items():
         with tabs[name]:

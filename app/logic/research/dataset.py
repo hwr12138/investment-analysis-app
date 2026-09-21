@@ -10,7 +10,10 @@ reader opens the tab that needs it. The blocker is not this function:
 ``st.tabs`` renders every tab body on every rerun and reports no active tab to
 Python, so "fetch when opened" is not expressible until the tab strip becomes a
 control that reports its selection. Until then a tab whose data is expensive
-gates behind its own button, which is what the DCF tab does.
+gates behind its own button — which the 🏛️ Holdings tab does, and is the only
+one that does. The DCF tab, despite what this sentence used to claim, does not:
+its own docstring says so, and it pays a second set of requests on every search
+instead.
 
 The peer universe was expected to be where that stopped being affordable, on
 the assumption that comparables cost one ``DAILY`` request each. They do not:
@@ -34,7 +37,7 @@ from datetime import date
 import pandas as pd
 
 from app.data import sharadar_client
-from app.logic.research import comparison
+from app.logic.research import comparison, holdings
 from app.logic.research.summary import (
     BENCHMARK,
     StatTile,
@@ -221,6 +224,86 @@ def _peer_universe(daily: pd.DataFrame, today: date) -> pd.DataFrame:
         _tolerant(lambda: sharadar_client.fetch_universe_fundamentals(since.isoformat())),
         _tolerant(sharadar_client.fetch_ticker_directory),
     )
+
+
+@dataclass(frozen=True)
+class HoldingsData:
+    """The 🏛️ Holdings tab's own fetch, kept out of :class:`ResearchDataset`.
+
+    This is the one thing on the page a reader asks for rather than receives.
+    Four requests and roughly ten seconds, against a tab most searches never
+    open, so it sits behind that tab's button instead of in the eager snapshot —
+    which makes it the first real instance of the rule this module's docstring
+    has been stating in the abstract.
+    """
+
+    ticker: str
+    #: SF3A, every quarter since 2013. Funds the ownership and breadth history.
+    summary: pd.DataFrame
+    #: SF3 detail for the last two quarters, every holder. Funds the register,
+    #: the quarter-on-quarter move, churn and concentration.
+    current: pd.DataFrame
+    #: SF3 detail for the largest holders across every quarter. The sparklines.
+    history: pd.DataFrame
+    #: ``investorid`` → ``investorname``. Keyed on a date, so one entry serves
+    #: every company looked at that day.
+    names: pd.DataFrame
+    loaded_at: date
+
+
+def load_holdings(
+    ticker: str, *, today: date | None = None, top: int = 20
+) -> HoldingsData:
+    """Fetch the institutional register for one company.
+
+    Four requests, and the order is forced: the summary names the quarters, the
+    quarters bound the detail, and the detail ranks the holders whose history the
+    fourth request asks for. Only the last two can be reordered, and neither can
+    be merged with an earlier one.
+
+    Everything below the summary is :func:`_tolerant`. A register with no
+    sparklines beats no register, and an unresolved ``investorid`` still shows as
+    a code rather than a blank.
+    """
+    ticker = ticker.strip().upper()
+    today = today or date.today()
+
+    summary = sharadar_client.fetch_institutional_summary(ticker)
+    quarters = (
+        sorted(pd.to_datetime(summary["date"], errors="coerce").dropna().unique())
+        if not summary.empty and "date" in summary.columns
+        else []
+    )
+    if not quarters:
+        empty = pd.DataFrame()
+        return HoldingsData(ticker, summary, empty, empty, empty, today)
+
+    # Two quarters: the register, and something to measure it against.
+    since = pd.Timestamp(quarters[-2] if len(quarters) > 1 else quarters[-1])
+    current = _tolerant(
+        lambda: sharadar_client.fetch_institutional_holders(
+            ticker, since.date().isoformat()
+        )
+    )
+
+    names = _tolerant(
+        lambda: sharadar_client.fetch_investor_directory(
+            pd.Timestamp(quarters[-1]).date().isoformat()
+        )
+    )
+    investorids = holdings.top_investorids(
+        current, pd.DataFrame(), tolerances=holdings.HoldingsTolerances(top_holders=top)
+    )
+    history = (
+        _tolerant(
+            lambda: sharadar_client.fetch_institutional_holders(
+                ticker, None, investorids
+            )
+        )
+        if investorids
+        else pd.DataFrame()
+    )
+    return HoldingsData(ticker, summary, current, history, names, today)
 
 
 def _tolerant(fetch, empty=None):

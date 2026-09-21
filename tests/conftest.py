@@ -20,6 +20,7 @@ No test in this suite touches the network.
 
 from __future__ import annotations
 
+import pandas as pd
 import pytest
 
 _EDGAR = "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0000000999"
@@ -672,6 +673,222 @@ def insiders_response() -> dict:
     return sf2_payload()
 
 
+# ---------------------------------------------------------------------------
+# Institutional holdings
+# ---------------------------------------------------------------------------
+#
+# Eleven holders over six quarters against a reference date of 2026-08-05, with
+# a **2:1 split on 2025-10-15** sitting between Q3 and Q4. Every filed unit count
+# after the split is therefore double the one before it without anyone buying
+# anything, which is the first thing the tab has to survive.
+#
+# Prices are $100 before the split and $50 after, so ``value`` is continuous
+# across it while ``units`` steps. That is what makes the pair testable: a
+# correct reading has flat value *and* flat split-adjusted units, and a naive one
+# reports the whole register doubling.
+#
+# The cast, each breaking exactly one thing:
+#
+#   BLKROK  an index manager holding a genuinely constant position — after split
+#           adjustment its six quarters are identical, so any residual movement
+#           is the split leaking through. Also exercises the real
+#           ``INDEX_MANAGERS`` constant rather than a test-only stand-in.
+#   VANGRD  the restructuring. 1,200 → 400 at Q5, a -67% "sale" …
+#   VANGPM  … while this sibling appears from nothing at 760. The family goes
+#           1,200 → 1,160, or -3%. These are the **real** Vanguard investorids,
+#           so the shipped ``FILER_FAMILIES`` map is what gets tested — a
+#           fixture with invented ids would prove only that the plumbing works.
+#   ACTIVE  a real -47% cut at Q6 with no sibling appearing. Must NOT be
+#           flagged as a restructuring — it is the false positive to avoid.
+#   NEWCO   opens a position at Q6.
+#   EXITED  closes one at Q6.
+#   GAPPY   holds, vanishes for two quarters, returns. The gap must stay a gap.
+#   STEADY  moves +0.2%, under the materiality floor: unchanged, not added.
+#   TRIMMER -12.5%, ADDER +30% — the two that are material.
+#   CUSTOD  a custodial bank, in the register but not an owner in any useful
+#           sense; TINYHO a small holder, so the top-N cut has something to cut.
+
+_SF3_QUARTERS = (
+    "2025-03-31", "2025-06-30", "2025-09-30",
+    "2025-12-31", "2026-03-31", "2026-06-30",
+)
+
+#: The split that sits between Q3 and Q4. Fed to the tests as an ACTIONS frame.
+SF3_SPLIT_DATE = "2025-10-15"
+SF3_SPLIT_RATIO = 2.0
+
+#: Filed unit counts in **thousands**, as the vendor publishes them, one entry
+#: per quarter. ``None`` means the holder filed nothing that quarter — an
+#: absence, never a zero.
+_SF3_POSITIONS = {
+    "BLKROK": (1_000, 1_000, 1_000, 2_000, 2_000, 2_000),
+    "VANGRD": (600, 600, 600, 1_200, 400, 400),
+    "VANGPM": (None, None, None, None, 760, 760),
+    "ACTIVE": (300, 350, 400, 900, 950, 500),
+    "NEWCO": (None, None, None, None, None, 250),
+    "EXITED": (200, 200, 200, 400, 400, None),
+    "GAPPY": (150, None, None, 300, 300, 300),
+    "STEADY": (100, 100, 100, 200, 200, 200.4),
+    "TRIMMER": (80, 80, 80, 160, 160, 140),
+    "ADDER": (50, 50, 50, 100, 100, 130),
+    "CUSTOD": (90, 90, 90, 180, 180, 180),
+    "TINYHO": (10, 10, 10, 20, 20, 20),
+}
+
+#: ``investorid`` → the name SF3B resolves it to. FAMONE and FAMTWO share a
+#: leading token on purpose; nothing else in the file does.
+SF3_INVESTOR_NAMES = {
+    "BLKROK": "BLACKROCK INC",
+    "VANGRD": "VANGUARD CAPITAL MANAGEMENT LLC",
+    "VANGPM": "VANGUARD PORTFOLIO MANAGEMENT LLC",
+    "ACTIVE": "ACTIVE STOCKPICKERS LP",
+    "NEWCO": "NEWCOMER PARTNERS LLC",
+    "EXITED": "DEPARTED ASSET MANAGEMENT",
+    "GAPPY": "INTERMITTENT ADVISORS INC",
+    "STEADY": "STEADFAST TRUST CO",
+    "TRIMMER": "TRIMMING CAPITAL LLC",
+    "ADDER": "ACCUMULATOR FUNDS INC",
+    "CUSTOD": "CUSTODY BANK CORP",
+    "TINYHO": "SMALL HOLDINGS LLC",
+}
+
+
+def _sf3_price(index: int) -> float:
+    """$100 a share before the split, $50 after."""
+    return 100.0 if index < 3 else 50.0
+
+
+#: ``SHARADAR/SF3`` columns, in an order the client does not read them in.
+SF3_COLUMNS = ["investorid", "ticker", "units", "date", "securitytype", "value"]
+
+
+def _sf3_rows() -> list:
+    rows = []
+    for investorid, series in _SF3_POSITIONS.items():
+        for index, units in enumerate(series):
+            if units is None:
+                continue
+            price = _sf3_price(index)
+            rows.append(
+                [
+                    investorid,
+                    "TEST",
+                    units,
+                    _SF3_QUARTERS[index],
+                    "SHR",
+                    # value in millions: thousands of units x 1,000 x price.
+                    round(units * 1_000 * price / 1_000_000, 6),
+                ]
+            )
+    # Emitted newest-first so the client's sort is exercised.
+    return list(reversed(rows))
+
+
+SF3_ROWS = _sf3_rows()
+
+#: ``SHARADAR/SF3A`` columns, likewise reordered.
+SF3A_COLUMNS = [
+    "ticker", "date", "name", "shrunits", "shrholders", "shrvalue",
+    "cllholders", "cllunits", "cllvalue",
+    "putholders", "putunits", "putvalue",
+    "percentoftotal", "totalvalue",
+]
+
+
+def _sf3a_rows() -> list:
+    rows = []
+    for index, quarter in enumerate(_SF3_QUARTERS):
+        price = _sf3_price(index)
+        held = [s[index] for s in _SF3_POSITIONS.values() if s[index] is not None]
+        units = sum(held)
+        value = round(units * 1_000 * price / 1_000_000, 6)
+        # Small, deliberately non-zero option books so those columns are typed
+        # and rescaled by something other than the share path.
+        calls, puts = 50.0, 80.0 + index
+        cll = round(calls * 1_000 * price / 1_000_000, 6)
+        put = round(puts * 1_000 * price / 1_000_000, 6)
+        rows.append(
+            [
+                "TEST", quarter, "TESTCO INC", units, len(held), value,
+                2, calls, cll, 3, puts, put,
+                0.01, round(value + cll + put, 6),
+            ]
+        )
+    return list(reversed(rows))
+
+
+SF3A_ROWS = _sf3a_rows()
+
+SF3B_COLUMNS = ["investorname", "investorid"]
+
+SF3B_ROWS = [
+    [name, investorid] for investorid, name in SF3_INVESTOR_NAMES.items()
+]
+
+
+def sf3_payload(rows: list | None = None, *, cursor: str | None = None) -> dict:
+    return _envelope(SF3_COLUMNS, SF3_ROWS if rows is None else rows, cursor)
+
+
+def sf3a_payload(rows: list | None = None, *, cursor: str | None = None) -> dict:
+    return _envelope(SF3A_COLUMNS, SF3A_ROWS if rows is None else rows, cursor)
+
+
+def sf3b_payload(rows: list | None = None, *, cursor: str | None = None) -> dict:
+    return _envelope(SF3B_COLUMNS, SF3B_ROWS if rows is None else rows, cursor)
+
+
+def sf3_splits() -> pd.DataFrame:
+    """The ACTIONS frame carrying the fixture's split, as the snapshot holds it."""
+    return pd.DataFrame(
+        [
+            {
+                "date": pd.Timestamp(SF3_SPLIT_DATE),
+                "action": "split",
+                "value": SF3_SPLIT_RATIO,
+                "ticker": "TEST",
+            }
+        ]
+    )
+
+
+@pytest.fixture
+def holdings_response() -> dict:
+    """A complete ``SHARADAR/SF3`` response for the fixture company."""
+    return sf3_payload()
+
+
+@pytest.fixture
+def holders_frame(monkeypatch):
+    """Every quarter of the fixture register, as the tab holds it.
+
+    Routed through the real ``_fetch_institutional_holders`` so the thousands and
+    millions conversions run for real rather than being reimplemented here.
+    """
+    from app.data import sharadar_client as sc
+
+    monkeypatch.setattr(sc, "_get", lambda table, query, **kwargs: sf3_payload())
+    return sc._fetch_institutional_holders("TEST")
+
+
+@pytest.fixture
+def holdings_summary(monkeypatch):
+    """The SF3A history for the fixture company."""
+    from app.data import sharadar_client as sc
+
+    monkeypatch.setattr(sc, "_get", lambda table, query, **kwargs: sf3a_payload())
+    return sc._fetch_institutional_summary("TEST")
+
+
+@pytest.fixture
+def investor_names(monkeypatch):
+    """The ``investorid`` → ``investorname`` directory."""
+    from app.data import sharadar_client as sc
+
+    monkeypatch.setattr(sc, "_get", lambda table, query, **kwargs: sf3b_payload())
+    return sc._fetch_investor_directory("2026-06-30")
+
+
 @pytest.fixture
 def insider_frame(monkeypatch):
     """The frame as ``ResearchDataset.insiders`` holds it.
@@ -848,6 +1065,12 @@ def stub_universe(monkeypatch) -> None:
             return directory_payload()
         if table == "SF2":
             return sf2_payload()
+        if table == "SF3":
+            return sf3_payload()
+        if table == "SF3A":
+            return sf3a_payload()
+        if table == "SF3B":
+            return sf3b_payload()
         raise AssertionError(f"unexpected table {table}")
 
     monkeypatch.setattr(sc, "_get", route)

@@ -455,6 +455,10 @@ def stub_fetches(monkeypatch):
     monkeypatch.setattr(research_dataset.sharadar_client,
                         "fetch_insider_transactions",
                         lambda *a, **k: pd.DataFrame())
+    for name in ("fetch_institutional_summary", "fetch_institutional_holders",
+                 "fetch_investor_directory"):
+        monkeypatch.setattr(research_dataset.sharadar_client, name,
+                            lambda *a, **k: pd.DataFrame())
 
     def statements(ticker, *, annual=True, ttm=False, asreported=False):
         return _statement_set(

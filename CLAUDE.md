@@ -56,13 +56,13 @@ else. That is what Growth is, and it is why the top-level 🌱 Growth placeholde
 ### The Stock Research page
 
 The one feature that is a package on both layers rather than a pair of modules, because it
-carries ten tabs — one of which is itself a package, holding two sub-tabs:
+carries eleven tabs — one of which is itself a package, holding two sub-tabs:
 
 ```
 app/views/research/            __init__.py = the shell; one module per tab beside it
 app/views/research/valuation/  the ⚖️ tab: shell + table + multiples + growth
 app/logic/research/            formatting, comparison ← summary, valuation, growth,
-                               insiders ← dataset
+                               insiders, holdings ← dataset
 ```
 
 `views/research/__init__.py` owns the ticker box, the search gate, the session snapshot and
@@ -195,6 +195,28 @@ filed price never is, so plotting the two together needs `insiders.split_adjuste
 pre-split marker floats above the line. SF2 is deliberately **not** in `SIGN_FLIPPED` — that set
 negates positive magnitudes, and `transactionshares` is already correct.
 
+**SF3 publishes thousands and millions, and never restates for splits.** The client
+rescales `units` and `value` to raw shares and raw dollars in `_normalise_sf3`, for the same
+reason `_DAILY_MILLIONS` exists. What it cannot fix column-wise is the split: SF3's share
+counts are **as filed**, so BlackRock's Tesla position reads 7,720 then 38,020 across the 2020
+five-for-one and a quarter-on-quarter change calls that a **+392% purchase**. SF1's `sharesbas`
+*is* restated, so an ownership ratio across the two is wrong by the split factor at every
+earlier quarter. `sharadar_client.split_factors` is the shared bridge and the two consumers use
+it in **opposite directions** — `insiders.split_adjusted_price` divides a filed price,
+`holdings.split_adjusted_units` multiplies a filed count.
+
+**Two more things about 13F that are judgements, not data, and are therefore printed.**
+`holdings.FILER_FAMILIES` sums a manager's filing entities before anything is ranked: Vanguard's
+2026-Q1 reorganisation reads −33% on Apple as one entity and −5.9% as the family, and because
+the reorganisation is the manager's, the same phantom sale lands on *every* company it holds.
+Deriving that map by matching filer names was tried and measured — 32 flags on Apple, almost all
+spurious, pairing BANK OF MARIN with BANK OF AMERICA — so it is curated, incomplete by
+construction, and shown to the reader. `holdings.INDEX_MANAGERS` is the same kind of claim.
+Alongside them: SF3 `value` is a *market* value, so it moves when the price does and is never
+differenced across quarters; reported ownership above 100% is real (Etsy reads 114.3%) and is
+never clamped; and a gap in a holder's series is **not** a zero, which is the deliberate inverse
+of `insiders.periodic_flow`.
+
 **Costs are negative** everywhere downstream of ingest. `sharadar_client.SIGN_FLIPPED` negates
 the indicators Sharadar publishes as positive magnitudes (`cor`, `opex`, `sgna`, `rnd`, `taxexp`,
 `intexp`). `capex` is *not* in that set — Sharadar already signs it negative.
@@ -280,6 +302,12 @@ superset of what the multiples need, so widening it replaced a second fetch rath
 one. The only collapse it still does is the **restatement**: two filings for the same
 `calendardate` keep the later `datekey`.
 
+**🏛️ Holdings is the one tab that gates.** Four requests and ~10s for a 13F register most
+searches never open, so nothing is fetched until its button is pressed; the payload lives in
+`holdings_*` session state and the tab clears it when it notices the page's ticker has moved,
+exactly as the DCF clears its own. It is the first tab to implement the rule stated above — the
+DCF, despite what `dataset.py` used to claim, does not gate.
+
 Session state is keyed `dcf_*`. The tab clears its own acknowledgements and assumption overrides
 via `_session_reset` when it notices the page's ticker has moved; the research page's Search does
 **not** reach across and do it, so there is one place that decides when a model is stale.
@@ -312,12 +340,18 @@ modules themselves do not. `test_research_valuation_controls.py` covers the pack
 shared grid as well as the Valuation body; `test_research_growth_controls.py` covers only what
 Growth words differently.
 
-👤 Insiders follows the same split. The fixture behind it is a sixteen-row company in
+👤 Insiders and 🏛️ Holdings follow the same split. The fixture behind it is a sixteen-row company in
 `conftest.py` priced at $100, built so that the naive total is **negative** and the correct one
 **positive** — that one assertion is the file's reason for existing. Every other row breaks
 exactly one thing: a restatement that duplicates a trade, a holdings-only pair carrying a bare
 `N` and a bare `D`, a quarter-straddling filing, an unpriced grant, a stale owner, a reported
 value that disagrees with shares times price, and a transaction code nobody has classified.
+
+The 🏛️ Holdings fixture is an eleven-holder register over six quarters with a 2:1 split in the
+middle and Vanguard's **real** investorids for the two entities that reorganise — so the shipped
+`FILER_FAMILIES` and `INDEX_MANAGERS` constants are what the tests exercise, not test-only
+stand-ins. Its headline assertions are that a split reads as no purchase, that the entity split
+reads −67% alone and −3.3% as a family, and that a holder's missing quarters stay missing.
 
 The two older files still map onto the *pre-package* layout:
 `test_stock_research.py` covers all of `app/logic/research/` except the comparison tabs, and
