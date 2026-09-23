@@ -1,11 +1,10 @@
 """The 🏛️ Holdings tab: who owns the company, from SEC form 13F.
 
-**The one tab on this page that fetches only when asked.** Four Sharadar
-requests and about ten seconds, against a tab most searches never open — and
-``st.tabs`` renders every body on every rerun with no way to tell which is on
-screen, so an eager fetch would bill every search on the page for a tab nobody
-opened. That is the case CLAUDE.md reserves the button gate for, and this is the
-first tab to actually use it.
+Fetches the 13F register the first time it is opened, through
+``dataset.load_holdings`` — five requests and the slowest load on the page, so
+the spinner says what it is waiting for. It used to sit behind a button of its
+own, from before the tab strip could report which tab was open; it now loads the
+way every other tab does.
 
 Two things the tab says out loud rather than assuming the reader knows:
 
@@ -28,14 +27,10 @@ import streamlit as st
 from plotly.subplots import make_subplots
 
 from app.formatting import format_count, format_money, format_pct
+from app.logic.research import dataset as research_dataset
 from app.logic.research import holdings as research
 from app.logic.research.dataset import HoldingsData, ResearchDataset
-
-#: Session keys this tab owns. Cleared when the page's ticker moves, by this
-#: module rather than by the shell — one place decides when the payload is stale,
-#: the same division ``dcf._session_reset`` keeps.
-_DATA_KEY = "holdings_data"
-_TICKER_KEY = "holdings_ticker"
+from app.views.components import load_tab
 
 #: Percentage widths for the holder table's seven columns.
 _HOLDER_WIDTHS = (24, 9, 13, 11, 17, 12, 14)
@@ -97,10 +92,6 @@ _HOLDINGS_CSS = """
 .hold-scroll { overflow-x: auto; }
 .hold-scroll .hold-table { min-width: 720px; }
 
-.hold-gate {
-    border: 1px dashed rgba(250, 250, 250, 0.22); border-radius: 0.4rem;
-    padding: 0.9rem 1.1rem; margin: 0.5rem 0 0.75rem 0;
-}
 
 @media (max-width: 760px) {
     .hold-heads.hold-heads, .hold-heads tbody, .hold-heads tr { display: block; }
@@ -114,17 +105,24 @@ _HOLDINGS_CSS = """
 """
 
 
+@st.cache_data(show_spinner=False, ttl=60 * 60 * 6)
+def _load_cached(ticker: str, as_of) -> HoldingsData:
+    """The tab's payload, per company per day — the key every tab's loader uses."""
+    return research_dataset.load_holdings(ticker, today=as_of)
+
+
 def render(dataset: ResearchDataset) -> None:
     # Each tab injects its own CSS rather than the page injecting one shared
     # block: the rules travel with the markup they style.
     st.markdown(_HOLDINGS_CSS, unsafe_allow_html=True)
 
-    if st.session_state.get(_TICKER_KEY) != dataset.ticker:
-        _session_reset(dataset.ticker)
-
-    data = st.session_state.get(_DATA_KEY)
+    data = load_tab(
+        f"13F filings for {dataset.ticker}",
+        _load_cached,
+        dataset.ticker,
+        dataset.loaded_at,
+    )
     if data is None:
-        _render_gate(dataset)
         return
 
     tolerances = research.HoldingsTolerances()
@@ -134,7 +132,7 @@ def render(dataset: ResearchDataset) -> None:
         history=data.history,
         names=data.names,
         actions=dataset.actions,
-        statements=dataset.statements_quarterly.get("DERIVED", pd.DataFrame()),
+        statements=data.derived,
         tolerances=tolerances,
         today=dataset.loaded_at,
     )
@@ -164,53 +162,6 @@ def render(dataset: ResearchDataset) -> None:
     _render_churn(built.churn, built, dataset.currency, tolerances)
 
     _render_sources(built, data, tolerances)
-
-
-def _session_reset(ticker: str) -> None:
-    """Drops the previous company's register.
-
-    Owned here, as the DCF tab owns its ``dcf_*`` keys: this tab notices on its
-    next render that the page's ticker has moved and clears itself. The page's
-    own ``_session_reset`` deliberately does not reach across, so there is one
-    place that decides when this payload is stale.
-    """
-    st.session_state.pop(_DATA_KEY, None)
-    st.session_state[_TICKER_KEY] = ticker
-
-
-def _render_gate(dataset: ResearchDataset) -> None:
-    """What the tab shows before anyone asks for the data.
-
-    States the cost and — the part that matters — **which sections it fills**,
-    so a reader can tell a page that has not been asked to load from one that
-    loaded and found nothing.
-    """
-    st.markdown(
-        '<div class="hold-gate">'
-        "<b>Institutional holders are loaded on request.</b><br>"
-        "Four Sharadar requests, about ten seconds: every 13F filer holding "
-        f"{escape(dataset.ticker)} in the two most recent quarters, thirteen "
-        "years of ownership history, and the quarter-by-quarter position of the "
-        "largest holders. Cached for the rest of the day.<br>"
-        "<span style='opacity:0.7'>It fills the ownership chart, the holder "
-        "table and its history, the new/closed/added/trimmed counts, and the "
-        "concentration figures.</span>"
-        "</div>",
-        unsafe_allow_html=True,
-    )
-    if st.button("Load institutional holders", key="holdings_load", type="primary"):
-        from app.logic.research import dataset as research_dataset
-
-        try:
-            with st.spinner(f"Loading 13F filings for {dataset.ticker}…"):
-                st.session_state[_DATA_KEY] = research_dataset.load_holdings(
-                    dataset.ticker, today=dataset.loaded_at
-                )
-        except Exception as error:  # noqa: BLE001 - surfaced, never swallowed
-            # The gate stays up rather than a half-filled table going out.
-            st.error(f"**Could not load 13F filings.** {error}")
-            return
-        st.rerun()
 
 
 # ---------------------------------------------------------------------------

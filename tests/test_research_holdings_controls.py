@@ -1,15 +1,11 @@
-"""``app/views/research/holdings.py`` — the gate, the sparklines, the table.
+"""``app/views/research/holdings.py`` — the load, the sparklines, the table.
 
 Streamlit is never started. The view exposes pure string and figure builders and
-the tests call those; ``render`` is only ever read with ``inspect``, except where
-the gate's session lifecycle is exercised against a dict standing in for
-``st.session_state``.
+the tests call those; ``render`` is only ever read with ``inspect``.
 
-Two things here are not layout and matter more than the rest: this is the only
-tab in the app that fetches on request rather than eagerly, so its gate has a
-lifecycle nothing else has; and the sparkline draws a series with holes in it,
-where the difference between a gap and a zero is the difference between "did not
-file" and "held nothing".
+One thing here is not layout and matters more than the rest: the sparkline draws
+a series with holes in it, where the difference between a gap and a zero is the
+difference between "did not file" and "held nothing".
 """
 
 from __future__ import annotations
@@ -49,23 +45,6 @@ def _prose(function) -> str:
         for node in ast.walk(tree)
         if isinstance(node, ast.Constant) and isinstance(node.value, str)
     )
-
-
-class _SessionState(dict):
-    """Stands in for ``st.session_state``, which needs a Streamlit runtime."""
-
-    def __getattr__(self, name):
-        return self[name]
-
-    def __setattr__(self, name, value):
-        self[name] = value
-
-
-@pytest.fixture
-def session(monkeypatch) -> _SessionState:
-    state = _SessionState()
-    monkeypatch.setattr(view.st, "session_state", state)
-    return state
 
 
 @pytest.fixture
@@ -119,54 +98,40 @@ def test_the_css_is_namespaced_to_this_tab():
 
 
 # ---------------------------------------------------------------------------
-# The gate — the only one in the app
+# The load — the same as every other tab's
 # ---------------------------------------------------------------------------
 
 
-def test_nothing_is_loaded_until_the_button_is_pressed(session):
-    """``st.tabs`` renders every body on every rerun, so an eager fetch here
-    would bill every search on the page for a tab nobody opened."""
+def test_the_register_loads_on_render_through_the_shared_helper():
+    """No button: the page runs only the open tab, so a tab's body rendering is
+    the reader asking for it."""
     body = inspect.getsource(view.render)
-    assert "_render_gate(dataset)" in body
-    assert body.index("_render_gate") < body.index("research.build")
-    assert not session
+    assert "load_tab(" in body
+    assert body.index("load_tab(") < body.index("research.build")
+    assert "st.button" not in inspect.getsource(view)
 
 
-def test_the_gate_says_what_it_costs_and_what_it_fills():
-    """A reader must be able to tell a page not yet asked to load from one that
-    loaded and found nothing."""
-    prose = _prose(view._render_gate)
-    assert "Four Sharadar requests" in prose
-    assert "ten seconds" in prose
-    assert "ownership chart" in prose and "holder table" in prose
+def test_a_failed_load_draws_nothing_else():
+    """``load_tab`` has already drawn the failure; a half-filled register must
+    not follow it."""
+    body = inspect.getsource(view.render)
+    assert "if data is None:\n        return" in body
 
 
-def test_a_new_ticker_clears_the_previous_register(session):
-    """The tab notices the page's ticker has moved and clears itself; the
-    shell's own reset deliberately does not reach across."""
-    session[view._DATA_KEY] = "AAPL payload"
-    session[view._TICKER_KEY] = "AAPL"
-
-    view._session_reset("MSFT")
-
-    assert view._DATA_KEY not in session
-    assert session[view._TICKER_KEY] == "MSFT"
+def test_the_payload_is_cached_per_company_per_day():
+    assert list(inspect.signature(view._load_cached).parameters) == ["ticker", "as_of"]
 
 
-def test_the_reset_leaves_other_tabs_state_alone(session):
-    session["dcf_output"] = {"company": "AAPL"}
-    session["research_period"] = "5Y"
-
-    view._session_reset("MSFT")
-
-    assert session["dcf_output"] == {"company": "AAPL"}
-    assert session["research_period"] == "5Y"
+def test_the_tab_keeps_nothing_in_session_state():
+    """The cache is keyed on the company, so there is no payload to clear when
+    the page's ticker moves — and no second place deciding when it is stale."""
+    assert "session_state" not in inspect.getsource(view)
 
 
-def test_a_failed_load_leaves_the_gate_up_rather_than_a_half_filled_table():
-    body = inspect.getsource(view._render_gate)
-    assert "except" in body
-    assert body.index("st.error") < body.index("st.rerun")
+def test_the_share_count_comes_with_the_register():
+    """Ownership divides by SF1's restated count, which now arrives with the
+    tab's own payload rather than on the snapshot."""
+    assert "statements=data.derived" in inspect.getsource(view.render)
 
 
 # ---------------------------------------------------------------------------

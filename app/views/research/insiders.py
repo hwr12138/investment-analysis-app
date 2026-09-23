@@ -1,7 +1,8 @@
 """The 👤 Insiders tab: open-market Form 4 activity, against the price.
 
-Fetches nothing — the filings arrive on the snapshot, and the price line is a
-slice of the OHLCV history the page already has.
+Fetches the filings the first time it is opened, through
+``dataset.load_insiders``; the price line is a slice of the OHLCV history the
+snapshot already has.
 
 **The legend is not decoration on this tab.** Open-market purchases are roughly
 one row in 120 live, and Apple went five years without a single one, so a tab
@@ -19,8 +20,10 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from app.formatting import format_count, format_money
+from app.logic.research import dataset as research_dataset
 from app.logic.research import insiders as research
 from app.logic.research.dataset import ResearchDataset
+from app.views.components import load_tab
 
 #: Percentage widths for the roster's five columns. The owner and role carry the
 #: longest strings; the code is two characters.
@@ -98,13 +101,27 @@ _INSIDERS_CSS = """
 """
 
 
+@st.cache_data(show_spinner=False, ttl=60 * 60 * 6)
+def _load_cached(ticker: str, as_of) -> pd.DataFrame:
+    """The tab's payload, per company per day — the key every tab's loader uses."""
+    return research_dataset.load_insiders(ticker, today=as_of)
+
+
 def render(dataset: ResearchDataset) -> None:
     # Each tab injects its own CSS rather than the page injecting one shared
     # block: the rules travel with the markup they style.
     st.markdown(_INSIDERS_CSS, unsafe_allow_html=True)
 
+    frame = load_tab(
+        f"insider filings for {dataset.ticker}",
+        _load_cached,
+        dataset.ticker,
+        dataset.loaded_at,
+    )
+    if frame is None:
+        return
+
     tolerances = research.InsiderTolerances()
-    frame = dataset.insiders
 
     if not research.usable(frame):
         st.info(
@@ -155,7 +172,7 @@ def render(dataset: ResearchDataset) -> None:
     roster = research.roster(frame, tolerances=tolerances, today=dataset.loaded_at)
     _render_roster(roster)
 
-    _render_sources(dataset, windows, roster, tolerances)
+    _render_sources(dataset, frame, windows, roster, tolerances)
 
 
 # ---------------------------------------------------------------------------
@@ -502,6 +519,7 @@ def _roster_html(rows: pd.DataFrame) -> str:
 
 def _render_sources(
     dataset: ResearchDataset,
+    frame: pd.DataFrame,
     windows: list[research.InsiderWindow],
     roster: research.InsiderRoster,
     tolerances: research.InsiderTolerances,
@@ -513,13 +531,13 @@ def _render_sources(
     deliberate filtering from a broken fetch.
     """
     panel = research.reconciliation(
-        dataset.insiders, tolerances=tolerances, today=dataset.loaded_at
+        frame, tolerances=tolerances, today=dataset.loaded_at
     )
     counted = panel[panel["Category"] == "Open market, priced"]
     shown = int(counted["Rows"].iloc[0]) if not counted.empty else 0
 
     with st.expander(
-        f"Sources & data status — {shown} of {len(dataset.insiders)} filed rows shown"
+        f"Sources & data status — {shown} of {len(frame)} filed rows shown"
     ):
         st.markdown(
             "**Where the figures come from.** `SHARADAR/SF2`, one row per line "

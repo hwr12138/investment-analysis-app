@@ -147,14 +147,16 @@ def verdict_cell(*, gap: float | None, text: str, favourable: bool | None) -> st
 # ---------------------------------------------------------------------------
 
 
-def render_heading(dataset: ResearchDataset, industry: str) -> None:
+def render_heading(
+    dataset: ResearchDataset, peer_universe: pd.DataFrame, industry: str
+) -> None:
     """What the medians are taken over, stated before the numbers are shown.
 
     Shared by both sub-tabs: they compare against the same peer group on the
     same day, and saying so twice in two different ways would invite the reader
     to wonder whether they differ.
     """
-    if dataset.peer_universe.empty:
+    if peer_universe.empty:
         st.warning(
             "The peer universe could not be loaded, so the industry medians are "
             "unavailable. The company's own current and five-year figures below "
@@ -172,8 +174,8 @@ def render_heading(dataset: ResearchDataset, industry: str) -> None:
         )
         return
 
-    peers = int((dataset.peer_universe["industry"] == industry).sum())
-    as_of = universe_date(dataset.peer_universe)
+    peers = int((peer_universe["industry"] == industry).sum())
+    as_of = universe_date(peer_universe)
     st.markdown(
         f"**{escape(dataset.name)}** against **{escape(industry)}** — "
         f"{peers} listed companies{f', priced {as_of}' if as_of else ''}."
@@ -182,6 +184,7 @@ def render_heading(dataset: ResearchDataset, industry: str) -> None:
 
 def render_sources(
     dataset: ResearchDataset,
+    peer_universe: pd.DataFrame,
     industry: str,
     comparisons: list[Comparison],
     *,
@@ -236,7 +239,7 @@ def render_sources(
             },
         )
 
-        as_of = universe_date(dataset.peer_universe) or "not loaded"
+        as_of = universe_date(peer_universe) or "not loaded"
         st.caption(
             f"Peer group: Sharadar's `industry` classification"
             f"{f' — {escape(industry)}' if industry else ''}, "

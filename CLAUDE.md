@@ -77,17 +77,21 @@ app/logic/research/            comparison ← summary, valuation, growth,
 ```
 
 `views/research/__init__.py` owns the ticker box, the search gate, the session snapshot and
-`_TAB_ORDER` — **the one place tab order is decided**. Each tab module exposes a `render`
-function taking exactly what that tab needs: the snapshot for the ones that read it, the bare
-ticker for `dcf`, which loads its own. There is no shared signature, because the dispatch is
+`_TAB_ORDER` — **the one place tab order is decided** — and draws the strip with
+`st.tabs(..., key="research_tab", on_change="rerun")`, rendering **only the tab whose `.open` is
+true** (see *Lazy tabs* under UI conventions). Each tab module exposes a `render` function taking
+exactly what that tab needs: the snapshot for the ones that read it, the bare ticker for `dcf`,
+which loads through the DCF engine instead. There is no shared signature, because the dispatch is
 explicit and a uniform one would hide that the DCF reads nothing from the snapshot. Each tab
 also owns its CSS, so the rules travel with the markup they style.
 
 On the logic side the dependencies run one way — `comparison` is shared, each
-tab module owns its arithmetic, and `dataset` sits on top because it assembles the snapshot. Its
-calls into `summary.build_key_stats` and `comparison.build_peer_universe` are the only upward
-edges, and both exist for the same reason: the snapshot is assembled once per search, so
-anything the tabs would otherwise recompute on every rerun is precomputed there.
+tab module owns its arithmetic, and `dataset` sits on top because it holds every network-touching
+loader: `load_research` (the snapshot — only what 📊 Summary draws) and one loader per tab beside
+it (`load_financials`, `load_insiders`, `load_peers`, `load_holdings`). Its calls into
+`summary.build_key_stats` and `comparison.build_peer_universe` are the only upward edges, and both
+exist for the same reason: the result is cached per company per day, so anything a tab would
+otherwise recompute on every rerun is precomputed there.
 
 `logic/research/comparison.py` holds what the two ⚖️ sub-tabs genuinely share — the `Comparison`
 record, the median-and-percentile summary, the peer universe join, the industry lookup. What it
@@ -120,9 +124,10 @@ those names. Functions that cross modules are public inside the package; the res
 paid for moves. Both answer per metric in the same three columns — current, the company's own 5Y
 median, the industry median — over one peer universe, and a metric that cannot fill all three is
 not shown. The package shell injects the one `.val-*` stylesheet and draws the sub-tab strip;
-`table.py` owns the grid and the four cells the bodies render identically. **This is the only
-nested `st.tabs` in the app**, so both bodies build on every rerun — affordable only because
-both are pure computation over the snapshot.
+`table.py` owns the grid and the four cells the bodies render identically. The shell loads the
+peer universe once (`dataset.load_peers`) and hands it to both bodies, which fetch nothing. **This
+is the only nested `st.tabs` in the app**, and it is stateful like the outer strip, so only the
+open sub-tab's body is built.
 
 **Trailing-only, deliberately.** Forward multiples were dropped because yfinance supplies forward
 EPS and revenue only per-ticker by scrape, so forward *industry* medians would cost thousands of
@@ -280,8 +285,61 @@ because the research page spelled all three keywords and the DCF spelled two.
 
 ## UI conventions
 
+### Lazy tabs
+
+**Only the open tab runs.** Both tab strips are `st.tabs(..., key=..., on_change="rerun")`:
+switching tabs reruns the script, and each `TabContainer.open` says which body is on screen, so
+the shell skips every other one. That needs **Streamlit ≥ 1.57**, pinned in `requirements.txt`
+— an older build returns `None` from `.open` and the page would render no tab at all.
+
+Everything about loading follows from it:
+
+- **Search fetches only what 📊 Summary draws** (`load_research`, ~9 requests, ~4s cold). Every
+  other tab fetches its own **the first time it is opened**, through a `_load_cached(ticker,
+  as_of)` wrapper in its own module and `components.load_tab`, which draws the same spinner and
+  the same blocking notice on failure for every tab. No tab has a load button, and none keeps its
+  payload in session state — the cache is keyed on the company, so there is nothing to clear
+  when the ticker moves.
+- **The requests inside a loader go out together**, through `app/data/parallel.gather`, which
+  carries the Streamlit run context into its worker threads and re-raises the first failure in
+  submission order. A tolerated fetch is wrapped in `_tolerant` *before* it is handed over. The
+  ticker's `TICKERS` record goes first and alone, because the statement fetches read it through
+  the cache and concurrent misses would each pay for it.
+- **One cache entry per underlying request, shared across tabs.** `_fetch_statements` reads the
+  *cached* `fetch_ticker_meta`, price routing reads the cached `fetch_price_tables`, and
+  `fetch_ohlcv` and the DCF's `fetch_prices` both slice one cached full-history `_price_rows`. A
+  bare `_fetch_*` call inside another fetcher silently re-requests: that was six of the 23
+  requests a search used to make. `test_stock_research.py` counts requests per table to keep it
+  that way.
+- **The selected tab is a viewing preference**, like the price window: the page's
+  `_session_reset` leaves `research_tab` alone, so a reader on ⚖️ Valuation who searches another
+  ticker lands on its Valuation.
+
+Measured on the live API: search 27.6s → 3.8s; Financials ~1.2s and Insiders ~1.4s on first
+open; the DCF makes **no** requests once Financials has been opened; Valuation's peer universe
+~6s for the first company of the day and nothing after; 🏛️ Holdings 12–24s — still the slowest,
+because its five requests form a forced chain (summary → quarter's detail → top holders' history)
+and SF3 answers slowly.
+
+The peer universe costs a fixed amount, not one request per comparable. `DAILY` filtered on a
+date with no ticker returns every listed company in a single page — measured at 5,446 rows in
+~1.1s. All three universe fetches (`fetch_universe_daily`, `fetch_universe_fundamentals`,
+`fetch_ticker_directory`) are keyed on a date alone, never on a ticker, and `load_peers` is keyed
+on the company's last market session, so **one cache entry serves every company searched that
+day**. Keep it that way: a universe fetch that took a ticker would turn a fixed cost back into a
+per-company one.
+
+`fetch_universe_fundamentals` reaches back **eighteen months** (`UNIVERSE_LOOKBACK_DAYS`) and
+returns *every* period in the window rather than one row per ticker, because the growth
+comparison needs both ends of a year-on-year. 36,199 rows over four pages in ~4.8s, and it is a
+superset of what the multiples need, so widening it replaced a second fetch rather than adding
+one. The only collapse it still does is the **restatement**: two filings for the same
+`calendardate` keep the later `datekey`.
+
+### The DCF tab
+
 The DCF tab has **no Compute gate**. It loads and values whatever ticker the page has searched,
-as soon as its body renders, and an assumption change is applied on the spot. Nothing on that tab
+as soon as the tab is opened, and an assumption change is applied on the spot. Nothing on that tab
 is ever drawn from a run that does not match the controls on screen — which is why the staleness
 notice it used to carry is gone rather than merely unused. Statements are always the **restated**
 (`MR`) series; `dcf_model.load_company` still takes `asreported`, but the page does not offer the
@@ -293,35 +351,6 @@ Two caches are what make that affordable, and both are load-bearing:
 - `_needs_run` against `_assumption_fingerprint` — the model, the checks and the workbook, per
   distinct assumption set. A field missing from that tuple is a **correctness** bug: the previous
   run's numbers would stay on screen looking current, with nothing to say so.
-
-The cost is real and was accepted deliberately: `st.tabs` renders every tab body on every rerun
-and reports **nothing to Python about which tab is open**, so the DCF's statements are fetched
-once per company searched whether or not anyone opens the tab. It is the same constraint that
-makes the placeholder tabs render nothing and `logic/research/dataset.py` fetch eagerly for every
-tab — "load when opened" is not expressible until the tab strip becomes a control that reports
-its selection. A tab whose data is expensive enough gates behind its own button until then.
-
-Peer comparison was expected to be where that bill came due, on the assumption that comparables
-cost one `DAILY` request each. **They do not.** `DAILY` filtered on a date with no ticker returns
-every listed company in a single page — measured at 5,446 rows in ~1.1s — so the cost is fixed.
-All three universe fetches (`fetch_universe_daily`, `fetch_universe_fundamentals`,
-`fetch_ticker_directory`) are keyed on a date alone, never on a ticker, so **one cache entry
-serves every company searched that day** and the second search pays nothing — measured at seven
-requests on the first search and zero on the next two. Keep it that way: a universe fetch that
-took a ticker would turn a fixed cost back into a per-company one.
-
-`fetch_universe_fundamentals` reaches back **eighteen months** (`UNIVERSE_LOOKBACK_DAYS`) and
-returns *every* period in the window rather than one row per ticker, because the growth
-comparison needs both ends of a year-on-year. 36,199 rows over four pages in ~4.8s, and it is a
-superset of what the multiples need, so widening it replaced a second fetch rather than adding
-one. The only collapse it still does is the **restatement**: two filings for the same
-`calendardate` keep the later `datekey`.
-
-**🏛️ Holdings is the one tab that gates.** Four requests and ~10s for a 13F register most
-searches never open, so nothing is fetched until its button is pressed; the payload lives in
-`holdings_*` session state and the tab clears it when it notices the page's ticker has moved,
-exactly as the DCF clears its own. It is the first tab to implement the rule stated above — the
-DCF, despite what `dataset.py` used to claim, does not gate.
 
 Session state is keyed `dcf_*`. The tab clears its own acknowledgements and assumption overrides
 via `_session_reset` when it notices the page's ticker has moved; the research page's Search does
@@ -343,7 +372,10 @@ wrongly**.
 the refactor is wrong or the snapshot needs updating with a stated reason.
 
 Tests take the network away by patching **`app.data.sharadar.transport._get`** — every table
-module calls it through the module attribute, so that one patch reaches all of them. A test that
+module calls it through the module attribute, so that one patch reaches all of them. An autouse
+fixture in `conftest.py` clears `st.cache_data` before every test, because the private fetchers
+read each other through the cached public ones and a company cached by one test would otherwise
+answer for the next. A test that
 needs a client internal (`_fetch_statements`, `_sf1_frames`, …) imports the submodule that owns
 it as `sh_<module>`; `sharadar_client` re-exports only the public API.
 

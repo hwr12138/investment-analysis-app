@@ -39,9 +39,35 @@ def _fetch_price_rows(
     return frame.dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
 
 
+@st.cache_data(show_spinner=False, ttl=3600)
+def _price_rows(ticker: str) -> pd.DataFrame:
+    """Every SEP/SFP row for one ticker — the one entry both price shapes slice.
+
+    ``fetch_ohlcv`` (the research page, from 1990) and ``fetch_prices`` (the DCF,
+    from the start of its beta window) used to ask for overlapping ranges under
+    separate cache keys, so every company searched paid for its price history
+    twice. A full history is ~7,100 rows for a company listed since the late
+    1990s — one page — so fetching all of it once and slicing costs nothing the
+    narrower request used to save.
+    """
+    return _fetch_price_rows(ticker, table=_price_table_for(ticker))
+
+
+def _between(rows: pd.DataFrame, start: str | None, end: str | None) -> pd.DataFrame:
+    """The rows whose ``date`` falls in ``[start, end]``, either bound optional."""
+    if rows.empty or "date" not in rows.columns:
+        return rows
+    keep = pd.Series(True, index=rows.index)
+    if start:
+        keep &= rows["date"] >= pd.Timestamp(start)
+    if end:
+        keep &= rows["date"] <= pd.Timestamp(end)
+    return rows[keep].reset_index(drop=True)
+
+
 def _price_table_for(ticker: str) -> str:
     """Which of SEP/SFP carries this ticker. Defaults to SEP for equities."""
-    return reference._fetch_price_tables((ticker.strip().upper(),)).get(
+    return reference.fetch_price_tables((ticker.strip().upper(),)).get(
         ticker.strip().upper(), "SEP"
     )
 
@@ -98,7 +124,7 @@ def fetch_daily_metrics(ticker: str, start: str | None = None) -> pd.DataFrame:
 
 
 def _fetch_prices(ticker: str, start: str | None = None) -> pd.DataFrame:
-    prices = _fetch_price_rows(ticker, table=_price_table_for(ticker), start=start)
+    prices = _between(_price_rows(ticker.strip().upper()), start, None)
     if prices.empty:
         raise TickerNotFoundError(
             f"Sharadar returned no price history for {ticker}.",
@@ -116,7 +142,9 @@ def _fetch_prices(ticker: str, start: str | None = None) -> pd.DataFrame:
         }
     )
 
-    daily = _fetch_daily_metrics(ticker, start=start)
+    # The cached full series, sliced — the same entry the research page's
+    # snapshot fills, so the DCF's DAILY request is a cache hit.
+    daily = _between(fetch_daily_metrics(ticker), start, None)
     if not daily.empty:
         merged = out.merge(
             daily[[c for c in ("date", "marketcap", "evebitda") if c in daily.columns]],
@@ -161,7 +189,7 @@ def _fetch_price_history(
     if not wanted:
         return pd.DataFrame()
 
-    routes = reference._fetch_price_tables(wanted)
+    routes = reference.fetch_price_tables(wanted)
     columns: dict[str, pd.Series] = {}
     for ticker in wanted:
         rows = _fetch_price_rows(
@@ -207,9 +235,7 @@ def fetch_index_prices(index_ticker: str, start_date: str, end_date: str) -> pd.
 
 def _fetch_ohlcv(ticker: str, start_date: str, end_date: str) -> pd.DataFrame:
     ticker = ticker.strip().upper()
-    rows = _fetch_price_rows(
-        ticker, table=_price_table_for(ticker), start=start_date, end=end_date
-    )
+    rows = _between(_price_rows(ticker), start_date, end_date)
     if rows.empty:
         return pd.DataFrame()
 

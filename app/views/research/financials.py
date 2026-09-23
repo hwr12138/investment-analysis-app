@@ -1,6 +1,8 @@
 """The 📄 Financials tab: the four statements, sectioned and reconciled.
 
-Fetches nothing — the statements arrive with the snapshot. The layout itself
+Fetches the annual and quarterly statements the first time it is opened,
+through ``dataset.load_financials``; the TTM dimension arrives with the
+snapshot, because Summary's tiles need it too. The layout itself
 lives in ``app.logic.statements``, deliberately outside ``app.logic.research``
 so that a second consumer needs no move.
 
@@ -26,8 +28,10 @@ import streamlit as st
 
 from app.formatting import format_date
 from app.logic import statements
-from app.logic.research.dataset import ResearchDataset
+from app.logic.research import dataset as research
+from app.logic.research.dataset import FinancialsData, ResearchDataset
 from app.provenance import Origin
+from app.views.components import load_tab
 
 _STATEMENT_CSS = """
 <style>
@@ -116,17 +120,28 @@ _STATEMENT_CSS = """
 """
 
 
+@st.cache_data(show_spinner=False, ttl=60 * 60 * 6)
+def _load_cached(ticker: str, as_of) -> FinancialsData:
+    """The tab's payload, per company per day — the key every tab's loader uses."""
+    return research.load_financials(ticker)
+
+
 def render(dataset: ResearchDataset) -> None:
     """The four statements, sectioned and reconciled.
 
-    Fetches nothing. ``st.tabs`` renders every tab body on every rerun, so this
-    runs whenever the reader changes the price window on Summary; everything it
-    needs is already in the snapshot.
+    Loads the annual and quarterly dimensions on first open; after that the
+    controls below re-slice frames already in the cache and fetch nothing.
     """
     st.markdown(_STATEMENT_CSS, unsafe_allow_html=True)
     st.subheader("Financials")
 
-    if not dataset.statements_annual and not dataset.statements_quarterly:
+    data = load_tab(
+        f"statements for {dataset.ticker}", _load_cached, dataset.ticker, dataset.loaded_at
+    )
+    if data is None:
+        return
+
+    if not data.annual and not data.quarterly:
         st.info(
             f"**Sharadar returned no fundamentals for {dataset.ticker}.** Nothing "
             "has been substituted. Prices and the summary statistics above are "
@@ -164,12 +179,12 @@ def render(dataset: ResearchDataset) -> None:
              "missing is itself worth knowing.",
     )
 
-    periodic = dataset.statements_annual if annual else dataset.statements_quarterly
+    periodic = data.annual if annual else data.quarterly
     # The balance sheet's leading column reads MRQ: it is a point-in-time
     # snapshot, and Sharadar's TTM dimension only repeats the latest quarter-end
     # balance anyway.
     latest = (
-        dataset.statements_quarterly
+        data.quarterly
         if spec.latest_source == "MRQ"
         else dataset.statements_ttm
     )
@@ -182,7 +197,7 @@ def render(dataset: ResearchDataset) -> None:
         currency=dataset.currency,
         units=statements.UNITS[unit_name or "Millions"],
         # Every period Sharadar returned. This is a slice of a frame already in
-        # session state, so the cost is a wider table, never a fetch.
+        # the cache, so the cost is a wider table, never a fetch.
         max_periods=None,
         show_empty=show_empty,
     )

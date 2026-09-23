@@ -77,13 +77,9 @@ def _dataset(ticker: str = "AAPL") -> research_dataset.ResearchDataset:
         ohlcv=ohlcv,
         daily=pd.DataFrame(),
         actions=pd.DataFrame(),
-        insiders=pd.DataFrame(),
         statements_ttm={},
-        statements_annual={},
-        statements_quarterly={},
         quarterly_ar=pd.DataFrame(),
         stats=[],
-        peer_universe=pd.DataFrame(),
         currency="USD",
         loaded_at=date(2026, 8, 5),
     )
@@ -230,6 +226,81 @@ def test_the_dcf_tab_sits_directly_before_the_valuation_tab():
 def test_summary_is_the_tab_that_opens():
     """Streamlit selects the first tab, so the order is the landing tab."""
     assert page._TAB_ORDER[0] == "📊 Summary"
+
+
+class _Tab:
+    """Stands in for a ``TabContainer``: a context manager with ``.open``."""
+
+    def __init__(self, open_: bool):
+        self.open = open_
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+@pytest.fixture
+def rendered(monkeypatch):
+    """Replaces every tab body with a recorder; returns (opener, calls, kwargs)."""
+    calls: list[str] = []
+    strip_kwargs: dict = {}
+    for module in (summary, financials, valuation, insiders, holdings):
+        monkeypatch.setattr(module, "render",
+                            lambda dataset, m=module: calls.append(m.__name__))
+    monkeypatch.setattr(dcf, "render", lambda ticker: calls.append(f"dcf:{ticker}"))
+    monkeypatch.setattr(placeholders, "render",
+                        lambda name, what, source: calls.append(f"placeholder:{name}"))
+
+    def open_tab(selected: str) -> None:
+        def tabs(labels, **kwargs):
+            strip_kwargs.update(kwargs)
+            return [_Tab(label == selected) for label in labels]
+
+        monkeypatch.setattr(page.st, "tabs", tabs)
+        page._render_tabs(_dataset("AAPL"), "AAPL")
+
+    return open_tab, calls, strip_kwargs
+
+
+def test_the_strip_reports_its_selection(rendered):
+    """Without ``on_change="rerun"`` every ``.open`` is None and nothing renders."""
+    open_tab, _, strip_kwargs = rendered
+    open_tab("📊 Summary")
+    assert strip_kwargs == {"key": page._TAB_KEY, "on_change": "rerun"}
+
+
+@pytest.mark.parametrize("label", page._TAB_ORDER)
+def test_only_the_open_tab_runs(rendered, label):
+    """The closed bodies neither fetch nor build — the whole of the latency fix."""
+    open_tab, calls, _ = rendered
+    open_tab(label)
+    assert len(calls) == 1, calls
+
+
+def test_each_tab_dispatches_to_its_own_module(rendered):
+    open_tab, calls, _ = rendered
+    expected = {
+        "📊 Summary": summary.__name__,
+        "📄 Financials": financials.__name__,
+        "💰 DCF": "dcf:AAPL",
+        "⚖️ Valuation": valuation.__name__,
+        "👤 Insiders": insiders.__name__,
+        "🏛️ Holdings": holdings.__name__,
+        **{name: f"placeholder:{name}" for name in placeholders.PLACEHOLDERS},
+    }
+    for label in page._TAB_ORDER:
+        calls.clear()
+        open_tab(label)
+        assert calls == [expected[label]], label
+
+
+def test_a_new_search_keeps_the_open_tab(session):
+    """Which tab a reader is on is a viewing preference, not a company fact."""
+    session[page._TAB_KEY] = "⚖️ Valuation"
+    page._session_reset("MSFT")
+    assert session[page._TAB_KEY] == "⚖️ Valuation"
 
 
 def test_every_built_tab_module_exposes_render():

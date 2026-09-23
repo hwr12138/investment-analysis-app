@@ -5,9 +5,8 @@ so the next person does not have to re-derive where the figures come from.
 Order is immaterial here — ``_TAB_ORDER`` in the package ``__init__`` decides
 that.
 
-Deliberately fetches nothing: ``st.tabs`` renders every tab body on every
-rerun, so a placeholder that loaded data would fire on page load and on every
-window change.
+Fetches nothing. A built tab that needs data loads it on first open, through
+``components.load_tab``, the way every built tab does.
 """
 
 from __future__ import annotations

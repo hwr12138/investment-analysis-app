@@ -3,8 +3,8 @@
 The one tab that loads its own data. :func:`render` takes the page's ticker
 rather than the snapshot, because none of what it shows comes from there: the
 model needs statements normalised and schema-resolved by ``app.logic.dcf``,
-which the research fetch does not do. It loads and values that ticker as soon as
-the tab body renders — see :func:`render` for what that costs.
+which the research fetch does not do. It loads and values that ticker the first
+time the tab is opened — see :func:`render`.
 
 This module is the tab's shell: the load, the two caches, the session
 lifecycle, and the order the page draws in. Each part of the page lives in its
@@ -79,8 +79,8 @@ def _load_company_cached(ticker: str) -> dcf_model.CompanyDataset:
     The fetchers underneath are cached individually, but the schema resolution
     and statement normalisation are not free either. Caching here means moving a
     slider re-runs the arithmetic and nothing else — no refetch, no re-parse.
-    It is also what keeps the ungated load in :func:`render` to once per company
-    rather than once per rerun.
+    It is also what keeps the load in :func:`render` to once per company rather
+    than once per rerun.
 
     Always the restated (``MR``) series. ``dcf_model.load_company`` still takes
     ``asreported``, and the export and provenance captions still read the flag
@@ -194,12 +194,12 @@ def render(ticker: str) -> None:
     the page is showing and the assumptions currently set — an assumption change
     is applied on the spot.
 
-    What that costs is one extra set of Sharadar requests per company searched,
-    whether or not the reader ever opens this tab: ``st.tabs`` renders every tab
-    body on every rerun and reports nothing to Python about which one is open.
-    Two caches keep it to exactly that — :func:`_load_company_cached` for the
-    fetch and normalisation, :func:`_needs_run` for the arithmetic — so a rerun
-    triggered by any other control on the page costs nothing here.
+    The page's tab strip runs only the open tab, so nothing here is fetched
+    until the reader opens it — and most of what it fetches then is already in
+    the cache: the statements the 📄 Financials tab and the snapshot asked for,
+    and the price and ``DAILY`` series Summary filled. Two caches keep a rerun
+    free after that — :func:`_load_company_cached` for the fetch and
+    normalisation, :func:`_needs_run` for the arithmetic.
     """
     st.markdown(_BANNER_CSS, unsafe_allow_html=True)
     st.subheader("DCF valuation")

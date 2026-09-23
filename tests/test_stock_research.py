@@ -469,15 +469,32 @@ def stub_fetches(monkeypatch):
     return monkeypatch
 
 
-def test_load_research_keeps_every_dimension_the_financials_tab_needs(stub_fetches):
+def test_load_research_fetches_only_what_the_summary_tab_draws(stub_fetches):
+    """A search lands on 📊 Summary, so that is all it pays for. Every other tab
+    fetches on first open, and a stub that raises proves nothing reached for it."""
+    def untouchable(*args, **kwargs):
+        raise AssertionError("fetched by the search, not by the tab that needs it")
+
+    for name in ("fetch_insider_transactions", "fetch_institutional_summary",
+                 "fetch_universe_daily", "fetch_universe_fundamentals",
+                 "fetch_ticker_directory"):
+        stub_fetches.setattr(research_dataset.sharadar_client, name, untouchable)
+
+    def statements(ticker, *, annual=True, ttm=False, asreported=False):
+        dimension = sc.dimension_for(annual=annual, ttm=ttm, asreported=asreported)
+        assert dimension in {"MRT", "ARQ"}, dimension
+        return _statement_set(dimension)
+
+    stub_fetches.setattr(research_dataset.sharadar_client, "fetch_statements", statements)
     dataset = research_dataset.load_research("TEST", today=TODAY)
 
     assert dataset.statements_ttm["PL"]["Dimension"].iloc[0] == "MRT"
-    assert dataset.statements_annual["PL"]["Dimension"].iloc[0] == "MRY"
-    assert dataset.statements_quarterly["PL"]["Dimension"].iloc[0] == "MRQ"
     # The as-reported quarterly income statement is still a bare frame; only
     # the next-report tile wants it.
     assert dataset.quarterly_ar["Dimension"].iloc[0] == "ARQ"
+    for moved in ("statements_annual", "statements_quarterly", "insiders",
+                  "peer_universe"):
+        assert not hasattr(dataset, moved), moved
 
 
 def test_ttm_pl_still_resolves_through_the_property(stub_fetches):
@@ -486,18 +503,156 @@ def test_ttm_pl_still_resolves_through_the_property(stub_fetches):
     assert dataset.ttm_pl["Dimension"].iloc[0] == "MRT"
 
 
+def test_a_missing_price_history_still_blocks_the_search(stub_fetches):
+    """Fetched concurrently now, but still the one fetch the page cannot do without."""
+    stub_fetches.setattr(research_dataset.sharadar_client, "fetch_ohlcv",
+                         lambda *a, **k: pd.DataFrame())
+    with pytest.raises(sc.TickerNotFoundError):
+        research_dataset.load_research("TEST", today=TODAY)
+
+
+def test_load_financials_keeps_both_dimensions_the_tab_needs(stub_fetches):
+    data = research_dataset.load_financials("TEST")
+
+    assert data.annual["PL"]["Dimension"].iloc[0] == "MRY"
+    assert data.quarterly["PL"]["Dimension"].iloc[0] == "MRQ"
+
+
 def test_a_dimension_that_fails_leaves_an_empty_set_rather_than_blocking(stub_fetches):
-    """The `_tolerant` contract: a research page renders without its financials."""
+    """The `_tolerant` contract: one dimension missing leaves the other showing."""
     def statements(ticker, *, annual=True, ttm=False, asreported=False):
         dimension = sc.dimension_for(annual=annual, ttm=ttm, asreported=asreported)
-        if dimension in {"MRY", "MRQ"}:
+        if dimension == "MRY":
             raise sc.SharadarError("no fundamentals", table="SF1", ticker=ticker)
         return _statement_set(dimension)
 
     stub_fetches.setattr(research_dataset.sharadar_client, "fetch_statements", statements)
-    dataset = research_dataset.load_research("TEST", today=TODAY)
+    data = research_dataset.load_financials("TEST")
 
-    assert dataset.statements_annual == {}
-    assert dataset.statements_quarterly == {}
-    assert dataset.statements_ttm["PL"]["Dimension"].iloc[0] == "MRT"
-    assert dataset.stats  # the summary tab is unaffected
+    assert data.annual == {}
+    assert data.quarterly["PL"]["Dimension"].iloc[0] == "MRQ"
+    # And the search itself never depended on either.
+    assert research_dataset.load_research("TEST", today=TODAY).stats
+
+
+def test_a_failed_insider_fetch_is_raised_not_passed_off_as_no_filings(stub_fetches):
+    """An empty frame means nobody filed. Now that the tab loads its own, a failed
+    request reaches ``load_tab`` and is shown as one."""
+    def failing(*args, **kwargs):
+        raise sc.SharadarError("timed out", table="SF2", ticker="TEST")
+
+    stub_fetches.setattr(research_dataset.sharadar_client,
+                         "fetch_insider_transactions", failing)
+    with pytest.raises(sc.SharadarError):
+        research_dataset.load_insiders("TEST", today=TODAY)
+
+
+def test_the_insider_window_is_five_years_of_filing_dates(stub_fetches):
+    seen = []
+    stub_fetches.setattr(research_dataset.sharadar_client,
+                         "fetch_insider_transactions",
+                         lambda ticker, since: seen.append(since) or pd.DataFrame())
+    research_dataset.load_insiders("TEST", today=TODAY)
+    assert seen == ["2021-08-05"]
+
+
+def test_the_peer_universe_is_anchored_on_the_last_market_session(stub_fetches):
+    daily = pd.DataFrame({"date": pd.to_datetime(["2026-07-30", "2026-07-31"])})
+    stub_fetches.setattr(research_dataset.sharadar_client, "fetch_daily_metrics",
+                         lambda *a, **k: daily)
+    dataset = research_dataset.load_research("TEST", today=TODAY)
+    # TODAY is a Wednesday; the company's own last row is the Friday before.
+    assert dataset.market_session == date(2026, 7, 31)
+
+
+def test_no_market_session_means_no_peer_fetch(stub_fetches):
+    def untouchable(*args, **kwargs):
+        raise AssertionError("a universe fetch without a session to anchor it")
+
+    stub_fetches.setattr(research_dataset.sharadar_client, "fetch_universe_daily",
+                         untouchable)
+    assert research_dataset.load_peers(None, today=TODAY).empty
+
+
+def test_the_holdings_payload_carries_the_share_count_it_divides_by(stub_fetches):
+    data = research_dataset.load_holdings("TEST", today=TODAY)
+    assert data.derived.empty  # the stub's statements carry only a PL frame
+
+    def statements(ticker, *, annual=True, ttm=False, asreported=False):
+        dimension = sc.dimension_for(annual=annual, ttm=ttm, asreported=asreported)
+        derived = pd.DataFrame({"Dimension": [dimension]})
+        return sc.StatementSet(**{**_statement_set(dimension).__dict__,
+                                  "frames": {"DERIVED": derived}})
+
+    stub_fetches.setattr(research_dataset.sharadar_client, "fetch_statements", statements)
+    data = research_dataset.load_holdings("TEST", today=TODAY)
+    assert data.derived["Dimension"].iloc[0] == "MRQ"
+
+
+# ---------------------------------------------------------------------------
+# Requests per search — every table asked for once, however many tabs open
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def counted_requests(monkeypatch):
+    """Routes ``transport._get`` by table and records every request made."""
+    from app.data.sharadar import transport as sh_transport
+    from tests import conftest
+
+    prices = {
+        "datatable": {
+            "data": [["TEST", d, 100.0, 102.0, 98.0, 101.0, 1e6, 101.0, 101.0]
+                     for d in ("2026-08-03", "2026-08-04", "2026-08-05")],
+            "columns": [{"name": n, "type": "text"} for n in (
+                "ticker", "date", "open", "high", "low", "close", "volume",
+                "closeadj", "closeunadj")],
+        },
+        "meta": {"next_cursor_id": None},
+    }
+    empty = {"datatable": {"data": [], "columns": []}, "meta": {"next_cursor_id": None}}
+    seen: list[tuple[str, dict]] = []
+
+    def route(table, query, **kwargs):
+        table = table.rsplit("/", 1)[-1]
+        seen.append((table, dict(query)))
+        if table == "TICKERS":
+            return conftest.tickers_payload()
+        if table == "SF1":
+            return conftest.sf1_payload()
+        if table in ("SEP", "SFP"):
+            return prices
+        return empty
+
+    monkeypatch.setattr(sh_transport, "_get", route)
+    return seen
+
+
+def test_the_reference_record_is_fetched_once_per_company(counted_requests):
+    """Every statement fetch reads the company's TICKERS record. It used to read
+    it uncached, so a search paid for it once per SF1 dimension."""
+    research_dataset.load_research("TEST", today=TODAY)
+    research_dataset.load_financials("TEST")
+
+    records = [q for t, q in counted_requests if t == "TICKERS" and q.get("table") == "SF1"]
+    assert len(records) == 1
+
+
+def test_each_sf1_dimension_is_fetched_once_across_the_tabs(counted_requests):
+    research_dataset.load_research("TEST", today=TODAY)
+    research_dataset.load_financials("TEST")
+    research_dataset.load_holdings("TEST", today=TODAY)
+
+    dimensions = [q["dimension"] for t, q in counted_requests if t == "SF1"]
+    assert sorted(dimensions) == ["ARQ", "MRQ", "MRT", "MRY"]
+
+
+def test_the_dcf_prices_reuse_the_searchs_price_history(counted_requests):
+    """``fetch_ohlcv`` and ``fetch_prices`` slice one cached full history."""
+    research_dataset.load_research("TEST", today=TODAY)
+    sc.fetch_prices("TEST", start="2021-01-01")
+
+    # The benchmark has a price request of its own; only the company's count.
+    company = [t for t, q in counted_requests if q.get("ticker") == "TEST"]
+    assert company.count("SEP") == 1
+    assert company.count("DAILY") == 1

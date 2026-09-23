@@ -56,8 +56,10 @@ def _html(comparisons) -> str:
 
 
 def test_the_tab_takes_the_snapshot():
-    """It reads the peer universe off the snapshot; it must not fetch its own."""
+    """The shell loads the peer universe through ``dataset.load_peers`` and
+    hands it down; nothing in the package reaches for the client."""
     assert list(inspect.signature(shell.render).parameters) == ["dataset"]
+    assert "load_tab(" in inspect.getsource(shell.render)
     for module in (shell, table, multiples, growth_view):
         source = inspect.getsource(module)
         assert "sharadar_client" not in source, module.__name__
@@ -72,7 +74,22 @@ def test_both_sub_tabs_are_declared_in_order():
 def test_every_sub_tab_module_exposes_render():
     for module in (multiples, growth_view):
         assert callable(getattr(module, "render", None)), module.__name__
-        assert list(inspect.signature(module.render).parameters) == ["dataset"]
+        assert list(inspect.signature(module.render).parameters) == [
+            "dataset", "peer_universe"
+        ]
+
+
+def test_the_peer_universe_is_keyed_on_dates_not_the_ticker():
+    """One cache entry serves every company searched that day."""
+    assert list(inspect.signature(shell._load_cached).parameters) == [
+        "session", "as_of"
+    ]
+
+
+def test_only_the_open_sub_tab_is_built():
+    body = inspect.getsource(shell.render)
+    assert 'on_change="rerun"' in body
+    assert body.count(".open:") == 2
 
 
 def test_the_stylesheet_is_injected_once_by_the_shell():
