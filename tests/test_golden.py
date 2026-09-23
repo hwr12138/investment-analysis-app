@@ -22,6 +22,7 @@ from app.logic.dcf import model as dcf_model
 from app.logic.dcf import validation as val
 from app.logic.dcf import valuation as dcf
 from app.logic.dcf import wacc as wl
+from app.provenance import Origin
 
 VALUATION_DATE = date(2026, 7, 31)
 
@@ -410,14 +411,21 @@ def test_treasury_network_error_is_caught(monkeypatch):
     assert "Could not reach Yahoo Finance" in error
 
 
-def test_short_rate_falls_back_when_the_fetch_fails(monkeypatch):
-    """The portfolio pages take a plain float, so this one does substitute."""
+def test_short_rate_reports_a_failed_fetch_rather_than_substituting(monkeypatch):
+    """It used to return 4% on failure, which read exactly like a live quote."""
     monkeypatch.setattr(
         market_data, "_fetch_yahoo_yield", lambda symbol: (None, None, "down")
     )
-    assert market_data.fetch_current_risk_free_rate() == pytest.approx(0.04)
+    failed = market_data.fetch_current_risk_free_rate()
+    assert failed.value is None
+    assert failed.origin is Origin.UNAVAILABLE
+    assert failed.detail == "down"
 
     monkeypatch.setattr(
         market_data, "_fetch_yahoo_yield", lambda symbol: (3.73, date(2026, 8, 4), "")
     )
-    assert market_data.fetch_current_risk_free_rate() == pytest.approx(0.0373)
+    quoted = market_data.fetch_current_risk_free_rate()
+    assert quoted.value == pytest.approx(0.0373)
+    assert quoted.origin is Origin.REPORTED
+    assert quoted.as_of == date(2026, 8, 4)
+    assert market_data.IRX_SYMBOL in quoted.source

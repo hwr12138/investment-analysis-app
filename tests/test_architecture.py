@@ -190,25 +190,7 @@ def test_nothing_in_logic_imports_the_ui_or_network_directly():
     assert not offenders
 
 
-#: Modules that break the rule today, each with the step that fixes it. Strict,
-#: so a fix that lands without removing its entry fails as an unexpected pass.
-_KNOWN_IMPURE = {
-    "app.logic.portfolio_statistics": "fetches price history from the logic layer",
-}
-
-
-@pytest.mark.parametrize(
-    "module",
-    [
-        pytest.param(
-            name,
-            marks=pytest.mark.xfail(reason=_KNOWN_IMPURE[name], strict=True),
-        )
-        if name in _KNOWN_IMPURE
-        else name
-        for name in sorted(set(_in_layer("app.logic")) - ORCHESTRATORS)
-    ],
-)
+@pytest.mark.parametrize("module", sorted(set(_in_layer("app.logic")) - ORCHESTRATORS))
 def test_logic_never_reaches_the_ui_or_network(module):
     """Transitively — the way it actually breaks is through a constant.
 

@@ -2,18 +2,16 @@ import streamlit as st
 from datetime import date
 
 from app import charts
-from app.data import market_data, sharadar_client
+from app.data import sharadar_client
+from app.formatting import format_pct, format_ratio
 from app.logic import portfolio_optimization as po_logic
+from app.views.components import risk_free_rate_input
 
 # --- Main Dashboard Render ---
 
 def render_page():
     st.header("Portfolio Optimization")
     st.write("Determine optimal capital allocations based on Historical Data, Geometric Risk metrics, and the Kelly Criterion.")
-
-    # Initialize the default risk-free rate in session state to avoid fetching on every interaction
-    if "default_rf_rate" not in st.session_state:
-        st.session_state.default_rf_rate = market_data.fetch_current_risk_free_rate() * 100
 
     # --- UI Inputs ---
     st.markdown("### ⚙️ Optimization Parameters")
@@ -29,18 +27,12 @@ def render_page():
             end_date = st.date_input("End Date", value=date.today(), min_value=date(1900, 1, 1))
 
         with col2:
-            rf_input = st.number_input(
-                "Risk-Free Rate (%)",
-                value=st.session_state.default_rf_rate,
-                step=0.1,
-                help="Defaults to the implied rate of the 30-Day Fed Funds Futures (ZQ=F)."
-            )
+            rf_rate_decimal = risk_free_rate_input()
             vol_target = st.number_input("Volatility Targeting (Max Vol %)", value=25.0, step=1.0)
             kelly_fraction = st.slider("Kelly Fraction", min_value=0.1, max_value=1.0, value=0.5, step=0.1)
 
     # Convert settings to usable formats
     tickers_list = [t.strip().upper() for t in tickers_input.split(',') if t.strip()]
-    rf_rate_decimal = rf_input / 100.0
     vol_target_decimal = vol_target / 100.0
     start_str = start_date.strftime('%Y-%m-%d')
     end_str = end_date.strftime('%Y-%m-%d')
@@ -57,8 +49,12 @@ def render_page():
             st.error("Please enter at least two valid tickers.")
             return
 
-        with st.spinner(f"Fetching historical data for {len(tickers_list)} assets..."):
-            data = sharadar_client.fetch_price_history(tuple(tickers_list), start_str, end_str)
+        try:
+            with st.spinner(f"Fetching historical data for {len(tickers_list)} assets..."):
+                data = sharadar_client.fetch_price_history(tuple(tickers_list), start_str, end_str)
+        except sharadar_client.SharadarError as error:
+            st.error(str(error))
+            return
 
         if data.empty or data.shape[1] < 2:
             st.error("Failed to download enough valid data. Please check your tickers and date range.")
@@ -78,86 +74,74 @@ def render_page():
             "🎲 Fractional Kelly"
         ])
 
-        # --- 1. Maximize Traditional Sharpe ---
         with tab_sharpe:
             st.subheader("Maximum Traditional Sharpe Portfolio")
-            alloc_sharpe, cagr_sharpe, vol_sharpe, sharpe_val = po_logic.maximize_sharpe(data, rf_rate_decimal)
+            _render_optimization(
+                data,
+                po_logic.maximize_sharpe(data, rf_rate_decimal),
+                ("Expected CAGR", "Annual Volatility", "Max Sharpe Ratio"),
+            )
 
-            if alloc_sharpe:
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Expected CAGR", f"{cagr_sharpe*100:.2f}%")
-                c2.metric("Annual Volatility", f"{vol_sharpe*100:.2f}%")
-                c3.metric("Max Sharpe Ratio", f"{sharpe_val:.3f}")
-
-                col_pie, col_bar = st.columns([1, 1.2])
-                with col_pie:
-                    st.plotly_chart(charts.plot_allocation(alloc_sharpe, "Allocation Weights"), width='stretch')
-                with col_bar:
-                    yearly_rets_sharpe, _ = po_logic.get_portfolio_yearly_returns(data, alloc_sharpe)
-                    st.plotly_chart(charts.plot_yearly_returns(yearly_rets_sharpe, "Yearly Portfolio Returns"), width='stretch')
-            else:
-                st.error("Optimization failed.")
-
-        # --- 2. Maximize Geometric Sharpe ---
         with tab_geo:
             st.subheader("Maximum Geometric Sharpe Portfolio")
-            alloc_geo, cagr_geo, vol_geo, sharpe_geo = po_logic.maximize_geometric_sharpe(data, rf_rate_decimal)
+            _render_optimization(
+                data,
+                po_logic.maximize_geometric_sharpe(data, rf_rate_decimal),
+                ("Expected CAGR", "Annual Volatility", "Max Geometric Sharpe"),
+            )
 
-            if alloc_geo:
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Expected CAGR", f"{cagr_geo*100:.2f}%")
-                c2.metric("Annual Volatility", f"{vol_geo*100:.2f}%")
-                c3.metric("Max Geometric Sharpe", f"{sharpe_geo:.3f}")
-
-                col_pie, col_bar = st.columns([1, 1.2])
-                with col_pie:
-                    st.plotly_chart(charts.plot_allocation(alloc_geo, "Allocation Weights"), width='stretch')
-                with col_bar:
-                    yearly_rets_geo, _ = po_logic.get_portfolio_yearly_returns(data, alloc_geo)
-                    st.plotly_chart(charts.plot_yearly_returns(yearly_rets_geo, "Yearly Portfolio Returns"), width='stretch')
-            else:
-                st.error("Optimization failed.")
-
-        # --- 3. Volatility Targeting ---
         with tab_vol:
             st.subheader(f"Max Return (Cap at {vol_target}% Volatility)")
-            alloc_vol, ret_vol, port_vol, sharpe_vol = po_logic.volatility_targeting_optimizer(data, vol_target_decimal, rf_rate_decimal)
-
-            if alloc_vol:
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Expected Annual Return", f"{ret_vol*100:.2f}%")
-                c2.metric("Annual Volatility", f"{port_vol*100:.2f}%")
-                c3.metric("Sharpe Ratio", f"{sharpe_vol:.3f}")
-
-                col_pie, col_bar = st.columns([1, 1.2])
-                with col_pie:
-                    st.plotly_chart(charts.plot_allocation(alloc_vol, "Allocation Weights"), width='stretch')
-                with col_bar:
-                    yearly_rets_vol, _ = po_logic.get_portfolio_yearly_returns(data, alloc_vol)
-                    st.plotly_chart(charts.plot_yearly_returns(yearly_rets_vol, "Yearly Portfolio Returns"), width='stretch')
-            else:
-                st.error("Optimization failed to converge under current volatility constraints.")
-
-        # --- 4. Fractional Kelly ---
-        with tab_vol: # (Will be placed in tab_kelly)
-            pass
+            _render_optimization(
+                data,
+                po_logic.volatility_targeting_optimizer(data, vol_target_decimal, rf_rate_decimal),
+                ("Expected Annual Return", "Annual Volatility", "Sharpe Ratio"),
+                hint="The cap may be below what any long-only mix of these assets can reach.",
+            )
 
         with tab_kelly:
             st.subheader(f"Fractional Kelly-Criterion ({kelly_fraction:.2f}x)")
-            alloc_kelly, ret_kelly, vol_kelly = po_logic.calculate_kelly_allocation(data, rf_rate_decimal, kelly_fraction)
+            kelly = po_logic.calculate_kelly_allocation(data, rf_rate_decimal, kelly_fraction)
+            if not kelly.ok:
+                st.error(f"Kelly Optimization failed. {kelly.reason}")
+                return
 
-            if alloc_kelly:
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Expected Annual Return", f"{ret_kelly*100:.2f}%")
-                c2.metric("Annual Volatility", f"{vol_kelly*100:.2f}%")
-                cash_yield = f"({rf_rate_decimal*100:.1f}% Yield)" if alloc_kelly.get('CASH', 0) > 0 else ""
-                c3.metric("Cash Position", f"{alloc_kelly.get('CASH', 0)*100:.1f}%", cash_yield)
+            cash = kelly.allocation.get('CASH', 0)
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Expected Annual Return", format_pct(kelly.expected_return))
+            c2.metric("Annual Volatility", format_pct(kelly.volatility))
+            cash_yield = f"({rf_rate_decimal*100:.1f}% Yield)" if cash > 0 else ""
+            c3.metric("Cash Position", f"{cash*100:.1f}%", cash_yield)
+            _render_charts(
+                data, kelly.allocation,
+                "Allocation Weights (Including Cash)", "Yearly Returns (Equities Portion)",
+            )
 
-                col_pie, col_bar = st.columns([1, 1.2])
-                with col_pie:
-                    st.plotly_chart(charts.plot_allocation(alloc_kelly, "Allocation Weights (Including Cash)"), width='stretch')
-                with col_bar:
-                    yearly_rets_kelly, _ = po_logic.get_portfolio_yearly_returns(data, alloc_kelly)
-                    st.plotly_chart(charts.plot_yearly_returns(yearly_rets_kelly, "Yearly Returns (Equities Portion)"), width='stretch')
-            else:
-                st.error("Kelly Optimization failed.")
+
+def _render_optimization(
+    data,
+    optimization: po_logic.Optimization,
+    labels: tuple[str, str, str],
+    *,
+    hint: str = "",
+) -> None:
+    """The three headline figures, the allocation, and its yearly returns."""
+    if not optimization.ok:
+        st.error(f"Optimization failed. {optimization.reason} {hint}".strip())
+        return
+
+    return_label, volatility_label, ratio_label = labels
+    c1, c2, c3 = st.columns(3)
+    c1.metric(return_label, format_pct(optimization.expected_return))
+    c2.metric(volatility_label, format_pct(optimization.volatility))
+    c3.metric(ratio_label, format_ratio(optimization.ratio, 3))
+    _render_charts(data, optimization.allocation, "Allocation Weights", "Yearly Portfolio Returns")
+
+
+def _render_charts(data, allocation: dict, pie_title: str, bar_title: str) -> None:
+    col_pie, col_bar = st.columns([1, 1.2])
+    with col_pie:
+        st.plotly_chart(charts.plot_allocation(allocation, pie_title), width='stretch')
+    with col_bar:
+        yearly_returns, _ = po_logic.get_portfolio_yearly_returns(data, allocation)
+        st.plotly_chart(charts.plot_yearly_returns(yearly_returns, bar_title), width='stretch')
