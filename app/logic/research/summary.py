@@ -13,7 +13,7 @@ Two conventions from the DCF engine carry over unchanged:
 
 The one place those two rules genuinely collide is the dividend. Sharadar fills
 ``dps`` and ``divyield`` with ``0`` both for companies that pay nothing and for
-figures absent from a filing (see ``sharadar_client.ZERO_FILLED_INDICATORS``),
+figures absent from a filing (see ``vocabulary.ZERO_FILLED_INDICATORS``),
 so a bare ``0.00`` is ambiguous. :func:`_dividend_tile` resolves it by
 cross-checking the ACTIONS table, which records an actual dividend payment or
 records nothing at all.
@@ -26,16 +26,16 @@ from datetime import date
 
 import pandas as pd
 
-from app.data import sharadar_client
-from app.logic.dcf import wacc as wacc_lib
-from app.logic.research.formatting import (
-    _missing,
+from app.data.sharadar import vocabulary
+from app.formatting import (
     format_count,
     format_money,
     format_pct,
     format_range,
     format_ratio,
+    is_missing,
 )
+from app.logic.dcf import wacc as wacc_lib
 from app.provenance import Origin, Sourced
 
 #: Price windows offered above the chart, in display order. ``5D`` counts
@@ -73,7 +73,7 @@ _FILING_LAG_QUARTERS = 8
 #: S&P 500 stand-in is the ETF — same convention as the DCF page.
 BENCHMARK = "SPY"
 
-_BETA_YEARS = 5
+BETA_YEARS = 5
 
 
 # ---------------------------------------------------------------------------
@@ -221,21 +221,21 @@ def _statement_value(frame: pd.DataFrame, indicator: str) -> tuple[float | None,
     Indexed by indicator code rather than by Sharadar's published caption, so a
     caption change upstream cannot silently return the wrong line.
     """
-    caption = sharadar_client.SF1_CAPTIONS.get(indicator)
+    caption = vocabulary.SF1_CAPTIONS.get(indicator)
     if not caption or frame.empty or caption not in frame.columns:
         return None, None
     row = frame.iloc[-1]
     value = row.get(caption)
     as_of = row.get("Report Date")
     return (
-        None if _missing(value) else float(value),
-        None if _missing(as_of) else pd.Timestamp(as_of).date(),
+        None if is_missing(value) else float(value),
+        None if is_missing(as_of) else pd.Timestamp(as_of).date(),
     )
 
 
 def days_range(ohlcv: pd.DataFrame, currency: str) -> StatTile:
     row = _last_row(ohlcv)
-    if row is None or _missing(row.get("Low")) or _missing(row.get("High")):
+    if row is None or is_missing(row.get("Low")) or is_missing(row.get("High")):
         return StatTile.unavailable(
             "Day's Range", "Sharadar SEP", "No high/low on the latest session."
         )
@@ -347,7 +347,7 @@ def _recent_dividends(actions: pd.DataFrame, today: date, days: int = 366) -> pd
     """Dividend rows with an ex-date inside the trailing window."""
     if actions.empty or "action" not in actions.columns:
         return pd.DataFrame(columns=["date", "value"])
-    dividends = actions[actions["action"] == sharadar_client.DIVIDEND_ACTION]
+    dividends = actions[actions["action"] == vocabulary.DIVIDEND_ACTION]
     if dividends.empty:
         return pd.DataFrame(columns=["date", "value"])
     cutoff = pd.Timestamp(today) - pd.Timedelta(days=days)
@@ -362,7 +362,7 @@ def _ex_dividend_tile(actions: pd.DataFrame, currency: str, today: date) -> Stat
         return StatTile.unavailable(
             label, "Sharadar ACTIONS", "No corporate actions on record."
         )
-    dividends = actions[actions["action"] == sharadar_client.DIVIDEND_ACTION]
+    dividends = actions[actions["action"] == vocabulary.DIVIDEND_ACTION]
     if dividends.empty:
         return StatTile.unavailable(
             label, "Sharadar ACTIONS", "This company has never paid a dividend."
@@ -371,7 +371,7 @@ def _ex_dividend_tile(actions: pd.DataFrame, currency: str, today: date) -> Stat
     row = dividends.iloc[-1]
     ex_date = pd.Timestamp(row["date"]).date()
     amount = row.get("value")
-    detail = "" if _missing(amount) else f"{format_money(amount, currency)} per share"
+    detail = "" if is_missing(amount) else f"{format_money(amount, currency)} per share"
     # Sharadar carries declared ex-dates ahead of time, so the newest row is
     # sometimes in the future. Say which it is rather than implying it passed.
     if ex_date > today:
@@ -512,12 +512,12 @@ def build_key_stats(
     daily_row = _last_row(daily)
     price_date = None if ohlcv.empty else pd.Timestamp(ohlcv.index.max()).date()
 
-    close = None if price_row is None or _missing(price_row.get("Close")) else float(
+    close = None if price_row is None or is_missing(price_row.get("Close")) else float(
         price_row["Close"]
     )
 
     def from_daily(label: str, column: str, formatter, note: str = "") -> StatTile:
-        if daily_row is None or _missing(daily_row.get(column)):
+        if daily_row is None or is_missing(daily_row.get(column)):
             return StatTile.unavailable(
                 label, "Sharadar DAILY", f"{column} not reported for the latest session."
             )
@@ -527,7 +527,7 @@ def build_key_stats(
             origin=Origin.REPORTED,
             source=f"Sharadar DAILY · {column}",
             as_of=pd.Timestamp(daily_row["date"]).date()
-            if "date" in daily_row and not _missing(daily_row["date"])
+            if "date" in daily_row and not is_missing(daily_row["date"])
             else price_date,
             detail=note,
         )
@@ -554,7 +554,7 @@ def build_key_stats(
             Sourced.reported(
                 float(price_row["Volume"]), "Sharadar SEP · volume", as_of=price_date
             )
-            if price_row is not None and not _missing(price_row.get("Volume"))
+            if price_row is not None and not is_missing(price_row.get("Volume"))
             else Sourced.unavailable("Sharadar SEP", "No volume on the latest session."),
             format_count,
         )
@@ -611,7 +611,7 @@ def build_key_stats(
     tiles.append(_beta_tile(stock_closes, index_closes))
 
     # --- Shares ------------------------------------------------------------
-    if daily_row is not None and not _missing(daily_row.get("marketcap")) and close:
+    if daily_row is not None and not is_missing(daily_row.get("marketcap")) and close:
         tiles.append(
             StatTile.from_sourced(
                 "Shares Outstanding",

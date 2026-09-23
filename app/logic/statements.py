@@ -1,6 +1,6 @@
 """Financial statements as sectioned, reconciled tables.
 
-Turns the four wide frames a :class:`~app.data.sharadar_client.StatementSet`
+Turns the four wide frames a :class:`~app.data.sharadar.vocabulary.StatementSet`
 carries into something an analyst reads down rather than across: labelled
 sections, indented detail lines, bolded subtotals, and — where the arithmetic is
 checkable — a reconciliation of each reported subtotal against the lines above
@@ -34,13 +34,13 @@ from typing import Mapping
 import numpy as np
 import pandas as pd
 
-from app.data import sharadar_client
+from app.data.sharadar import vocabulary
 from app.provenance import Origin
 
 _STATEMENT_KEYS = ("PL", "BS", "CF", "DERIVED")
 
 #: Metadata columns, in the order the provenance panel shows them. A subset of
-#: :data:`sharadar_client.META_COLUMNS`; the rest are dropped.
+#: :data:`vocabulary.META_COLUMNS`; the rest are dropped.
 _META_OUT = (
     "Fiscal Year", "Fiscal Period", "Report Date", "Publish Date", "Restated",
 )
@@ -78,7 +78,7 @@ class FromCaption:
     """Read a Sharadar caption.
 
     Which of the four frames it lives on is not declared — the builder works
-    off one merged frame, so :data:`sharadar_client.SF1_LAYOUT` stays the single
+    off one merged frame, so :data:`vocabulary.SF1_LAYOUT` stays the single
     source of truth for the partition. That is also what lets the cash-flow
     statement open with Net Income, which Sharadar publishes on the income
     statement.
@@ -440,7 +440,7 @@ def _wide(frames: Mapping[str, pd.DataFrame]) -> pd.DataFrame:
 
     bodies = []
     for frame in present:
-        columns = [c for c in frame.columns if c not in sharadar_client.META_COLUMNS]
+        columns = [c for c in frame.columns if c not in vocabulary.META_COLUMNS]
         body = frame[columns].copy()
         body.index = _period_key(frame)
         bodies.append(body)
@@ -901,7 +901,7 @@ def build_statement(
         rendered: list[RenderedRow] = []
         for row in section.rows:
             reasons = _reasons(row, values, labels, len(columns))
-            zero_filled = isinstance(row.source, FromCaption) and sharadar_client.is_zero_filled(
+            zero_filled = isinstance(row.source, FromCaption) and vocabulary.is_zero_filled(
                 row.source.caption
             )
             cells = _cells(row, values, reasons, units, zero_filled)
@@ -968,8 +968,8 @@ def validate_spec(spec: StatementSpec) -> list[str]:
     traceback.
     """
     problems: list[str] = []
-    captions = set(sharadar_client.SF1_CAPTIONS.values()) | {
-        sharadar_client.MINORITY_INTEREST_CAPTION
+    captions = set(vocabulary.SF1_CAPTIONS.values()) | {
+        vocabulary.MINORITY_INTEREST_CAPTION
     }
 
     seen: set[str] = set()
@@ -1024,10 +1024,10 @@ def validate_spec(spec: StatementSpec) -> list[str]:
 # The specs
 # ---------------------------------------------------------------------------
 #
-# Captions below are Sharadar's own, from ``sharadar_client.SF1_LAYOUT``. Labels
+# Captions below are Sharadar's own, from ``vocabulary.SF1_LAYOUT``. Labels
 # are ours, and are allowed to read better than the vendor's.
 #
-# Costs arrive negative — ``sharadar_client.SIGN_FLIPPED`` negates them on
+# Costs arrive negative — ``vocabulary.SIGN_FLIPPED`` negates them on
 # ingest — so most statement identities are plain sums: gross profit is revenue
 # *plus* cost of revenue. The exceptions are ``netincnci`` and ``prefdivis``,
 # which Sharadar publishes as positive magnitudes and the client leaves alone.
@@ -1219,7 +1219,7 @@ BALANCE_SHEET = StatementSpec(
                     FromCaption("Shareholders Equity Attributable to Parent"),
                     emphasis=Emphasis.SUBTOTAL),
             RowSpec("nci", "Minority Interest",
-                    FromCaption(sharadar_client.MINORITY_INTEREST_CAPTION),
+                    FromCaption(vocabulary.MINORITY_INTEREST_CAPTION),
                     indent=1, origin=Origin.DERIVED,
                     note="SF1 has no balance-sheet minority-interest line. The client "
                          "recovers it as total assets less liabilities less parent "

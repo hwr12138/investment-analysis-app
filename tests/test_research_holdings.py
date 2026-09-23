@@ -229,7 +229,6 @@ def test_ownership_joins_on_the_calendar_date_not_the_report_date(
     """A company on a 52/53-week fiscal calendar closes a day or two earlier
     each year, so an exact join on the report date finds nothing and every
     ownership reading goes blank. That shipped once on the growth tab."""
-    from app.data import sharadar_client as sc
 
     shares = _shares(Q, 10_000_000.0)
     shares["Report Date"] = [q - pd.Timedelta(days=3) for q in Q]

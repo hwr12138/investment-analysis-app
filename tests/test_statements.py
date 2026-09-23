@@ -15,6 +15,7 @@ import math
 import pytest
 
 from app.data import sharadar_client as sc
+from app.data.sharadar import statements as sh_statements
 from app.logic import statements as st
 from app.provenance import Origin
 from tests.conftest import (
@@ -42,8 +43,8 @@ SPECS = (
 def frames(rows=None) -> dict:
     """The four statement frames, exactly as ``fetch_statements`` assembles them."""
     parsed = sc.parse_datatable(sf1_payload(rows))
-    built = sc._sf1_frames(parsed, source_link="https://example.test", restated=True)
-    return {name: sc._order_statement_rows(frame) for name, frame in built.items()}
+    built = sh_statements._sf1_frames(parsed, source_link="https://example.test", restated=True)
+    return {name: sh_statements._order_statement_rows(frame) for name, frame in built.items()}
 
 
 def bump(row: list, name: str, delta: float) -> list:
@@ -211,8 +212,8 @@ def test_the_sparse_fixture_loses_exactly_the_rows_that_depend_on_it(
 ):
     """``rnd`` and ``intangibles`` blank out one residual apiece, on two pages."""
     parsed = sc.parse_datatable(sparse_statements_payload)
-    built = sc._sf1_frames(parsed, source_link="x", restated=True)
-    sparse = {name: sc._order_statement_rows(f) for name, f in built.items()}
+    built = sh_statements._sf1_frames(parsed, source_link="x", restated=True)
+    sparse = {name: sh_statements._order_statement_rows(f) for name, f in built.items()}
 
     income = rows_by_key(build(st.INCOME_STATEMENT, sparse, show_empty=True))
     assert all(cell.missing for cell in income["opex_other"].cells)
@@ -233,8 +234,8 @@ def test_a_caption_sharadar_never_returned_is_unavailable_not_zero():
         },
         "meta": {"next_cursor_id": None},
     }
-    built = sc._sf1_frames(sc.parse_datatable(payload), source_link="x", restated=True)
-    without = {name: sc._order_statement_rows(f) for name, f in built.items()}
+    built = sh_statements._sf1_frames(sc.parse_datatable(payload), source_link="x", restated=True)
+    without = {name: sh_statements._order_statement_rows(f) for name, f in built.items()}
 
     rows = rows_by_key(build(st.BALANCE_SHEET, without, show_empty=True))
     assert rows["inventory"].origin is Origin.UNAVAILABLE

@@ -24,6 +24,7 @@ from html import escape
 import pandas as pd
 import streamlit as st
 
+from app.formatting import format_date
 from app.logic import statements
 from app.logic.research.dataset import ResearchDataset
 from app.provenance import Origin
@@ -352,10 +353,6 @@ def _render_statement_sources(table: statements.StatementTable) -> None:
             filings = table.meta.copy()
             for name in ("Report Date", "Publish Date"):
                 if name in filings.columns:
-                    filings[name] = filings[name].apply(_date_text)
+                    filings[name] = filings[name].apply(format_date, missing="—")
             st.dataframe(filings, width="stretch", hide_index=True)
-
-
-def _date_text(value) -> str:
-    return "—" if value is None or pd.isna(value) else pd.Timestamp(value).date().isoformat()
 

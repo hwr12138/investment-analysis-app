@@ -21,16 +21,21 @@ investment-analysis-app/
 ├── streamlit_app.py       # Entrypoint: page config, styling, and navigation
 ├── app/
 │   ├── views/             # Streamlit UI for each page (render_page functions)
-│   │   └── research/      # Stock Research: the shell, then one module per tab
-│   │                      #   (summary, financials, dcf, placeholders)
+│   │   ├── components.py  # The few pieces more than one page draws identically
+│   │   └── research/      # Stock Research: the shell, then one module per tab;
+│   │                      #   the DCF and Valuation tabs are packages of their own
 │   ├── logic/             # Pure calculations, one module per feature
 │   │   ├── dcf/           # The DCF engine (see below)
-│   │   └── research/      # Stock Research: formatting ← summary ← dataset
+│   │   └── research/      # Stock Research: comparison ← tab modules ← dataset
 │   ├── data/              # Shared data access (Sharadar, Yahoo Treasury yields, ERP)
+│   │   └── sharadar/      # The Sharadar client, one module per table, behind
+│   │                      #   sharadar_client.py; vocabulary.py is the pure part
 │   ├── provenance.py      # Origin/Sourced types shared by the data and logic layers
+│   ├── formatting.py      # Number and date formatting shared by every page
 │   └── charts.py          # Reusable Plotly chart helpers
 ├── assets/style.css       # Custom CSS
-├── tests/                 # pytest suite; all network calls mocked
+├── tests/                 # pytest suite; all network calls mocked. test_architecture.py
+│                          #   fails the build if the layering below is broken
 ├── requirements.txt
 └── requirements-dev.txt   # adds pytest; not installed on the deployed app
 ```
@@ -44,7 +49,8 @@ To add a new page:
 1. Create `app/logic/<feature>.py` for the calculations.
 2. Create `app/views/<feature>.py` with a `render_page()` function.
 3. Register it in the `st.navigation([...])` list in `streamlit_app.py`.
-4. Reuse `app/data/market_data.py` for any data fetching.
+4. Fetch through `app/data/` from the view — never from the logic module, which
+   `tests/test_architecture.py` checks.
 
 ### The DCF engine
 
@@ -54,7 +60,7 @@ need to be testable on their own:
 
 | Module | Responsibility |
 |---|---|
-| `app/data/sharadar_client.py` | Nasdaq Data Link auth, retry, pagination, caching, datatable parsing |
+| `app/data/sharadar_client.py` | Public API of `app/data/sharadar/`: auth, retry, pagination, caching, datatable parsing |
 | `app/logic/dcf/schema.py` | Concept alias table and runtime column resolution |
 | `app/logic/dcf/financials.py` | Statement normalisation, TTM, ratio derivation |
 | `app/logic/dcf/wacc.py` | Beta regression and discount rate — **pure** |

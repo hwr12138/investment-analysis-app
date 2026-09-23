@@ -1,76 +1,95 @@
+"""Risk and return statistics for a fixed-weight portfolio, over several windows.
+
+Pure — no Streamlit, no network; the page fetches the prices, including the
+:data:`MARKET_TICKER` benchmark, and passes them in.
+
+A statistic that is undefined is ``None``, never zero. Beta against a market
+that never moved, a Sharpe ratio at zero volatility, a Treynor ratio at zero
+beta: each used to print as ``0.0000``, which reads as a measurement. And with
+no benchmark prices at all, the market-relative figures — alpha, beta, Treynor —
+are ``None`` rather than computed against a market return of zero.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+
 import numpy as np
 import pandas as pd
-from datetime import datetime
 from dateutil.relativedelta import relativedelta
 
-from app.data import sharadar_client
-
-TRADING_DAYS = 251
+from app.logic import returns as ret
 
 #: Benchmark for alpha, beta and Treynor. Sharadar carries no index levels, so
 #: this is the S&P 500 tracker rather than the index itself.
 MARKET_TICKER = "SPY"
 
-# --- Data Fetching ---
+#: Every statistic, in display order.
+METRICS = (
+    "Mean Annual Return", "CAGR", "Standard Deviation",
+    "Alpha", "Beta", "Sharpe Ratio", "Geometric Sharpe Ratio",
+    "Sortino Ratio", "Treynor Ratio",
+)
 
-def fetch_data_and_market(tickers: list, start_date: str, end_date: str, market_ticker=MARKET_TICKER):
-    all_tickers = tuple(dict.fromkeys(list(tickers) + [market_ticker]))
-    data = sharadar_client.fetch_price_history(all_tickers, start_date, end_date)
-    return data
+#: The ones quoted as a percentage rather than a ratio.
+PERCENT_METRICS = frozenset({"Mean Annual Return", "CAGR", "Standard Deviation"})
+
+#: A fixed window is reported only if it holds at least this share of the
+#: sessions it should — a "10 Year" figure over four years of history is not one.
+MIN_WINDOW_COVERAGE = 0.8
+
+
+def _unavailable() -> dict[str, float | None]:
+    return dict.fromkeys(METRICS)
+
+
+def _ratio(numerator: float, denominator: float | None) -> float | None:
+    if denominator is None or denominator == 0 or np.isnan(denominator):
+        return None
+    return float(numerator / denominator)
+
 
 # --- Metric Calculations ---
 
-def calculate_all_metrics(portfolio_returns: pd.Series, market_returns: pd.Series, rf_rate: float):
-    metrics_keys = [
-        "Mean Annual Return", "CAGR", "Standard Deviation",
-        "Alpha", "Beta", "Sharpe Ratio", "Geometric Sharpe Ratio",
-        "Sortino Ratio", "Treynor Ratio"
-    ]
 
+def calculate_all_metrics(
+    portfolio_returns: pd.Series, market_returns: pd.Series | None, rf_rate: float
+) -> dict[str, float | None]:
+    """Every statistic for one window of daily returns.
+
+    With ``market_returns``, both series are first aligned on the days they
+    share, so the portfolio-only figures describe the same days as the beta.
+    Without it, alpha, beta and Treynor are ``None``.
+    """
     if portfolio_returns.empty:
-        return {k: None for k in metrics_keys}
+        return _unavailable()
 
-    # Align dates
-    aligned = pd.concat([portfolio_returns, market_returns], axis=1, join='inner').dropna()
-    if aligned.empty:
-        return {k: None for k in metrics_keys}
-
-    p_ret = aligned.iloc[:, 0]
-    m_ret = aligned.iloc[:, 1]
-
-    # Mean Annual Return
-    ann_arith_return = p_ret.mean() * TRADING_DAYS
-
-    # CAGR
-    total_compound_return = (1 + p_ret).prod()
-    cagr = total_compound_return ** (TRADING_DAYS / len(p_ret)) - 1
-
-    # Standard Deviation
-    ann_volatility = p_ret.std() * np.sqrt(TRADING_DAYS)
-
-    # Beta & Alpha
-    cov_matrix = np.cov(p_ret, m_ret)
-    if cov_matrix[1, 1] == 0:
-        beta = 0.0
+    if market_returns is None:
+        p_ret, m_ret = portfolio_returns.dropna(), None
     else:
-        beta = cov_matrix[0, 1] / cov_matrix[1, 1]
+        aligned = pd.concat([portfolio_returns, market_returns], axis=1, join='inner').dropna()
+        p_ret, m_ret = aligned.iloc[:, 0], aligned.iloc[:, 1]
+    if p_ret.empty:
+        return _unavailable()
 
-    ann_market_return = m_ret.mean() * TRADING_DAYS
-    alpha = ann_arith_return - (rf_rate + beta * (ann_market_return - rf_rate))
+    ann_arith_return = float(ret.annualised_mean(p_ret))
+    cagr = ret.cagr(p_ret)
+    ann_volatility = ret.annualised_volatility(p_ret)
 
-    # Sharpe Ratio
-    sharpe = (ann_arith_return - rf_rate) / ann_volatility if ann_volatility != 0 else 0.0
+    beta = alpha = None
+    if m_ret is not None and len(m_ret) > 1:
+        cov_matrix = np.cov(p_ret, m_ret)
+        beta = _ratio(cov_matrix[0, 1], cov_matrix[1, 1])
+        if beta is not None:
+            ann_market_return = float(ret.annualised_mean(m_ret))
+            alpha = ann_arith_return - (rf_rate + beta * (ann_market_return - rf_rate))
 
-    # Geometric Sharpe
-    geom_sharpe = (cagr - rf_rate) / ann_volatility if ann_volatility != 0 else 0.0
-
-    # Sortino Ratio
     downside_returns = p_ret[p_ret < 0]
-    downside_deviation = np.sqrt((downside_returns**2).mean()) * np.sqrt(TRADING_DAYS)
-    sortino = (ann_arith_return - rf_rate) / downside_deviation if downside_deviation != 0 else 0.0
-
-    # Treynor Ratio
-    treynor = (ann_arith_return - rf_rate) / beta if beta != 0 else 0.0
+    downside_deviation = (
+        float(np.sqrt((downside_returns**2).mean()) * np.sqrt(ret.TRADING_DAYS))
+        if not downside_returns.empty
+        else None
+    )
 
     return {
         "Mean Annual Return": ann_arith_return,
@@ -78,13 +97,27 @@ def calculate_all_metrics(portfolio_returns: pd.Series, market_returns: pd.Serie
         "Standard Deviation": ann_volatility,
         "Alpha": alpha,
         "Beta": beta,
-        "Sharpe Ratio": sharpe,
-        "Geometric Sharpe Ratio": geom_sharpe,
-        "Sortino Ratio": sortino,
-        "Treynor Ratio": treynor
+        "Sharpe Ratio": _ratio(ann_arith_return - rf_rate, ann_volatility),
+        "Geometric Sharpe Ratio": _ratio(cagr - rf_rate, ann_volatility),
+        "Sortino Ratio": _ratio(ann_arith_return - rf_rate, downside_deviation),
+        "Treynor Ratio": _ratio(ann_arith_return - rf_rate, beta),
     }
 
-def get_comprehensive_metrics(data: pd.DataFrame, allocations: dict, custom_start: str, end_date: str, risk_free_rate: float, market_ticker=MARKET_TICKER) -> pd.DataFrame:
+
+def get_comprehensive_metrics(
+    data: pd.DataFrame,
+    allocations: dict,
+    custom_start: str,
+    end_date: str,
+    risk_free_rate: float,
+    market_ticker: str = MARKET_TICKER,
+) -> pd.DataFrame:
+    """One column of :data:`METRICS` per window: 1, 3, 5 and 10 years, and Custom.
+
+    ``data`` holds adjusted closes, one column per ticker, and should include
+    ``market_ticker``; without it the market-relative rows are empty. Weights
+    are renormalised over the tickers that have prices.
+    """
     try:
         end = datetime.strptime(end_date, '%Y-%m-%d')
     except ValueError:
@@ -116,29 +149,20 @@ def get_comprehensive_metrics(data: pd.DataFrame, allocations: dict, custom_star
         valid_weights = valid_weights / valid_weights.sum()
 
     portfolio_returns = daily_returns.dot(valid_weights)
-
-    if market_ticker in data.columns:
-        market_returns = data[market_ticker].pct_change().dropna()
-    else:
-        market_returns = pd.Series(0, index=portfolio_returns.index)
+    market_returns = (
+        data[market_ticker].pct_change().dropna() if market_ticker in data.columns else None
+    )
 
     results = {}
     for label, start_date in periods.items():
         start_str = start_date.strftime('%Y-%m-%d')
         period_p_ret = portfolio_returns.loc[start_str:]
-        period_m_ret = market_returns.loc[start_str:]
+        period_m_ret = market_returns.loc[start_str:] if market_returns is not None else None
 
-        expected_days = (end - start_date).days * (TRADING_DAYS / 365.25)
-        if len(period_p_ret) < (expected_days * 0.8) and label != "Custom":
-            metrics = {k: None for k in [
-                "Mean Annual Return", "CAGR", "Standard Deviation",
-                "Alpha", "Beta", "Sharpe Ratio", "Geometric Sharpe Ratio",
-                "Sortino Ratio", "Treynor Ratio"
-            ]}
+        expected_days = (end - start_date).days * (ret.TRADING_DAYS / 365.25)
+        if len(period_p_ret) < (expected_days * MIN_WINDOW_COVERAGE) and label != "Custom":
+            results[label] = _unavailable()
         else:
-            metrics = calculate_all_metrics(period_p_ret, period_m_ret, risk_free_rate)
+            results[label] = calculate_all_metrics(period_p_ret, period_m_ret, risk_free_rate)
 
-        results[label] = metrics
-
-    df_results = pd.DataFrame(results)
-    return df_results
+    return pd.DataFrame(results)

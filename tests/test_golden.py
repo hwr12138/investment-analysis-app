@@ -14,11 +14,15 @@ import pandas as pd
 import pytest
 
 from app.data import market_data, sharadar_client as sc
+from app.data.sharadar import reference as sh_reference
+from app.data.sharadar import statements as sh_statements
+from app.data.sharadar import transport as sh_transport
 from app.logic.dcf import financials as fin
 from app.logic.dcf import model as dcf_model
 from app.logic.dcf import validation as val
 from app.logic.dcf import valuation as dcf
 from app.logic.dcf import wacc as wl
+from app.provenance import Origin
 
 VALUATION_DATE = date(2026, 7, 31)
 
@@ -54,10 +58,12 @@ def build_model(statements_payload, tickers_response, monkeypatch) -> dict:
             raise sc.TickerNotFoundError(
                 "No quarterly history.", table="SF1", ticker=ticker
             )
-        return sc._fetch_statements(ticker, annual=True, asreported=asreported)
+        return sh_statements._fetch_statements(ticker, annual=True, asreported=asreported)
 
-    monkeypatch.setattr(sc, "_get", _get)
-    monkeypatch.setattr(sc, "fetch_ticker_meta", lambda ticker: sc._fetch_ticker_meta(ticker))
+    monkeypatch.setattr(sh_transport, "_get", _get)
+    monkeypatch.setattr(
+        sc, "fetch_ticker_meta", lambda ticker: sh_reference._fetch_ticker_meta(ticker)
+    )
     monkeypatch.setattr(sc, "fetch_statements", _statements)
     monkeypatch.setattr(sc, "fetch_prices", lambda *a, **k: prices)
 
@@ -248,9 +254,9 @@ def test_financial_sector_is_rejected_before_anything_is_computed(
     def _get(table, params, ticker=None):
         return financial_tickers_response if table == "TICKERS" else statements_payload
 
-    monkeypatch.setattr(sc, "_get", _get)
-    monkeypatch.setattr(sc, "fetch_ticker_meta", sc._fetch_ticker_meta)
-    monkeypatch.setattr(sc, "fetch_statements", sc._fetch_statements)
+    monkeypatch.setattr(sh_transport, "_get", _get)
+    monkeypatch.setattr(sc, "fetch_ticker_meta", sh_reference._fetch_ticker_meta)
+    monkeypatch.setattr(sc, "fetch_statements", sh_statements._fetch_statements)
 
     with pytest.raises(val.UnsupportedSectorError) as caught:
         dcf_model.load_company("JPM")
@@ -274,9 +280,9 @@ def test_a_null_vendor_sector_alone_does_not_reject(
     def _get(table, params, ticker=None):
         return payload if table == "TICKERS" else statements_payload
 
-    monkeypatch.setattr(sc, "_get", _get)
-    monkeypatch.setattr(sc, "fetch_ticker_meta", sc._fetch_ticker_meta)
-    monkeypatch.setattr(sc, "fetch_statements", sc._fetch_statements)
+    monkeypatch.setattr(sh_transport, "_get", _get)
+    monkeypatch.setattr(sc, "fetch_ticker_meta", sh_reference._fetch_ticker_meta)
+    monkeypatch.setattr(sc, "fetch_statements", sh_statements._fetch_statements)
     monkeypatch.setattr(sc, "fetch_prices", lambda *a, **k: pd.DataFrame(
         {"Date": pd.date_range("2026-07-01", periods=5, freq="B"),
          "Last Closing Price": [50.0] * 5}
@@ -405,14 +411,21 @@ def test_treasury_network_error_is_caught(monkeypatch):
     assert "Could not reach Yahoo Finance" in error
 
 
-def test_short_rate_falls_back_when_the_fetch_fails(monkeypatch):
-    """The portfolio pages take a plain float, so this one does substitute."""
+def test_short_rate_reports_a_failed_fetch_rather_than_substituting(monkeypatch):
+    """It used to return 4% on failure, which read exactly like a live quote."""
     monkeypatch.setattr(
         market_data, "_fetch_yahoo_yield", lambda symbol: (None, None, "down")
     )
-    assert market_data.fetch_current_risk_free_rate() == pytest.approx(0.04)
+    failed = market_data.fetch_current_risk_free_rate()
+    assert failed.value is None
+    assert failed.origin is Origin.UNAVAILABLE
+    assert failed.detail == "down"
 
     monkeypatch.setattr(
         market_data, "_fetch_yahoo_yield", lambda symbol: (3.73, date(2026, 8, 4), "")
     )
-    assert market_data.fetch_current_risk_free_rate() == pytest.approx(0.0373)
+    quoted = market_data.fetch_current_risk_free_rate()
+    assert quoted.value == pytest.approx(0.0373)
+    assert quoted.origin is Origin.REPORTED
+    assert quoted.as_of == date(2026, 8, 4)
+    assert market_data.IRX_SYMBOL in quoted.source

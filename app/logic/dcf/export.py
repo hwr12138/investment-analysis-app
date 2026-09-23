@@ -13,12 +13,17 @@ from __future__ import annotations
 import io
 from dataclasses import dataclass
 from datetime import date, datetime
+from typing import TYPE_CHECKING
 
 import pandas as pd
 
 from app.logic.dcf import validation as val
-from app.logic.dcf.model import CompanyDataset, ModelResult
 from app.provenance import Sourced
+
+if TYPE_CHECKING:
+    # Annotations only. Importing `model` at runtime would load the Sharadar
+    # client with it, and writing a workbook needs no network.
+    from app.logic.dcf.model import CompanyDataset, ModelResult
 
 
 @dataclass(frozen=True)

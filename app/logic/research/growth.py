@@ -41,10 +41,10 @@ from datetime import date
 
 import pandas as pd
 
-from app.data import sharadar_client
+from app.data.sharadar import vocabulary
+from app.formatting import format_pct
 from app.logic.research import comparison as shared
 from app.logic.research.comparison import PRIOR, Comparison
-from app.logic.research.formatting import format_pct
 from app.provenance import Origin
 
 
@@ -200,7 +200,7 @@ def _indicator_history(
     indicator code, so the lookup goes through ``SF1_CAPTIONS``. A caption change
     upstream then loses the row visibly instead of returning a different line.
     """
-    caption = sharadar_client.SF1_CAPTIONS.get(indicator)
+    caption = vocabulary.SF1_CAPTIONS.get(indicator)
     if not caption:
         return pd.DataFrame()
 

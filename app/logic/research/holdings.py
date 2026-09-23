@@ -34,7 +34,7 @@ already carries.
    change reports as a **+392% purchase**. Every unit count here is put through
    :func:`split_adjusted_units` first. This is the mirror of the insiders tab's
    filed prices — there the factor divides, here it multiplies — and both sit on
-   ``sharadar_client.split_factors``.
+   ``vocabulary.split_factors``.
 3. **Ownership is a ratio across two bases.** SF1's ``sharesbas`` *is* restated
    for splits and SF3's ``units`` are not, so dividing them straight gives a
    figure wrong by the split ratio at every pre-split quarter.
@@ -82,7 +82,7 @@ from datetime import date
 
 import pandas as pd
 
-from app.data import sharadar_client
+from app.data.sharadar import vocabulary
 from app.provenance import Origin, Sourced
 
 SOURCE = "Sharadar SF3"
@@ -202,7 +202,7 @@ def split_adjusted_units(frame: pd.DataFrame, actions: pd.DataFrame) -> pd.Serie
     """Filed share counts moved onto today's split basis.
 
     **Multiplies**, where the insiders tab's filed prices divide — both sit on
-    :func:`app.data.sharadar_client.split_factors`. A count filed before a
+    :func:`app.data.sharadar.vocabulary.split_factors`. A count filed before a
     five-for-one is a fifth of the shares it represents today, so a series that
     spans one has a step in it that nobody took: BlackRock's Tesla position goes
     7,720 → 38,020 across the 2020 split, and a quarter-on-quarter change reads
@@ -212,7 +212,7 @@ def split_adjusted_units(frame: pd.DataFrame, actions: pd.DataFrame) -> pd.Serie
     price together, so the dollar value is already continuous.
     """
     units = pd.to_numeric(frame["units"], errors="coerce")
-    return units * sharadar_client.split_factors(actions, frame["date"])
+    return units * vocabulary.split_factors(actions, frame["date"])
 
 
 def quarters(frame: pd.DataFrame) -> list[pd.Timestamp]:
@@ -365,8 +365,8 @@ def shares_outstanding(statements: pd.DataFrame) -> pd.DataFrame:
     if statements is None or statements.empty:
         return empty
 
-    basic = sharadar_client.SF1_CAPTIONS["sharesbas"]
-    factor = sharadar_client.SF1_CAPTIONS["sharefactor"]
+    basic = vocabulary.SF1_CAPTIONS["sharesbas"]
+    factor = vocabulary.SF1_CAPTIONS["sharefactor"]
     if "Calendar Date" not in statements.columns or basic not in statements.columns:
         return empty
 
@@ -422,7 +422,7 @@ def ownership_history(
     frame = frame[frame["quarter"] >= cutoff]
 
     filed = pd.to_numeric(frame.get("shrunits"), errors="coerce")
-    frame["units"] = filed * sharadar_client.split_factors(actions, frame["quarter"])
+    frame["units"] = filed * vocabulary.split_factors(actions, frame["quarter"])
     frame["holders"] = pd.to_numeric(frame.get("shrholders"), errors="coerce")
 
     shares = shares_outstanding(statements)

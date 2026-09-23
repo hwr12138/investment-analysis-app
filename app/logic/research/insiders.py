@@ -52,7 +52,7 @@ from datetime import date
 
 import pandas as pd
 
-from app.data import sharadar_client
+from app.data.sharadar import vocabulary
 from app.provenance import Origin, Sourced
 
 SOURCE = "Sharadar SF2"
@@ -209,7 +209,7 @@ def is_non_derivative(frame: pd.DataFrame) -> pd.Series:
     if not usable(frame):
         return pd.Series(dtype="bool")
     opening = frame["securityadcode"].astype("string").str[0]
-    return opening.eq(sharadar_client.SF2_NON_DERIVATIVE).fillna(False)
+    return opening.eq(vocabulary.SF2_NON_DERIVATIVE).fillna(False)
 
 
 def split_adjusted_price(frame: pd.DataFrame, actions: pd.DataFrame) -> pd.Series:
@@ -232,10 +232,10 @@ def split_adjusted_price(frame: pd.DataFrame, actions: pd.DataFrame) -> pd.Serie
     is deliberately not applied anywhere in :func:`signed_flow`.
 
     **Divides**, where the holdings tab's share counts multiply — see
-    :func:`app.data.sharadar_client.split_factors`, which both sit on.
+    :func:`app.data.sharadar.vocabulary.split_factors`, which both sit on.
     """
     price = pd.to_numeric(frame["transactionpricepershare"], errors="coerce")
-    factor = sharadar_client.split_factors(actions, frame["transactiondate"])
+    factor = vocabulary.split_factors(actions, frame["transactiondate"])
     return price / factor
 
 
@@ -249,7 +249,7 @@ def role_of(frame: pd.DataFrame) -> pd.Series:
     if frame.empty:
         return pd.Series(dtype="object")
 
-    yes = sharadar_client.SF2_FLAG_YES
+    yes = vocabulary.SF2_FLAG_YES
 
     def _describe(row) -> str:
         parts: list[str] = []

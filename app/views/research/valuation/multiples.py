@@ -15,11 +15,11 @@ from __future__ import annotations
 
 import streamlit as st
 
+from app.formatting import format_pct
 from app.logic.research import comparison as shared
 from app.logic.research import valuation as research
 from app.logic.research.comparison import Comparison
 from app.logic.research.dataset import ResearchDataset
-from app.logic.research.formatting import format_pct
 from app.views.research.valuation import table
 
 #: Above this the reading is called rich, below its reciprocal, cheap. A tenth

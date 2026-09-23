@@ -10,7 +10,7 @@ actually used. Nothing is zero-filled, interpolated, or carried forward.
 
 Sign conventions. Costs and cash outflows are negative throughout this module.
 Sharadar publishes expense lines as positive magnitudes, so
-``sharadar_client.SIGN_FLIPPED`` negates them at ingest and this module sees the
+``vocabulary.SIGN_FLIPPED`` negates them at ingest and this module sees the
 same convention it always has:
 
 * Income tax is negative for an expense and positive for a benefit. Tax expense
@@ -36,7 +36,7 @@ from datetime import date
 import numpy as np
 import pandas as pd
 
-from app.data.sharadar_client import StatementSet
+from app.data.sharadar.vocabulary import StatementSet
 from app.logic.dcf.schema import SchemaMap
 
 #: Driver ratios pre-populated from history, in the order the UI shows them.

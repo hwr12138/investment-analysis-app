@@ -5,11 +5,10 @@ proxied by the CBOE yield indices on Yahoo Finance, and the implied equity risk
 premium scraped from Damodaran. Prices and fundamentals live in the sibling
 ``sharadar_client``.
 
-Two of the fetchers here return :class:`~app.provenance.Sourced` rather than a
-bare float: a scrape or a third-party rate can fail, and the DCF page must be
-able to tell "4.18% scraped from Damodaran on 1 July 2026" apart from "the
-scrape broke and you are looking at a constant". Anything that returns a plain
-float substitutes a hardcoded default on failure and says so in its docstring.
+Every fetcher here returns :class:`~app.provenance.Sourced` rather than a bare
+float: a scrape or a third-party rate can fail, and a page must be able to tell
+"4.18% scraped from Damodaran on 1 July 2026" apart from "the scrape broke and
+you are looking at a constant". Nothing here substitutes a default on failure.
 """
 
 import re
@@ -89,18 +88,26 @@ def _fetch_yahoo_yield(symbol: str) -> tuple[float | None, date | None, str]:
     return rate_pct, as_of, ""
 
 
-def fetch_current_risk_free_rate() -> float:
-    """Returns the current 13-week Treasury bill yield (``^IRX``) as a decimal.
+def fetch_current_risk_free_rate() -> Sourced:
+    """Returns the current 13-week Treasury bill yield (``^IRX``) with its provenance.
 
-    Falls back to a hardcoded 4% if the fetch fails. Callers that must not show
-    a fabricated rate should use :func:`fetch_10y_treasury_rate` instead, which
-    reports the failure rather than hiding it.
+    The short rate the portfolio pages use for Sharpe ratios. On failure the
+    returned :class:`Sourced` has ``value=None`` and carries the reason, on the
+    same contract as :func:`fetch_10y_treasury_rate`. It used to fall back to a
+    hardcoded 4%, which a reader could not tell apart from a live quote.
     """
-    rate_pct, _, _ = _fetch_yahoo_yield(IRX_SYMBOL)
+    rate_pct, as_of, error = _fetch_yahoo_yield(IRX_SYMBOL)
     if rate_pct is None:
-        # Fallback default if Yahoo is unreachable or stops quoting the index.
-        return 0.04
-    return rate_pct / 100.0
+        return Sourced.unavailable(
+            source=f"Yahoo Finance ({IRX_SYMBOL}, 13-week Treasury bill)",
+            reason=error or f"Yahoo Finance did not return a quote for {IRX_SYMBOL}",
+        )
+
+    return Sourced.reported(
+        value=rate_pct / 100.0,
+        source=f"Yahoo Finance {IRX_SYMBOL} — 13-week Treasury bill discount rate",
+        as_of=as_of,
+    )
 
 
 def fetch_10y_treasury_rate() -> Sourced:

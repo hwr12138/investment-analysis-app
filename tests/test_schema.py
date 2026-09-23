@@ -6,6 +6,7 @@ import pandas as pd
 import pytest
 
 from app.data import sharadar_client as sc
+from app.data.sharadar import statements as sh_statements
 from app.logic.dcf.schema import (
     CONCEPTS_BY_KEY,
     SchemaResolutionError,
@@ -14,7 +15,7 @@ from app.logic.dcf.schema import (
 
 
 def _frames(payload) -> dict[str, pd.DataFrame]:
-    return sc._sf1_frames(
+    return sh_statements._sf1_frames(
         sc.parse_datatable(payload), source_link="https://sec.gov/x", restated=True
     )
 

@@ -1,17 +1,16 @@
 import streamlit as st
-import pandas as pd
 import plotly.express as px
 from datetime import date
 
-from app.data import market_data
+from app.data import sharadar_client
+from app.formatting import format_pct, format_ratio
 from app.logic import portfolio_statistics as ps_logic
+from app.logic import returns
+from app.views.components import risk_free_rate_input
 
 def render_page():
     st.header("Portfolio Statistics")
     st.write("Calculate comprehensive risk and return metrics for a custom portfolio and view asset correlations.")
-
-    if "default_rf_rate" not in st.session_state:
-        st.session_state.default_rf_rate = market_data.fetch_current_risk_free_rate() * 100
 
     st.markdown("### ⚙️ Portfolio Parameters")
     with st.container(border=True):
@@ -22,13 +21,7 @@ def render_page():
                 value="QQQ:55, GLD:30, XLE:15",
                 help="Format as TICKER:PERCENTAGE, separated by commas."
             )
-            rf_input = st.number_input(
-                "Risk-Free Rate (%)",
-                value=st.session_state.default_rf_rate,
-                step=0.1,
-                key="ps_rf_input",
-                help="Defaults to the implied rate of the 30-Day Fed Funds Futures (ZQ=F)."
-            )
+            rf_rate_decimal = risk_free_rate_input(key="ps_rf_input")
         with col2:
             start_date = st.date_input("Custom Start Date", value=date(2020, 1, 1), min_value=date(1900, 1, 1), key="ps_start")
             end_date = st.date_input("Custom End Date", value=date.today(), min_value=date(1900, 1, 1), key="ps_end")
@@ -59,9 +52,8 @@ def render_page():
 
         total_alloc = sum(allocations.values())
         if abs(total_alloc - 100.0) > 0.01 and abs(total_alloc - 1.0) > 0.001:
-            st.error(f"Allocations sum to {total_alloc}, not 100. They have been automatically normalized.")
+            st.warning(f"Allocations sum to {total_alloc}, not 100. They have been automatically normalized.")
 
-        rf_rate_decimal = rf_input / 100.0
         start_str = start_date.strftime('%Y-%m-%d')
         end_str = end_date.strftime('%Y-%m-%d')
 
@@ -73,8 +65,15 @@ def render_page():
 
         earliest_start_str = earliest_start.strftime('%Y-%m-%d')
 
-        with st.spinner(f"Fetching historical data and computing metrics..."):
-            data = ps_logic.fetch_data_and_market(tickers_list, earliest_start_str, end_str)
+        # The benchmark rides along in the same request; alpha, beta and Treynor
+        # are measured against it.
+        wanted = tuple(dict.fromkeys(tickers_list + [ps_logic.MARKET_TICKER]))
+        try:
+            with st.spinner("Fetching historical data and computing metrics..."):
+                data = sharadar_client.fetch_price_history(wanted, earliest_start_str, end_str)
+        except sharadar_client.SharadarError as error:
+            st.error(str(error))
+            return
 
         if data.empty or not any(t in data.columns for t in tickers_list):
             st.error("Failed to download enough valid data. Please check your tickers.")
@@ -93,7 +92,7 @@ def render_page():
         custom_data = data[valid_tickers].loc[start_str:end_str].pct_change().dropna()
         if not custom_data.empty and len(valid_tickers) > 1:
             corr_matrix = custom_data.corr()
-            cov_matrix = custom_data.cov() * 251 # Annualized covariance
+            cov_matrix = returns.annualised_covariance(custom_data)
 
             col_corr, col_cov = st.columns(2)
             with col_corr:
@@ -125,14 +124,17 @@ def render_page():
         if metrics_df.empty:
             st.warning("Not enough data to calculate portfolio metrics.")
         else:
+            if ps_logic.MARKET_TICKER not in data.columns:
+                st.warning(
+                    f"No {ps_logic.MARKET_TICKER} prices came back, so alpha, beta and "
+                    "Treynor are not reported rather than measured against a flat market."
+                )
             formatted_df = metrics_df.copy()
 
             def format_metric(val, metric_name):
-                if pd.isna(val) or val is None:
-                    return "N/A"
-                if metric_name in ["Mean Annual Return", "CAGR", "Standard Deviation"]:
-                    return f"{val*100:.2f}%"
-                return f"{val:.4f}"
+                if metric_name in ps_logic.PERCENT_METRICS:
+                    return format_pct(val)
+                return format_ratio(val, 4)
 
             for col in formatted_df.columns:
                 formatted_df[col] = [format_metric(val, idx) for idx, val in formatted_df[col].items()]

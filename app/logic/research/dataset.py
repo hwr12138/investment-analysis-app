@@ -40,8 +40,8 @@ from app.data import sharadar_client
 from app.logic.research import comparison, holdings
 from app.logic.research.summary import (
     BENCHMARK,
+    BETA_YEARS,
     StatTile,
-    _BETA_YEARS,
     build_key_stats,
 )
 
@@ -155,7 +155,7 @@ def load_research(ticker: str, *, today: date | None = None) -> ResearchDataset:
         ).frame("PL")
     )
 
-    beta_start = (pd.Timestamp(today) - pd.DateOffset(years=_BETA_YEARS)).date()
+    beta_start = (pd.Timestamp(today) - pd.DateOffset(years=BETA_YEARS)).date()
     stock_closes = (
         ohlcv["Adj Close"].dropna()
         if "Adj Close" in ohlcv.columns

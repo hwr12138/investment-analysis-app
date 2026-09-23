@@ -865,28 +865,31 @@ def holders_frame(monkeypatch):
     Routed through the real ``_fetch_institutional_holders`` so the thousands and
     millions conversions run for real rather than being reimplemented here.
     """
-    from app.data import sharadar_client as sc
+    from app.data.sharadar import institutions as sh_institutions
+    from app.data.sharadar import transport as sh_transport
 
-    monkeypatch.setattr(sc, "_get", lambda table, query, **kwargs: sf3_payload())
-    return sc._fetch_institutional_holders("TEST")
+    monkeypatch.setattr(sh_transport, "_get", lambda table, query, **kwargs: sf3_payload())
+    return sh_institutions._fetch_institutional_holders("TEST")
 
 
 @pytest.fixture
 def holdings_summary(monkeypatch):
     """The SF3A history for the fixture company."""
-    from app.data import sharadar_client as sc
+    from app.data.sharadar import institutions as sh_institutions
+    from app.data.sharadar import transport as sh_transport
 
-    monkeypatch.setattr(sc, "_get", lambda table, query, **kwargs: sf3a_payload())
-    return sc._fetch_institutional_summary("TEST")
+    monkeypatch.setattr(sh_transport, "_get", lambda table, query, **kwargs: sf3a_payload())
+    return sh_institutions._fetch_institutional_summary("TEST")
 
 
 @pytest.fixture
 def investor_names(monkeypatch):
     """The ``investorid`` → ``investorname`` directory."""
-    from app.data import sharadar_client as sc
+    from app.data.sharadar import institutions as sh_institutions
+    from app.data.sharadar import transport as sh_transport
 
-    monkeypatch.setattr(sc, "_get", lambda table, query, **kwargs: sf3b_payload())
-    return sc._fetch_investor_directory("2026-06-30")
+    monkeypatch.setattr(sh_transport, "_get", lambda table, query, **kwargs: sf3b_payload())
+    return sh_institutions._fetch_investor_directory("2026-06-30")
 
 
 @pytest.fixture
@@ -898,10 +901,11 @@ def insider_frame(monkeypatch):
     restatement dedup and the column projection then run for real instead of
     being reimplemented in the fixture and proved against themselves.
     """
-    from app.data import sharadar_client as sc
+    from app.data.sharadar import insiders as sh_insiders
+    from app.data.sharadar import transport as sh_transport
 
-    monkeypatch.setattr(sc, "_get", lambda table, query, **kwargs: sf2_payload())
-    return sc._fetch_insider_transactions("TEST")
+    monkeypatch.setattr(sh_transport, "_get", lambda table, query, **kwargs: sf2_payload())
+    return sh_insiders._fetch_insider_transactions("TEST")
 
 
 # ---------------------------------------------------------------------------
@@ -1054,7 +1058,7 @@ def stub_universe(monkeypatch) -> None:
     conversion and the filing-date dedup then run for real instead of being
     reimplemented in the fixture and proved against themselves.
     """
-    from app.data import sharadar_client as sc
+    from app.data.sharadar import transport as sh_transport
 
     def route(table, query, **kwargs):
         if table == "DAILY":
@@ -1073,18 +1077,18 @@ def stub_universe(monkeypatch) -> None:
             return sf3b_payload()
         raise AssertionError(f"unexpected table {table}")
 
-    monkeypatch.setattr(sc, "_get", route)
+    monkeypatch.setattr(sh_transport, "_get", route)
 
 
 @pytest.fixture
 def peer_universe(monkeypatch):
     """The joined universe frame, as ``ResearchDataset.peer_universe`` holds it."""
-    from app.data import sharadar_client as sc
+    from app.data.sharadar import universe as sh_universe
     from app.logic.research import comparison
 
     stub_universe(monkeypatch)
     return comparison.build_peer_universe(
-        sc._fetch_universe_daily("2026-08-05"),
-        sc._fetch_universe_fundamentals("2026-02-15"),
-        sc._fetch_ticker_directory(),
+        sh_universe._fetch_universe_daily("2026-08-05"),
+        sh_universe._fetch_universe_fundamentals("2026-02-15"),
+        sh_universe._fetch_ticker_directory(),
     )
