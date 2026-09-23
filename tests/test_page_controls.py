@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import importlib
 import inspect
+import pkgutil
 
 import pandas as pd
 import pytest
 
-from app.formatting import format_date
+from app.formatting import format_date, format_pct
 from app.logic.dcf import model as dcf_model
 from app.logic.dcf import reverse
 from app.logic.dcf import valuation as dcf
 from app.views.research import dcf as page
+from app.views.research.dcf import assumptions, common, implied, results
 
 
 def _inputs(**overrides) -> dict:
@@ -191,7 +194,7 @@ def test_every_reverse_status_has_a_message():
             local_slope=5.0 if status is reverse.Status.SOLVED else None,
             reason="measured detail",
         )
-        level, message = page._reverse_message(result)
+        level, message = implied._reverse_message(result)
         assert level in {"", "info", "warning", "error"}
         if status is not reverse.Status.SOLVED:
             assert message, f"{status} renders nothing"
@@ -199,12 +202,12 @@ def test_every_reverse_status_has_a_message():
 
 def test_an_ordinary_solved_rate_needs_no_banner():
     result = _reverse(reverse.Status.SOLVED, growth=0.12, local_slope=5.0)
-    assert page._reverse_message(result) == ("", "")
+    assert implied._reverse_message(result) == ("", "")
 
 
 def test_a_value_destroying_solve_says_the_reading_is_inverted():
     result = _reverse(reverse.Status.SOLVED, growth=0.12, local_slope=-5.0)
-    level, message = page._reverse_message(result)
+    level, message = implied._reverse_message(result)
     assert level == "warning"
     assert "destroys value" in message
     assert "inverted" in message
@@ -212,21 +215,21 @@ def test_a_value_destroying_solve_says_the_reading_is_inverted():
 
 def test_an_extreme_solved_rate_is_flagged_rather_than_presented_as_a_forecast():
     result = _reverse(reverse.Status.SOLVED, growth=0.90, local_slope=5.0)
-    level, message = page._reverse_message(result)
+    level, message = implied._reverse_message(result)
     assert level == "warning"
     assert "not explained by revenue growth" in message
 
 
 def test_the_precondition_message_says_it_is_not_a_failed_search():
     result = _reverse(reverse.Status.NOT_EVALUABLE, reason="Terminal growth is not below WACC.")
-    level, message = page._reverse_message(result)
+    level, message = implied._reverse_message(result)
     assert level == "error"
     assert "not a failed search" in message
 
 
 def test_an_unwritten_status_is_a_loud_failure_not_a_blank_panel():
     with pytest.raises(AssertionError):
-        page._reverse_message(_reverse("invented_status"))
+        implied._reverse_message(_reverse("invented_status"))
 
 
 def test_the_out_of_range_reason_states_the_bounds_it_searched():
@@ -239,7 +242,7 @@ def test_the_out_of_range_reason_states_the_bounds_it_searched():
 
 
 def test_an_implied_revenue_path_compounds_from_the_base():
-    path = page._implied_revenue_path(1000.0, 0.10, 3)
+    path = implied._implied_revenue_path(1000.0, 0.10, 3)
     assert path == pytest.approx([1100.0, 1210.0, 1331.0])
 
 
@@ -260,21 +263,27 @@ def test_a_missing_date_renders_as_a_dash_not_a_fabricated_one():
 
 def test_a_missing_percentage_reads_as_missing_like_everywhere_else():
     """It used to read "n/a" here and "not reported" on every other tab."""
-    assert page.format_pct(None) == "not reported"
-    assert page.format_pct(float("nan")) == "not reported"
-    assert page.format_pct(float("inf")) == "not reported"
+    assert format_pct(None) == "not reported"
+    assert format_pct(float("nan")) == "not reported"
+    assert format_pct(float("inf")) == "not reported"
 
 
 def test_valuation_money_is_quoted_in_whole_units_below_a_million():
-    assert page._money(123_456.78, "USD") == "USD 123,457"
-    assert page._money(4.54e12, "USD") == "USD 4.54T"
-    assert page._money(pd.NA) == "not reported"
+    assert common.money(123_456.78, "USD") == "USD 123,457"
+    assert common.money(4.54e12, "USD") == "USD 4.54T"
+    assert common.money(pd.NA) == "not reported"
 
 
 def test_the_tab_no_longer_carries_a_statement_viewer():
     """It points at 📄 Financials instead. A second one would drift from it."""
-    for name in ("_statement_frame", "_render_reported_figures", "_STATEMENTS", "_UNITS"):
-        assert not hasattr(page, name), name
+    modules = [page] + [
+        importlib.import_module(f"{page.__name__}.{info.name}")
+        for info in pkgutil.iter_modules(page.__path__)
+    ]
+    assert len(modules) > 1
+    for module in modules:
+        for name in ("_statement_frame", "_render_reported_figures", "_STATEMENTS", "_UNITS"):
+            assert not hasattr(module, name), (module.__name__, name)
 
 
 # ---------------------------------------------------------------------------
@@ -287,7 +296,7 @@ def test_gordon_row_is_restated_as_an_exit_multiple():
         method="Gordon growth", value=1000.0, present_value=800.0,
         discount_exponent=3.5, formula="", implied_exit_multiple=13.6,
     )
-    assert page._cross_implied(terminal) == "an exit multiple of 13.60×"
+    assert results._cross_implied(terminal) == "an exit multiple of 13.60×"
 
 
 def test_exit_multiple_row_is_restated_as_perpetual_growth():
@@ -295,7 +304,7 @@ def test_exit_multiple_row_is_restated_as_perpetual_growth():
         method="Exit multiple", value=1000.0, present_value=800.0,
         discount_exponent=3.5, formula="", implied_growth=0.0511,
     )
-    assert page._cross_implied(terminal) == "perpetual growth of 5.11%"
+    assert results._cross_implied(terminal) == "perpetual growth of 5.11%"
 
 
 def test_cross_check_is_blank_when_neither_is_computable():
@@ -303,7 +312,7 @@ def test_cross_check_is_blank_when_neither_is_computable():
         method="Gordon growth", value=1000.0, present_value=800.0,
         discount_exponent=3.5, formula="",
     )
-    assert page._cross_implied(terminal) == "—"
+    assert results._cross_implied(terminal) == "—"
 
 
 def test_the_two_methods_really_do_cross_imply_each_other():
@@ -341,14 +350,14 @@ def test_exit_multiple_is_the_default_headline_method():
 
 def test_the_radio_offers_the_default_first():
     """Streamlit selects the first option, so the order is the default."""
-    labels = list(page._HEADLINE_METHODS)
+    labels = list(assumptions._HEADLINE_METHODS)
     assert labels[0] == "Exit multiple"
 
 
 def test_the_ui_and_the_engine_agree_on_the_default():
-    first_label = list(page._HEADLINE_METHODS)[0]
-    assert page._HEADLINE_METHODS[first_label] == dcf_model.DEFAULT_HEADLINE_METHOD
+    first_label = list(assumptions._HEADLINE_METHODS)[0]
+    assert assumptions._HEADLINE_METHODS[first_label] == dcf_model.DEFAULT_HEADLINE_METHOD
 
 
 def test_both_methods_remain_selectable():
-    assert set(page._HEADLINE_METHODS.values()) == {"exit_multiple", "gordon"}
+    assert set(assumptions._HEADLINE_METHODS.values()) == {"exit_multiple", "gordon"}
