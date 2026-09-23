@@ -8,7 +8,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from app.data import sharadar_client as sc
+from app.data.sharadar import statements as sh_statements
+from app.data.sharadar import transport as sh_transport
 from app.logic.dcf import financials as fin
 from app.logic.dcf.schema import resolve_schema
 
@@ -18,8 +19,8 @@ def concept_table(statements_payload, tickers_response, monkeypatch):
     def _get(table, params, ticker=None):
         return tickers_response if table == "TICKERS" else statements_payload
 
-    monkeypatch.setattr(sc, "_get", _get)
-    statements = sc._fetch_statements("TEST", annual=True)
+    monkeypatch.setattr(sh_transport, "_get", _get)
+    statements = sh_statements._fetch_statements("TEST", annual=True)
     schema = resolve_schema(statements.frames, "TEST", statements.template)
     values, meta = fin.build_concept_table(statements, schema)
     return values, meta, schema
@@ -61,8 +62,8 @@ def test_a_column_absent_from_the_response_stays_nan(concept_table, statements_p
     def _get(table, params, ticker=None):
         return tickers_response if table == "TICKERS" else stripped
 
-    monkeypatch.setattr(sc, "_get", _get)
-    statements = sc._fetch_statements("TEST", annual=True)
+    monkeypatch.setattr(sh_transport, "_get", _get)
+    statements = sh_statements._fetch_statements("TEST", annual=True)
     schema = resolve_schema(statements.frames, "TEST", statements.template)
     values, _ = fin.build_concept_table(statements, schema)
     assert "sbc" not in values.columns

@@ -188,18 +188,6 @@ def test_nothing_in_logic_imports_the_ui_or_network_directly():
 #: Modules that break the rule today, each with the step that fixes it. Strict,
 #: so a fix that lands without removing its entry fails as an unexpected pass.
 _KNOWN_IMPURE = {
-    **dict.fromkeys(
-        (
-            "app.logic.dcf.financials",
-            "app.logic.research.growth",
-            "app.logic.research.holdings",
-            "app.logic.research.insiders",
-            "app.logic.research.summary",
-            "app.logic.research.valuation",
-            "app.logic.statements",
-        ),
-        "imports Sharadar vocabulary from the module that holds the HTTP client",
-    ),
     "app.logic.portfolio_statistics": "fetches price history from the logic layer",
 }
 
@@ -286,7 +274,7 @@ def _private_reaches(name: str) -> list[str]:
                 if target in MODULES:
                     aliases[alias.asname or alias.name] = target
                 elif _private(alias.name):
-                    found.append(f"from {base} import {alias.name}")
+                    found.append(f"{base}.{alias.name}")
         elif isinstance(node, ast.Import):
             for alias in node.names:
                 if alias.name in MODULES and alias.asname:
@@ -302,10 +290,29 @@ def _private_reaches(name: str) -> list[str]:
     return sorted(set(found))
 
 
+#: Packages whose modules share their internals with each other, behind a
+#: public facade. ``app.data.sharadar`` is the Sharadar client split by table:
+#: its table modules call ``transport._request_all`` and the uncached
+#: ``_fetch_*`` of their siblings, and nothing outside it may — the rest of the
+#: app goes through ``app.data.sharadar_client``.
+_IMPLEMENTATION_PACKAGES = ("app.data.sharadar",)
+
+
+def _same_implementation_package(importer: str, reached: str) -> bool:
+    return any(
+        importer.startswith(package + ".") and reached.startswith(package + ".")
+        for package in _IMPLEMENTATION_PACKAGES
+    )
+
+
 @pytest.mark.parametrize("module", sorted(MODULES))
 def test_no_module_reaches_into_another_modules_private_names(module):
     """An underscore is a promise that nothing else depends on the name.
 
     Tests are exempt — they are the one consumer allowed to pin internals.
     """
-    assert not _private_reaches(module)
+    assert not [
+        reached
+        for reached in _private_reaches(module)
+        if not _same_implementation_package(module, reached)
+    ]

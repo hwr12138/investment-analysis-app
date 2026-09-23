@@ -41,7 +41,7 @@ from datetime import date
 
 import pandas as pd
 
-from app.data import sharadar_client
+from app.data.sharadar import vocabulary
 from app.logic.research import comparison as shared
 from app.logic.research.comparison import Comparison
 from app.logic.research.formatting import format_pct, format_ratio
@@ -218,7 +218,7 @@ def _ttm_terms(statements_ttm: dict[str, pd.DataFrame], indicator: str) -> pd.Da
     naming a column here. A caption change upstream then loses the row visibly
     rather than returning a different line.
     """
-    caption = sharadar_client.SF1_CAPTIONS.get(indicator)
+    caption = vocabulary.SF1_CAPTIONS.get(indicator)
     if not caption:
         return pd.DataFrame()
 

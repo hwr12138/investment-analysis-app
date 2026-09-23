@@ -13,7 +13,7 @@ Two conventions from the DCF engine carry over unchanged:
 
 The one place those two rules genuinely collide is the dividend. Sharadar fills
 ``dps`` and ``divyield`` with ``0`` both for companies that pay nothing and for
-figures absent from a filing (see ``sharadar_client.ZERO_FILLED_INDICATORS``),
+figures absent from a filing (see ``vocabulary.ZERO_FILLED_INDICATORS``),
 so a bare ``0.00`` is ambiguous. :func:`_dividend_tile` resolves it by
 cross-checking the ACTIONS table, which records an actual dividend payment or
 records nothing at all.
@@ -26,7 +26,7 @@ from datetime import date
 
 import pandas as pd
 
-from app.data import sharadar_client
+from app.data.sharadar import vocabulary
 from app.logic.dcf import wacc as wacc_lib
 from app.logic.research.formatting import (
     format_count,
@@ -221,7 +221,7 @@ def _statement_value(frame: pd.DataFrame, indicator: str) -> tuple[float | None,
     Indexed by indicator code rather than by Sharadar's published caption, so a
     caption change upstream cannot silently return the wrong line.
     """
-    caption = sharadar_client.SF1_CAPTIONS.get(indicator)
+    caption = vocabulary.SF1_CAPTIONS.get(indicator)
     if not caption or frame.empty or caption not in frame.columns:
         return None, None
     row = frame.iloc[-1]
@@ -347,7 +347,7 @@ def _recent_dividends(actions: pd.DataFrame, today: date, days: int = 366) -> pd
     """Dividend rows with an ex-date inside the trailing window."""
     if actions.empty or "action" not in actions.columns:
         return pd.DataFrame(columns=["date", "value"])
-    dividends = actions[actions["action"] == sharadar_client.DIVIDEND_ACTION]
+    dividends = actions[actions["action"] == vocabulary.DIVIDEND_ACTION]
     if dividends.empty:
         return pd.DataFrame(columns=["date", "value"])
     cutoff = pd.Timestamp(today) - pd.Timedelta(days=days)
@@ -362,7 +362,7 @@ def _ex_dividend_tile(actions: pd.DataFrame, currency: str, today: date) -> Stat
         return StatTile.unavailable(
             label, "Sharadar ACTIONS", "No corporate actions on record."
         )
-    dividends = actions[actions["action"] == sharadar_client.DIVIDEND_ACTION]
+    dividends = actions[actions["action"] == vocabulary.DIVIDEND_ACTION]
     if dividends.empty:
         return StatTile.unavailable(
             label, "Sharadar ACTIONS", "This company has never paid a dividend."

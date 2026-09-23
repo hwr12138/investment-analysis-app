@@ -19,6 +19,9 @@ import pandas as pd
 import pytest
 
 from app.data import sharadar_client as sc
+from app.data.sharadar import prices as sh_prices
+from app.data.sharadar import transport as sh_transport
+from app.data.sharadar import universe as sh_universe
 from app.logic.research import comparison as comparison_lib
 from app.logic.research import valuation
 from app.provenance import Origin
@@ -59,7 +62,7 @@ def test_universe_daily_rescales_market_cap_and_ev(monkeypatch):
     for a second call site; this is that call site.
     """
     stub_universe(monkeypatch)
-    frame = sc._fetch_universe_daily("2026-08-05").set_index("ticker")
+    frame = sh_universe._fetch_universe_daily("2026-08-05").set_index("ticker")
     assert frame.loc["TEST", "marketcap"] == pytest.approx(2.0e9)
     assert frame.loc["TEST", "ev"] == pytest.approx(2.2e9)
     # Ratios are dimensionless and must not be touched.
@@ -74,7 +77,7 @@ def test_both_daily_fetchers_share_one_conversion():
     """
     import inspect
 
-    for fetcher in (sc._fetch_daily_metrics, sc._fetch_universe_daily):
+    for fetcher in (sh_prices._fetch_daily_metrics, sh_universe._fetch_universe_daily):
         assert "_normalise_daily" in inspect.getsource(fetcher)
 
 
@@ -85,7 +88,7 @@ def test_a_restated_period_keeps_the_later_filing(monkeypatch):
     one row survives — and it has to be the corrected one.
     """
     stub_universe(monkeypatch)
-    frame = sc._fetch_universe_fundamentals("2025-01-15")
+    frame = sh_universe._fetch_universe_fundamentals("2025-01-15")
     latest = frame[
         (frame["ticker"] == "TEST") & (frame["calendardate"] == pd.Timestamp("2026-03-31"))
     ]
@@ -97,7 +100,7 @@ def test_a_restated_period_keeps_the_later_filing(monkeypatch):
 def test_the_window_keeps_every_period_not_just_the_latest(monkeypatch):
     """Growth needs both ends of a year-on-year, so the window is not collapsed."""
     stub_universe(monkeypatch)
-    frame = sc._fetch_universe_fundamentals("2025-01-15")
+    frame = sh_universe._fetch_universe_fundamentals("2025-01-15")
     periods = frame[frame["ticker"] == "TEST"]["calendardate"]
     assert sorted(periods.dt.date.astype(str)) == ["2025-03-31", "2026-03-31"]
     # Every ticker in the fixture files twice; only the restatement collapses.
@@ -112,9 +115,9 @@ def test_universe_requests_project_their_columns(monkeypatch):
         seen.append(query)
         return directory_payload() if table == "TICKERS" else universe_sf1_payload()
 
-    monkeypatch.setattr(sc, "_get", capture)
-    sc._fetch_ticker_directory()
-    sc._fetch_universe_fundamentals("2026-02-15")
+    monkeypatch.setattr(sh_transport, "_get", capture)
+    sh_universe._fetch_ticker_directory()
+    sh_universe._fetch_universe_fundamentals("2026-02-15")
     assert all("qopts.columns" in query for query in seen)
 
 
@@ -126,8 +129,8 @@ def test_universe_daily_asks_for_a_date_and_no_ticker(monkeypatch):
         seen.append(query)
         return universe_daily_payload()
 
-    monkeypatch.setattr(sc, "_get", capture)
-    sc._fetch_universe_daily("2026-08-05")
+    monkeypatch.setattr(sh_transport, "_get", capture)
+    sh_universe._fetch_universe_daily("2026-08-05")
     assert seen[0]["date"] == "2026-08-05"
     assert "ticker" not in seen[0]
 

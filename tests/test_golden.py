@@ -14,6 +14,9 @@ import pandas as pd
 import pytest
 
 from app.data import market_data, sharadar_client as sc
+from app.data.sharadar import reference as sh_reference
+from app.data.sharadar import statements as sh_statements
+from app.data.sharadar import transport as sh_transport
 from app.logic.dcf import financials as fin
 from app.logic.dcf import model as dcf_model
 from app.logic.dcf import validation as val
@@ -54,10 +57,12 @@ def build_model(statements_payload, tickers_response, monkeypatch) -> dict:
             raise sc.TickerNotFoundError(
                 "No quarterly history.", table="SF1", ticker=ticker
             )
-        return sc._fetch_statements(ticker, annual=True, asreported=asreported)
+        return sh_statements._fetch_statements(ticker, annual=True, asreported=asreported)
 
-    monkeypatch.setattr(sc, "_get", _get)
-    monkeypatch.setattr(sc, "fetch_ticker_meta", lambda ticker: sc._fetch_ticker_meta(ticker))
+    monkeypatch.setattr(sh_transport, "_get", _get)
+    monkeypatch.setattr(
+        sc, "fetch_ticker_meta", lambda ticker: sh_reference._fetch_ticker_meta(ticker)
+    )
     monkeypatch.setattr(sc, "fetch_statements", _statements)
     monkeypatch.setattr(sc, "fetch_prices", lambda *a, **k: prices)
 
@@ -248,9 +253,9 @@ def test_financial_sector_is_rejected_before_anything_is_computed(
     def _get(table, params, ticker=None):
         return financial_tickers_response if table == "TICKERS" else statements_payload
 
-    monkeypatch.setattr(sc, "_get", _get)
-    monkeypatch.setattr(sc, "fetch_ticker_meta", sc._fetch_ticker_meta)
-    monkeypatch.setattr(sc, "fetch_statements", sc._fetch_statements)
+    monkeypatch.setattr(sh_transport, "_get", _get)
+    monkeypatch.setattr(sc, "fetch_ticker_meta", sh_reference._fetch_ticker_meta)
+    monkeypatch.setattr(sc, "fetch_statements", sh_statements._fetch_statements)
 
     with pytest.raises(val.UnsupportedSectorError) as caught:
         dcf_model.load_company("JPM")
@@ -274,9 +279,9 @@ def test_a_null_vendor_sector_alone_does_not_reject(
     def _get(table, params, ticker=None):
         return payload if table == "TICKERS" else statements_payload
 
-    monkeypatch.setattr(sc, "_get", _get)
-    monkeypatch.setattr(sc, "fetch_ticker_meta", sc._fetch_ticker_meta)
-    monkeypatch.setattr(sc, "fetch_statements", sc._fetch_statements)
+    monkeypatch.setattr(sh_transport, "_get", _get)
+    monkeypatch.setattr(sc, "fetch_ticker_meta", sh_reference._fetch_ticker_meta)
+    monkeypatch.setattr(sc, "fetch_statements", sh_statements._fetch_statements)
     monkeypatch.setattr(sc, "fetch_prices", lambda *a, **k: pd.DataFrame(
         {"Date": pd.date_range("2026-07-01", periods=5, freq="B"),
          "Last Closing Price": [50.0] * 5}

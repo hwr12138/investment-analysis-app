@@ -20,6 +20,7 @@ import pandas as pd
 import pytest
 
 from app.data import sharadar_client as sc
+from app.data.sharadar import statements as sh_statements
 from app.logic import statements
 from app.logic.research import dataset as research_dataset
 from app.logic.research import summary as research_summary
@@ -38,10 +39,10 @@ from tests.conftest import SF1_COLUMNS, _ANNUAL_ROWS, _TTM_ROW, blank, sf1_paylo
 
 
 def _frames(rows=None) -> dict:
-    built = sc._sf1_frames(
+    built = sh_statements._sf1_frames(
         sc.parse_datatable(sf1_payload(rows)), source_link="x", restated=True
     )
-    return {name: sc._order_statement_rows(frame) for name, frame in built.items()}
+    return {name: sh_statements._order_statement_rows(frame) for name, frame in built.items()}
 
 
 class _SessionState(dict):

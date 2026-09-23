@@ -6,6 +6,12 @@ import pandas as pd
 import pytest
 
 from app.data import sharadar_client as sc
+from app.data.sharadar import actions as sh_actions
+from app.data.sharadar import insiders as sh_insiders
+from app.data.sharadar import prices as sh_prices
+from app.data.sharadar import reference as sh_reference
+from app.data.sharadar import statements as sh_statements
+from app.data.sharadar import transport as sh_transport
 from tests.conftest import SF1_COLUMNS, sf1_payload, tickers_payload
 
 
@@ -49,7 +55,7 @@ def test_empty_payload_yields_an_empty_frame():
 def test_rows_are_sorted_chronologically(monkeypatch, statements_payload, tickers_response):
     """The fixture rows arrive 2025, 2023, 2024 — the client must reorder them."""
     _stub_tables(monkeypatch, sf1=statements_payload, tickers=tickers_response)
-    statements = sc._fetch_statements("TEST")
+    statements = sh_statements._fetch_statements("TEST")
     years = statements.frame("PL")["Fiscal Year"].tolist()
     assert years == [2023, 2024, 2025]
 
@@ -64,7 +70,7 @@ def test_duplicate_period_keeps_the_later_filing(monkeypatch, annual_rows, ticke
         sf1=sf1_payload(annual_rows + [restated]),
         tickers=tickers_response,
     )
-    frame = sc._fetch_statements("TEST").frame("PL")
+    frame = sh_statements._fetch_statements("TEST").frame("PL")
     assert len(frame) == 3
     assert frame["Revenues"].iloc[-1] == 1250
 
@@ -77,7 +83,7 @@ def test_duplicate_period_keeps_the_later_filing(monkeypatch, annual_rows, ticke
 def test_expense_lines_are_negated_on_ingest(monkeypatch, statements_payload, tickers_response):
     """Sharadar publishes expenses positive; the engine's contract is negative."""
     _stub_tables(monkeypatch, sf1=statements_payload, tickers=tickers_response)
-    pl = sc._fetch_statements("TEST").frame("PL")
+    pl = sh_statements._fetch_statements("TEST").frame("PL")
     latest = pl.iloc[-1]
     assert latest["Cost of Revenue"] == -700
     assert latest["Operating Expenses"] == -190
@@ -87,7 +93,7 @@ def test_expense_lines_are_negated_on_ingest(monkeypatch, statements_payload, ti
 def test_capex_is_not_negated(monkeypatch, statements_payload, tickers_response):
     """Sharadar already signs capex negative — flipping it would invert FCFF."""
     _stub_tables(monkeypatch, sf1=statements_payload, tickers=tickers_response)
-    cf = sc._fetch_statements("TEST").frame("CF")
+    cf = sh_statements._fetch_statements("TEST").frame("CF")
     assert cf["Capital Expenditure"].iloc[-1] == -100
 
 
@@ -96,7 +102,7 @@ def test_income_statement_identity_holds_after_sign_flips(
 ):
     """Revenue + cost of revenue + operating expenses = operating income."""
     _stub_tables(monkeypatch, sf1=statements_payload, tickers=tickers_response)
-    row = sc._fetch_statements("TEST").frame("PL").iloc[-1]
+    row = sh_statements._fetch_statements("TEST").frame("PL").iloc[-1]
     computed = row["Revenues"] + row["Cost of Revenue"] + row["Operating Expenses"]
     assert computed == pytest.approx(row["Operating Income"])
 
@@ -109,7 +115,7 @@ def test_minority_interest_is_derived_as_the_equity_residual(
     # Push equity below the residual so a non-zero NCI has to appear.
     row[SF1_COLUMNS.index("equity")] = 300.0  # assets 1060 − liabilities 700 = 360
     _stub_tables(monkeypatch, sf1=sf1_payload([row]), tickers=tickers_response)
-    bs = sc._fetch_statements("TEST").frame("BS")
+    bs = sh_statements._fetch_statements("TEST").frame("BS")
     assert bs[sc.MINORITY_INTEREST_CAPTION].iloc[-1] == pytest.approx(60.0)
 
 
@@ -117,7 +123,7 @@ def test_fiscal_period_is_split_into_year_and_period(
     monkeypatch, statements_payload, tickers_response
 ):
     _stub_tables(monkeypatch, sf1=statements_payload, tickers=tickers_response)
-    pl = sc._fetch_statements("TEST").frame("PL")
+    pl = sh_statements._fetch_statements("TEST").frame("PL")
     assert pl["Fiscal Year"].tolist() == [2023, 2024, 2025]
     assert set(pl["Fiscal Period"]) == {"FY"}
 
@@ -127,7 +133,7 @@ def test_every_statement_frame_carries_the_same_metadata(
 ):
     """All four frames come off one SF1 row, so the merge key is identical."""
     _stub_tables(monkeypatch, sf1=statements_payload, tickers=tickers_response)
-    statements = sc._fetch_statements("TEST")
+    statements = sh_statements._fetch_statements("TEST")
     reference = statements.frame("PL")[["Fiscal Year", "Fiscal Period", "Report Date"]]
     for code in ("BS", "CF", "DERIVED"):
         other = statements.frame(code)[["Fiscal Year", "Fiscal Period", "Report Date"]]
@@ -143,8 +149,8 @@ def test_daily_market_cap_and_ev_are_rescaled_to_raw_units(monkeypatch):
         },
         "meta": {"next_cursor_id": None},
     }
-    monkeypatch.setattr(sc, "_get", lambda *a, **k: payload)
-    frame = sc._fetch_daily_metrics("AAPL")
+    monkeypatch.setattr(sh_transport, "_get", lambda *a, **k: payload)
+    frame = sh_prices._fetch_daily_metrics("AAPL")
     assert frame["marketcap"].iloc[0] == pytest.approx(4.4281661e12)
     assert frame["ev"].iloc[0] == pytest.approx(4.4729661e12)
     # Ratios are dimensionless and must not be touched.
@@ -163,8 +169,8 @@ def test_daily_metrics_exposes_the_multiples_that_fetch_prices_drops(monkeypatch
         },
         "meta": {"next_cursor_id": None},
     }
-    monkeypatch.setattr(sc, "_get", lambda *a, **k: payload)
-    frame = sc._fetch_daily_metrics("AAPL")
+    monkeypatch.setattr(sh_transport, "_get", lambda *a, **k: payload)
+    frame = sh_prices._fetch_daily_metrics("AAPL")
     for column in ("pe", "pb", "ps", "evebit"):
         assert column in frame.columns
     assert frame["pe"].iloc[0] == pytest.approx(35.2)
@@ -179,8 +185,8 @@ def test_daily_metrics_exposes_the_multiples_that_fetch_prices_drops(monkeypatch
 
 def test_actions_are_sorted_oldest_first(monkeypatch, actions_response):
     """ACTIONS arrives newest-first — the reverse of every other table here."""
-    monkeypatch.setattr(sc, "_get", lambda *a, **k: actions_response)
-    frame = sc._fetch_actions("TEST")
+    monkeypatch.setattr(sh_transport, "_get", lambda *a, **k: actions_response)
+    frame = sh_actions._fetch_actions("TEST")
     dates = frame["date"].tolist()
     assert dates == sorted(dates)
     assert frame["date"].iloc[-1] == pd.Timestamp("2025-11-10")
@@ -188,8 +194,8 @@ def test_actions_are_sorted_oldest_first(monkeypatch, actions_response):
 
 def test_actions_normalise_the_na_contra_columns(monkeypatch, actions_response):
     """Sharadar writes the string "N/A", which would otherwise render as a ticker."""
-    monkeypatch.setattr(sc, "_get", lambda *a, **k: actions_response)
-    frame = sc._fetch_actions("TEST")
+    monkeypatch.setattr(sh_transport, "_get", lambda *a, **k: actions_response)
+    frame = sh_actions._fetch_actions("TEST")
     dividends = frame[frame["action"] == sc.DIVIDEND_ACTION]
     assert dividends["contraticker"].isna().all()
     # A real counterparty survives.
@@ -198,8 +204,8 @@ def test_actions_normalise_the_na_contra_columns(monkeypatch, actions_response):
 
 
 def test_actions_dividend_rows_carry_the_ex_date_and_amount(monkeypatch, actions_response):
-    monkeypatch.setattr(sc, "_get", lambda *a, **k: actions_response)
-    frame = sc._fetch_actions("TEST")
+    monkeypatch.setattr(sh_transport, "_get", lambda *a, **k: actions_response)
+    frame = sh_actions._fetch_actions("TEST")
     latest = frame[frame["action"] == sc.DIVIDEND_ACTION].iloc[-1]
     assert latest["date"] == pd.Timestamp("2025-11-10")
     assert latest["value"] == pytest.approx(0.27)
@@ -208,8 +214,8 @@ def test_actions_dividend_rows_carry_the_ex_date_and_amount(monkeypatch, actions
 def test_no_actions_returns_an_empty_frame_rather_than_raising(monkeypatch):
     """A company that has never paid a dividend is ordinary, not an error."""
     empty = {"datatable": {"columns": [], "data": []}, "meta": {"next_cursor_id": None}}
-    monkeypatch.setattr(sc, "_get", lambda *a, **k: empty)
-    assert sc._fetch_actions("TEST").empty
+    monkeypatch.setattr(sh_transport, "_get", lambda *a, **k: empty)
+    assert sh_actions._fetch_actions("TEST").empty
 
 
 # ---------------------------------------------------------------------------
@@ -218,8 +224,8 @@ def test_no_actions_returns_an_empty_frame_rather_than_raising(monkeypatch):
 
 
 def test_insider_rows_are_sorted_by_filing_date(monkeypatch, insiders_response):
-    monkeypatch.setattr(sc, "_get", lambda *a, **k: insiders_response)
-    frame = sc._fetch_insider_transactions("TEST")
+    monkeypatch.setattr(sh_transport, "_get", lambda *a, **k: insiders_response)
+    frame = sh_insiders._fetch_insider_transactions("TEST")
     dates = frame["filingdate"].tolist()
     assert dates == sorted(dates)
 
@@ -228,8 +234,8 @@ def test_two_lines_in_one_filing_are_ordered_by_row_number(
     monkeypatch, insiders_response
 ):
     """Each line carries a running balance; only the last one is end-of-day."""
-    monkeypatch.setattr(sc, "_get", lambda *a, **k: insiders_response)
-    frame = sc._fetch_insider_transactions("TEST")
+    monkeypatch.setattr(sh_transport, "_get", lambda *a, **k: insiders_response)
+    frame = sh_insiders._fetch_insider_transactions("TEST")
     same_day = frame[
         (frame["ownername"] == "JANE OFFICER")
         & (frame["filingdate"] == pd.Timestamp("2026-07-06"))
@@ -239,8 +245,8 @@ def test_two_lines_in_one_filing_are_ordered_by_row_number(
 
 
 def test_insider_dates_and_numbers_are_typed(monkeypatch, insiders_response):
-    monkeypatch.setattr(sc, "_get", lambda *a, **k: insiders_response)
-    frame = sc._fetch_insider_transactions("TEST")
+    monkeypatch.setattr(sh_transport, "_get", lambda *a, **k: insiders_response)
+    frame = sh_insiders._fetch_insider_transactions("TEST")
     assert str(frame["filingdate"].dtype).startswith("datetime64")
     assert str(frame["transactiondate"].dtype).startswith("datetime64")
     # Numeric, but not necessarily float: ``transactionshares`` comes back
@@ -253,8 +259,8 @@ def test_a_restated_filing_supersedes_the_row_it_corrects(
     monkeypatch, insiders_response
 ):
     """Ninety of 142 live restated rows repeated an existing trade verbatim."""
-    monkeypatch.setattr(sc, "_get", lambda *a, **k: insiders_response)
-    frame = sc._fetch_insider_transactions("TEST")
+    monkeypatch.setattr(sh_transport, "_get", lambda *a, **k: insiders_response)
+    frame = sh_insiders._fetch_insider_transactions("TEST")
     sale = frame[
         (frame["ownername"] == "LATE FILER")
         & (frame["transactiondate"] == pd.Timestamp("2026-06-30"))
@@ -268,8 +274,8 @@ def test_holdings_rows_are_never_deduplicated_against_each_other(
 ):
     """Every field of the transaction key is null or zero on a Form 3 line, so
     one blanket dedup would collapse a company's whole holdings history."""
-    monkeypatch.setattr(sc, "_get", lambda *a, **k: insiders_response)
-    frame = sc._fetch_insider_transactions("TEST")
+    monkeypatch.setattr(sh_transport, "_get", lambda *a, **k: insiders_response)
+    frame = sh_insiders._fetch_insider_transactions("TEST")
     quiet = frame[frame["ownername"] == "QUIET HOLDER"]
     assert len(quiet) == 2
     assert set(quiet["securityadcode"]) == {"N", "D"}
@@ -280,8 +286,8 @@ def test_the_transaction_value_column_is_left_unsigned(
 ):
     """The client does not repair it. Quirk 6 documents it; the logic layer
     ignores the column entirely and multiplies shares by price instead."""
-    monkeypatch.setattr(sc, "_get", lambda *a, **k: insiders_response)
-    frame = sc._fetch_insider_transactions("TEST")
+    monkeypatch.setattr(sh_transport, "_get", lambda *a, **k: insiders_response)
+    frame = sh_insiders._fetch_insider_transactions("TEST")
     sale = frame[
         (frame["ownername"] == "JANE OFFICER")
         & (frame["transactioncode"] == "S")
@@ -306,8 +312,8 @@ def test_insider_codes_are_upper_cased_on_ingest(monkeypatch):
     for row in lowered:
         if row[code]:
             row[code] = row[code].lower()
-    monkeypatch.setattr(sc, "_get", lambda *a, **k: sf2_payload(lowered))
-    frame = sc._fetch_insider_transactions("TEST")
+    monkeypatch.setattr(sh_transport, "_get", lambda *a, **k: sf2_payload(lowered))
+    frame = sh_insiders._fetch_insider_transactions("TEST")
     assert "p" not in set(frame["transactioncode"].dropna())
     assert "P" in set(frame["transactioncode"].dropna())
 
@@ -321,8 +327,8 @@ def test_the_insider_fetch_filters_on_the_filing_date(monkeypatch, insiders_resp
         seen.append(query)
         return insiders_response
 
-    monkeypatch.setattr(sc, "_get", capture)
-    sc._fetch_insider_transactions("TEST", "2021-08-05")
+    monkeypatch.setattr(sh_transport, "_get", capture)
+    sh_insiders._fetch_insider_transactions("TEST", "2021-08-05")
     assert seen[0]["filingdate.gte"] == "2021-08-05"
     assert "transactiondate.gte" not in seen[0]
 
@@ -337,8 +343,8 @@ def test_the_insider_projection_omits_the_always_null_issuer_name(
         seen.append(query)
         return insiders_response
 
-    monkeypatch.setattr(sc, "_get", capture)
-    sc._fetch_insider_transactions("TEST")
+    monkeypatch.setattr(sh_transport, "_get", capture)
+    sh_insiders._fetch_insider_transactions("TEST")
     projection = seen[0]["qopts.columns"]
     assert "issuername" not in projection
     assert "rownum" in projection  # part of the primary key, kept deliberately
@@ -347,8 +353,8 @@ def test_the_insider_projection_omits_the_always_null_issuer_name(
 def test_no_insider_filings_returns_an_empty_frame_rather_than_raising(monkeypatch):
     """A company whose insiders have never filed is ordinary, not an error."""
     empty = {"datatable": {"columns": [], "data": []}, "meta": {"next_cursor_id": None}}
-    monkeypatch.setattr(sc, "_get", lambda *a, **k: empty)
-    assert sc._fetch_insider_transactions("TEST").empty
+    monkeypatch.setattr(sh_transport, "_get", lambda *a, **k: empty)
+    assert sh_insiders._fetch_insider_transactions("TEST").empty
 
 
 # ---------------------------------------------------------------------------
@@ -370,7 +376,7 @@ def test_zeros_are_passed_through_rather_than_blanked(
 ):
     """The client must not guess; a 0 stays a 0 and the validation layer flags it."""
     _stub_tables(monkeypatch, sf1=statements_payload, tickers=tickers_response)
-    pl = sc._fetch_statements("TEST").frame("PL")
+    pl = sh_statements._fetch_statements("TEST").frame("PL")
     assert pl["Interest Expense"].iloc[-1] == 0.0
     assert pl["Interest Expense"].notna().all()
 
@@ -426,9 +432,9 @@ def test_as_reported_and_restated_are_labelled_distinctly(
     monkeypatch, statements_payload, tickers_response
 ):
     _stub_tables(monkeypatch, sf1=statements_payload, tickers=tickers_response)
-    assert sc._fetch_statements("TEST").frame("PL")["Restated"].iloc[0] == "Yes"
+    assert sh_statements._fetch_statements("TEST").frame("PL")["Restated"].iloc[0] == "Yes"
     assert (
-        sc._fetch_statements("TEST", asreported=True).frame("PL")["Restated"].iloc[0]
+        sh_statements._fetch_statements("TEST", asreported=True).frame("PL")["Restated"].iloc[0]
         == "No"
     )
 
@@ -459,8 +465,8 @@ def test_omitting_a_default_keyword_still_hits_the_cache(monkeypatch):
             period="FY", ttm=ttm, asreported=asreported, frames={},
         )
 
-    monkeypatch.setattr(sc, "_fetch_statements", spy)
-    sc._cached_statements.clear()
+    monkeypatch.setattr(sh_statements, "_fetch_statements", spy)
+    sh_statements._cached_statements.clear()
 
     sc.fetch_statements("TEST", annual=True, ttm=False, asreported=False)
     sc.fetch_statements("TEST", annual=True, asreported=False)
@@ -472,7 +478,7 @@ def test_omitting_a_default_keyword_still_hits_the_cache(monkeypatch):
 
 def test_a_genuinely_different_dimension_is_still_its_own_entry():
     """The collapse above must not swallow a real difference."""
-    sc._cached_statements.clear()
+    sh_statements._cached_statements.clear()
     calls = []
 
     def spy(ticker, *, annual=True, ttm=False, asreported=False):
@@ -482,16 +488,16 @@ def test_a_genuinely_different_dimension_is_still_its_own_entry():
             dimension=calls[-1], period="FY", ttm=ttm, asreported=asreported, frames={},
         )
 
-    original = sc._fetch_statements
-    sc._fetch_statements = spy
+    original = sh_statements._fetch_statements
+    sh_statements._fetch_statements = spy
     try:
         sc.fetch_statements("TEST", annual=True)
         sc.fetch_statements("TEST", annual=False)
         sc.fetch_statements("TEST", annual=False, ttm=True)
         sc.fetch_statements("TEST", annual=False, asreported=True)
     finally:
-        sc._fetch_statements = original
-        sc._cached_statements.clear()
+        sh_statements._fetch_statements = original
+        sh_statements._cached_statements.clear()
 
     assert calls == ["MRY", "MRQ", "MRT", "ARQ"]
 
@@ -505,7 +511,7 @@ def test_share_frames_are_projected_off_the_statements(
     monkeypatch, statements_payload, tickers_response
 ):
     _stub_tables(monkeypatch, sf1=statements_payload, tickers=tickers_response)
-    statements = sc._fetch_statements("TEST")
+    statements = sh_statements._fetch_statements("TEST")
 
     common = sc.common_shares_frame(statements)
     assert list(common.columns) == ["endDate", "value"]
@@ -524,7 +530,7 @@ def test_share_factor_is_applied_to_the_point_in_time_count(
     row = list(annual_rows[0])
     row[SF1_COLUMNS.index("sharefactor")] = 0.5
     _stub_tables(monkeypatch, sf1=sf1_payload([row]), tickers=tickers_response)
-    common = sc.common_shares_frame(sc._fetch_statements("TEST"))
+    common = sc.common_shares_frame(sh_statements._fetch_statements("TEST"))
     assert common["value"].iloc[-1] == 500.0
 
 
@@ -532,7 +538,7 @@ def test_filings_frame_labels_annual_rows_as_10k(
     monkeypatch, statements_payload, tickers_response
 ):
     _stub_tables(monkeypatch, sf1=statements_payload, tickers=tickers_response)
-    filings = sc.filings_frame(sc._fetch_statements("TEST"))
+    filings = sc.filings_frame(sh_statements._fetch_statements("TEST"))
     assert filings["filingType"].tolist() == ["10-K", "10-K", "10-K"]
     assert filings["sourceLink"].iloc[-1].startswith("https://www.sec.gov/")
 
@@ -541,7 +547,7 @@ def test_fiscal_year_end_month_is_read_off_the_report_period(
     monkeypatch, statements_payload, tickers_response
 ):
     _stub_tables(monkeypatch, sf1=statements_payload, tickers=tickers_response)
-    assert sc.fiscal_year_end_month(sc._fetch_statements("TEST")) == 9
+    assert sc.fiscal_year_end_month(sh_statements._fetch_statements("TEST")) == 9
 
 
 # ---------------------------------------------------------------------------
@@ -561,11 +567,11 @@ class _FakeResponse:
 def test_error_never_carries_the_api_key(monkeypatch):
     """Nasdaq only takes the key as a query param, so no surface may echo params."""
     secret = "SUPERSECRETKEY123"
-    monkeypatch.setattr(sc, "_api_key", lambda: secret)
-    monkeypatch.setattr(sc.requests, "get", lambda *a, **k: _FakeResponse(403))
+    monkeypatch.setattr(sh_transport, "_api_key", lambda: secret)
+    monkeypatch.setattr(sh_transport.requests, "get", lambda *a, **k: _FakeResponse(403))
 
     with pytest.raises(sc.SharadarError) as caught:
-        sc._get("SF1", {"ticker": "AAPL"})
+        sh_transport._get("SF1", {"ticker": "AAPL"})
 
     rendered = f"{caught.value} {caught.value.args!r} {caught.value.__dict__!r}"
     assert secret not in rendered
@@ -575,10 +581,10 @@ def test_error_never_carries_the_api_key(monkeypatch):
 
 @pytest.mark.parametrize("status", [400, 403, 404])
 def test_each_status_gets_a_distinct_message(monkeypatch, status):
-    monkeypatch.setattr(sc, "_api_key", lambda: "k")
-    monkeypatch.setattr(sc.requests, "get", lambda *a, **k: _FakeResponse(status))
+    monkeypatch.setattr(sh_transport, "_api_key", lambda: "k")
+    monkeypatch.setattr(sh_transport.requests, "get", lambda *a, **k: _FakeResponse(status))
     with pytest.raises(sc.SharadarError) as caught:
-        sc._get("SF1", {})
+        sh_transport._get("SF1", {})
     assert str(status) in caught.value.message
 
 
@@ -589,33 +595,33 @@ def test_rate_limit_is_retried_then_raised(monkeypatch):
         calls["n"] += 1
         return _FakeResponse(429)
 
-    monkeypatch.setattr(sc, "_api_key", lambda: "k")
-    monkeypatch.setattr(sc.requests, "get", _get)
-    monkeypatch.setattr(sc.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(sh_transport, "_api_key", lambda: "k")
+    monkeypatch.setattr(sh_transport.requests, "get", _get)
+    monkeypatch.setattr(sh_transport.time, "sleep", lambda *_: None)
 
     with pytest.raises(sc.SharadarError) as caught:
-        sc._get("SF1", {})
-    assert calls["n"] == sc._MAX_ATTEMPTS
+        sh_transport._get("SF1", {})
+    assert calls["n"] == sh_transport._MAX_ATTEMPTS
     assert caught.value.status == 429
 
 
 def test_rate_limit_recovers_on_retry(monkeypatch):
     responses = [_FakeResponse(429), _FakeResponse(200, {"ok": True})]
-    monkeypatch.setattr(sc, "_api_key", lambda: "k")
-    monkeypatch.setattr(sc.requests, "get", lambda *a, **k: responses.pop(0))
-    monkeypatch.setattr(sc.time, "sleep", lambda *_: None)
-    assert sc._get("SF1", {}) == {"ok": True}
+    monkeypatch.setattr(sh_transport, "_api_key", lambda: "k")
+    monkeypatch.setattr(sh_transport.requests, "get", lambda *a, **k: responses.pop(0))
+    monkeypatch.setattr(sh_transport.time, "sleep", lambda *_: None)
+    assert sh_transport._get("SF1", {}) == {"ok": True}
 
 
 def test_missing_key_raises_before_any_request(monkeypatch):
-    monkeypatch.setattr(sc.st, "secrets", {})
+    monkeypatch.setattr(sh_transport.st, "secrets", {})
 
     def _fail(*args, **kwargs):
         raise AssertionError("a request was made without an API key")
 
-    monkeypatch.setattr(sc.requests, "get", _fail)
+    monkeypatch.setattr(sh_transport.requests, "get", _fail)
     with pytest.raises(sc.SharadarError, match="SHARADAR_API_KEY"):
-        sc._get("SF1", {})
+        sh_transport._get("SF1", {})
 
 
 def test_pagination_follows_the_cursor_until_exhausted(monkeypatch, annual_rows):
@@ -630,8 +636,8 @@ def test_pagination_follows_the_cursor_until_exhausted(monkeypatch, annual_rows)
         seen.append(dict(params))
         return pages[len(seen) - 1]
 
-    monkeypatch.setattr(sc, "_get", _get)
-    frame = sc._request_all("SF1", {"ticker": "TEST"})
+    monkeypatch.setattr(sh_transport, "_get", _get)
+    frame = sh_transport._request_all("SF1", {"ticker": "TEST"})
 
     assert len(frame) == 3
     assert len(seen) == 2
@@ -641,17 +647,16 @@ def test_pagination_follows_the_cursor_until_exhausted(monkeypatch, annual_rows)
 
 def test_pagination_stops_at_the_runaway_guard(monkeypatch, annual_rows):
     """A server that never clears the cursor must not loop forever."""
-    monkeypatch.setattr(
-        sc, "_get", lambda *a, **k: sf1_payload(annual_rows[:1], cursor="always")
+    monkeypatch.setattr(sh_transport, "_get", lambda *a, **k: sf1_payload(annual_rows[:1], cursor="always")
     )
-    frame = sc._request_all("SF1", {"ticker": "TEST"})
-    assert len(frame) == sc._MAX_PAGES
+    frame = sh_transport._request_all("SF1", {"ticker": "TEST"})
+    assert len(frame) == sh_transport._MAX_PAGES
 
 
 def test_unknown_ticker_raises_rather_than_returning_empty(monkeypatch, tickers_response):
     _stub_tables(monkeypatch, sf1=sf1_payload([]), tickers=tickers_response)
     with pytest.raises(sc.TickerNotFoundError):
-        sc._fetch_statements("NOPE")
+        sh_statements._fetch_statements("NOPE")
 
 
 # ---------------------------------------------------------------------------
@@ -668,8 +673,8 @@ def test_tickers_are_routed_to_sep_or_sfp(monkeypatch):
         },
         "meta": {"next_cursor_id": None},
     }
-    monkeypatch.setattr(sc, "_get", lambda *a, **k: payload)
-    routes = sc._fetch_price_tables(("AAPL", "SPY"))
+    monkeypatch.setattr(sh_transport, "_get", lambda *a, **k: payload)
+    routes = sh_reference._fetch_price_tables(("AAPL", "SPY"))
     assert routes == {"AAPL": "SEP", "SPY": "SFP"}
 
 
@@ -682,4 +687,4 @@ def _stub_tables(monkeypatch, *, sf1: dict, tickers: dict) -> None:
             return sf1
         raise AssertionError(f"unexpected table {table}")
 
-    monkeypatch.setattr(sc, "_get", _get)
+    monkeypatch.setattr(sh_transport, "_get", _get)
