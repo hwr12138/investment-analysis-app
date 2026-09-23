@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 pip install -r requirements-dev.txt          # requirements.txt + pytest; deployed app installs only requirements.txt
 streamlit run streamlit_app.py               # run the app
-python -m pytest tests/ -q                   # full suite (~350 tests, no network)
+python -m pytest tests/ -q                   # full suite (~960 tests, no network; CI runs it too)
 python -m pytest tests/test_valuation.py -q  # one file
 python -m pytest tests/test_wacc.py::test_market_value_of_equity -q  # one test
 python -m pytest tests/ -k "fcff" -q         # by name
@@ -38,10 +38,21 @@ Reach for it when the single module would otherwise hold pieces that have no rea
 about each other, not at a line count.
 
 `app/provenance.py` sits at the `app/` root because both the data and logic layers construct its
-types and neither may import the other.
+types and neither may import the other. `app/formatting.py` sits beside it for the same reason:
+the logic layer builds display strings with it (`StatTile`) and every view formats with it.
+`app/views/components.py` holds the few Streamlit pieces more than one page draws identically.
+
+**The layering is enforced, not just described.** `tests/test_architecture.py` parses `app/` into
+an import graph and fails if a logic module reaches Streamlit, `requests` or `yfinance` — even
+transitively, which is how it actually breaks — other than the two orchestrators
+(`logic/research/dataset.py`, `logic/dcf/model.py`); if data imports logic or views; if logic
+imports views; if the DCF arithmetic reaches `app.data` at all; or if any module uses another's
+`_private` name. A logic module that needs a Sharadar constant imports
+`app.data.sharadar.vocabulary`, never `sharadar_client`.
 
 To add a page: create the logic module, create the view with `render_page()`, register it in
-`st.navigation`, and reuse `app/data/market_data.py` for fetching.
+`st.navigation`, and fetch through `app/data/` — `sharadar_client` or `market_data` — from the
+view, never from the logic module.
 
 To add a **tab** to Stock Research: create `app/logic/research/<tab>.py` for the arithmetic and
 `app/views/research/<tab>.py` with a `render` function and its own CSS, then add the label to
@@ -61,7 +72,7 @@ carries eleven tabs — one of which is itself a package, holding two sub-tabs:
 ```
 app/views/research/            __init__.py = the shell; one module per tab beside it
 app/views/research/valuation/  the ⚖️ tab: shell + table + multiples + growth
-app/logic/research/            formatting, comparison ← summary, valuation, growth,
+app/logic/research/            comparison ← summary, valuation, growth,
                                insiders, holdings ← dataset
 ```
 
@@ -72,7 +83,7 @@ ticker for `dcf`, which loads its own. There is no shared signature, because the
 explicit and a uniform one would hide that the DCF reads nothing from the snapshot. Each tab
 also owns its CSS, so the rules travel with the markup they style.
 
-On the logic side the dependencies run one way — `formatting` and `comparison` are shared, each
+On the logic side the dependencies run one way — `comparison` is shared, each
 tab module owns its arithmetic, and `dataset` sits on top because it assembles the snapshot. Its
 calls into `summary.build_key_stats` and `comparison.build_peer_universe` are the only upward
 edges, and both exist for the same reason: the snapshot is assembled once per search, so
@@ -96,8 +107,12 @@ table anywhere: the removed one scaled every row by the units divisor, which tur
 margins into `0.00`, and `logic/statements.py` carries a `Unit` enum precisely so a layout
 cannot repeat that.
 
-`views/research/dcf.py` is by far the largest tab body and is the module to split next if it
-grows again — assumptions, valuation, reverse and export are each separable.
+`views/research/dcf/` is a package: `__init__` is the shell (the load, the two caches, the
+fingerprint, the session lifecycle and the draw order), beside `assumptions` (every input, one
+function per block of the panel), `checks` (banners, validation panel), `history`, `results`
+(header, projection, valuation), `implied` (the reverse DCF), `download` and `common`. The names
+avoid `valuation`, `reverse` and `export` on purpose — `app/logic/dcf/` already has modules by
+those names. Functions that cross modules are public inside the package; the rest stay private.
 
 ### The ⚖️ Valuation tab and its two sub-tabs
 
@@ -151,7 +166,7 @@ normalisation, validation, and arithmetic are each independently testable. The p
 
 | Module | Responsibility |
 |---|---|
-| `app/data/sharadar_client.py` | Nasdaq Data Link auth, retry, pagination, caching, datatable parsing |
+| `app/data/sharadar_client.py` | The client's public API — re-exports `app/data/sharadar/`: `transport` (auth, retry, pagination, parsing), `vocabulary` (pure), and one module per table |
 | `schema.py` | Concept alias table, runtime column resolution |
 | `financials.py` | Statement normalisation, TTM, ratio derivation |
 | `wacc.py` | Beta regression, discount rate — **pure** |
@@ -326,6 +341,11 @@ wrongly**.
 
 `tests/test_golden.py` snapshots one full model run. If a refactor moves those numbers, either
 the refactor is wrong or the snapshot needs updating with a stated reason.
+
+Tests take the network away by patching **`app.data.sharadar.transport._get`** — every table
+module calls it through the module attribute, so that one patch reaches all of them. A test that
+needs a client internal (`_fetch_statements`, `_sf1_frames`, …) imports the submodule that owns
+it as `sh_<module>`; `sharadar_client` re-exports only the public API.
 
 View-level tests (`test_page_controls.py`, `test_acknowledgements.py`, `test_research_page_controls.py`)
 import the view modules directly and monkeypatch `page.st.session_state` with a dict subclass,
