@@ -19,11 +19,11 @@ from __future__ import annotations
 
 import streamlit as st
 
+from app.formatting import format_pct
 from app.logic.research import comparison as shared
 from app.logic.research import growth as research
 from app.logic.research.comparison import Comparison
 from app.logic.research.dataset import ResearchDataset
-from app.logic.research.formatting import format_pct
 from app.views.research.valuation import table
 
 #: Percentage points. Below this the two rates are called level with each other

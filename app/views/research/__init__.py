@@ -44,6 +44,7 @@ import streamlit as st
 
 from app.data import sharadar_client
 from app.logic.research import dataset as research
+from app.views.components import render_blocking
 from app.views.research import (
     dcf,
     financials,
@@ -133,12 +134,6 @@ def _needs_load(dataset: research.ResearchDataset | None, ticker: str) -> bool:
     return dataset is None or dataset.ticker != ticker
 
 
-def _render_blocking(title: str, body: str, detail: str = "") -> None:
-    st.error(f"**{title}**\n\n{body}")
-    if detail:
-        st.caption(detail)
-
-
 # ---------------------------------------------------------------------------
 # Page
 # ---------------------------------------------------------------------------
@@ -183,7 +178,7 @@ def render_page() -> None:
             with st.spinner(f"Loading {loaded} from Sharadar…"):
                 dataset = _load_research_cached(loaded, date.today())
         except sharadar_client.TickerNotFoundError as error:
-            _render_blocking(
+            render_blocking(
                 f"No Sharadar record for {loaded}",
                 str(error),
                 "This page covers US equities carried in Sharadar's SF1 "
@@ -192,7 +187,7 @@ def render_page() -> None:
             )
             return
         except sharadar_client.SharadarError as error:
-            _render_blocking(f"Sharadar request failed for {loaded}", str(error))
+            render_blocking(f"Sharadar request failed for {loaded}", str(error))
             return
         st.session_state["research_output"] = dataset
 

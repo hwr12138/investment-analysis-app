@@ -1,17 +1,15 @@
-"""Number and date formatting shared by every research tab.
+"""Number and date formatting shared by every page.
 
-Pure string building — no Streamlit, no network. It lives in the logic layer
-rather than the view because a :class:`~app.logic.research.summary.StatTile`
-carries its ``display`` string already built, and formatting a float is not a
-Streamlit call.
+Pure string building — no Streamlit, no network. It sits at the ``app/`` root
+beside ``provenance`` and for the same reason: both layers need it. The logic
+layer builds a :class:`~app.logic.research.summary.StatTile` with its
+``display`` string already formatted, and every view formats what it draws.
 
-These overlap with the DCF view's private ``_money``/``_pct`` and differ from
-them deliberately: a research page wants a compact ``4.54T`` where a valuation
-wants a padded, full-precision figure. Two audiences, two conventions; sharing
-one would force a compromise that suits neither.
-
-Every function answers a missing value with ``"not reported"`` rather than a
-zero or a blank, which is the display half of the no-silent-fallbacks rule.
+Every function answers a missing value — ``None``, ``NaN``, ``±inf``,
+``pd.NA`` — with ``"not reported"`` rather than a zero or a blank, which is the
+display half of the no-silent-fallbacks rule. The one exception is a table
+cell, where :func:`format_date` takes ``missing="—"`` so a column of dates
+does not shout.
 """
 
 from __future__ import annotations
@@ -63,9 +61,9 @@ def format_pct(value, digits: int = 2) -> str:
     return f"{float(value):.{digits}%}"
 
 
-def format_date(value) -> str:
+def format_date(value, missing: str = "not reported") -> str:
     if is_missing(value):
-        return "not reported"
+        return missing
     return pd.Timestamp(value).date().isoformat()
 
 

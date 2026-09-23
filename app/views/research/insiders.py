@@ -18,9 +18,9 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from app.formatting import format_count, format_money
 from app.logic.research import insiders as research
 from app.logic.research.dataset import ResearchDataset
-from app.logic.research.formatting import format_count, format_money
 
 #: Percentage widths for the roster's five columns. The owner and role carry the
 #: longest strings; the code is two characters.

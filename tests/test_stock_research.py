@@ -12,9 +12,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from app import formatting
 from app.data import sharadar_client as sc
 from app.logic.research import dataset as research_dataset
-from app.logic.research import formatting
 from app.logic.research import summary
 from app.provenance import Origin
 

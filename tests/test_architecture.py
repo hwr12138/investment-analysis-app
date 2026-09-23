@@ -130,9 +130,14 @@ def _imports(name: str) -> tuple[frozenset[str], frozenset[str]]:
 
 
 def _reach(start: str) -> dict[str, tuple[str, ...]]:
-    """Every app module ``start`` loads, each with the chain that loads it."""
-    paths = {start: (start,)}
-    queue = deque([start])
+    """Every app module ``start`` loads, each with the chain that loads it.
+
+    Seeded with ``start``'s own parent packages, because importing a module
+    runs every ``__init__`` above it before the module itself.
+    """
+    paths = {name: (start, name) for name in _with_parents(start) - {start}}
+    paths[start] = (start,)
+    queue = deque(paths)
     while queue:
         current = queue.popleft()
         for nxt in sorted(_imports(current)[0]):
@@ -165,7 +170,7 @@ def test_the_scanner_finds_the_graph_it_checks():
     Same principle as the model's checks: absent inputs are *not evaluated*,
     never a pass.
     """
-    assert len(_in_layer("app.logic")) > 20
+    assert {"app.logic.dcf.wacc", "app.logic.research.summary"} <= set(_in_layer("app.logic"))
     assert "app.data.sharadar_client" in _reach("app.logic.research.dataset")
     assert "streamlit" in _imports("app.views.research")[1]
     assert "app.logic.research" in _reach("app.logic.research.summary")
@@ -239,7 +244,7 @@ def test_data_never_imports_logic_or_views(module):
     }
 
 
-@pytest.mark.parametrize("module", ("app.provenance",))
+@pytest.mark.parametrize("module", ("app.provenance", "app.formatting"))
 def test_shared_root_modules_import_no_layer(module):
     """Both layers construct these, so they may depend on neither."""
     internal, _ = _imports(module)

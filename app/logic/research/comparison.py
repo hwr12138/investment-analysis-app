@@ -29,7 +29,7 @@ from dataclasses import dataclass
 
 import pandas as pd
 
-from app.logic.research.formatting import is_missing
+from app.formatting import is_missing
 from app.provenance import Origin
 
 #: SF1 indicators carried on the universe snapshot for the year-on-year

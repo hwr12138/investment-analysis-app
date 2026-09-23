@@ -42,9 +42,9 @@ from datetime import date
 import pandas as pd
 
 from app.data.sharadar import vocabulary
+from app.formatting import format_pct, format_ratio
 from app.logic.research import comparison as shared
 from app.logic.research.comparison import Comparison
-from app.logic.research.formatting import format_pct, format_ratio
 from app.provenance import Origin
 
 #: Where a term in a derived multiple is read from. ``DAILY`` terms are

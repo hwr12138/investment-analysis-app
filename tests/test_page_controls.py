@@ -7,6 +7,7 @@ import inspect
 import pandas as pd
 import pytest
 
+from app.formatting import format_date
 from app.logic.dcf import model as dcf_model
 from app.logic.dcf import reverse
 from app.logic.dcf import valuation as dcf
@@ -252,9 +253,22 @@ def test_an_implied_revenue_path_compounds_from_the_base():
 
 
 def test_a_missing_date_renders_as_a_dash_not_a_fabricated_one():
-    assert page._date_text(None) == "—"
-    assert page._date_text(pd.NaT) == "—"
-    assert page._date_text(pd.Timestamp("2025-09-30")) == "2025-09-30"
+    assert format_date(None, missing="—") == "—"
+    assert format_date(pd.NaT, missing="—") == "—"
+    assert format_date(pd.Timestamp("2025-09-30"), missing="—") == "2025-09-30"
+
+
+def test_a_missing_percentage_reads_as_missing_like_everywhere_else():
+    """It used to read "n/a" here and "not reported" on every other tab."""
+    assert page.format_pct(None) == "not reported"
+    assert page.format_pct(float("nan")) == "not reported"
+    assert page.format_pct(float("inf")) == "not reported"
+
+
+def test_valuation_money_is_quoted_in_whole_units_below_a_million():
+    assert page._money(123_456.78, "USD") == "USD 123,457"
+    assert page._money(4.54e12, "USD") == "USD 4.54T"
+    assert page._money(pd.NA) == "not reported"
 
 
 def test_the_tab_no_longer_carries_a_statement_viewer():

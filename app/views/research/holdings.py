@@ -27,9 +27,9 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
+from app.formatting import format_count, format_money, format_pct
 from app.logic.research import holdings as research
 from app.logic.research.dataset import HoldingsData, ResearchDataset
-from app.logic.research.formatting import format_count, format_money, format_pct
 
 #: Session keys this tab owns. Cleared when the page's ticker moves, by this
 #: module rather than by the shell — one place decides when the payload is stale,

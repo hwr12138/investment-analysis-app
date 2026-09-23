@@ -27,8 +27,7 @@ from datetime import date
 import pandas as pd
 
 from app.data.sharadar import vocabulary
-from app.logic.dcf import wacc as wacc_lib
-from app.logic.research.formatting import (
+from app.formatting import (
     format_count,
     format_money,
     format_pct,
@@ -36,6 +35,7 @@ from app.logic.research.formatting import (
     format_ratio,
     is_missing,
 )
+from app.logic.dcf import wacc as wacc_lib
 from app.provenance import Origin, Sourced
 
 #: Price windows offered above the chart, in display order. ``5D`` counts

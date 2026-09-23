@@ -42,9 +42,9 @@ from datetime import date
 import pandas as pd
 
 from app.data.sharadar import vocabulary
+from app.formatting import format_pct
 from app.logic.research import comparison as shared
 from app.logic.research.comparison import PRIOR, Comparison
-from app.logic.research.formatting import format_pct
 from app.provenance import Origin
 
 

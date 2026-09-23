@@ -20,13 +20,13 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
-import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
 from app.data import market_data, sharadar_client
+from app.formatting import format_date, format_money, format_pct
 from app.logic.dcf import export as dcf_export
 from app.logic.dcf import financials as fin
 from app.logic.dcf import model as dcf_model
@@ -36,6 +36,7 @@ from app.logic.dcf import valuation as dcf
 from app.logic.dcf import wacc as wacc_lib
 from app.logic.dcf.schema import SchemaResolutionError
 from app.provenance import Origin, Sourced
+from app.views.components import render_blocking
 
 FINRA_FIXED_INCOME_URL = "https://www.finra.org/finra-data/fixed-income"
 
@@ -139,24 +140,9 @@ def _untouched(widget_value: float, default_value: float, decimals: int) -> bool
     return abs(round(widget_value, decimals) - round(default_value, decimals)) < 10**-decimals / 2
 
 
-def _money(value, currency: str = "", digits: int = 0) -> str:
-    if value is None or (isinstance(value, float) and (np.isnan(value) or np.isinf(value))):
-        return "not reported"
-    prefix = f"{currency} " if currency else ""
-    magnitude = abs(value)
-    if magnitude >= 1e12:
-        return f"{prefix}{value / 1e12:,.2f}T"
-    if magnitude >= 1e9:
-        return f"{prefix}{value / 1e9:,.2f}B"
-    if magnitude >= 1e6:
-        return f"{prefix}{value / 1e6:,.2f}M"
-    return f"{prefix}{value:,.{digits}f}"
-
-
-def _pct(value, digits: int = 2) -> str:
-    if value is None or (isinstance(value, float) and np.isnan(value)):
-        return "n/a"
-    return f"{value:.{digits}%}"
+def _money(value, currency: str = "") -> str:
+    """Whole currency units below a million — a valuation does not quote cents."""
+    return format_money(value, currency, digits=0)
 
 
 @st.cache_data(show_spinner=False, ttl=60 * 60 * 6)
@@ -343,9 +329,7 @@ def _render_banners(issues: list[val.Issue], acknowledged: dict[str, str]) -> No
 
 
 def _render_blocking(title: str, body: str, detail: str = "") -> None:
-    st.error(f"**{title}**\n\n{body}")
-    if detail:
-        st.caption(detail)
+    render_blocking(title, body, detail)
     st.info(
         "This is a **BLOCKING** condition: the model cannot be computed, so no valuation "
         "is shown. It is not a judgement that the data looks wrong — it is that the data "
@@ -1403,7 +1387,7 @@ def _render_valuation(
         help=f"Headline method: {result.headline_terminal.method}",
     )
     columns[1].metric("Current price", f"{dataset.last_price:,.2f}" if dataset.last_price else "n/a")
-    columns[2].metric("Upside / downside", _pct(upside) if upside is not None else "n/a")
+    columns[2].metric("Upside / downside", format_pct(upside) if upside is not None else "n/a")
     columns[3].metric("WACC", f"{result.wacc.wacc:.2%}")
 
     st.markdown("#### Both terminal value methods, side by side")
@@ -1419,7 +1403,7 @@ def _render_valuation(
                 "Enterprise value": _money(enterprise_value, dataset.currency),
                 "Equity value": _money(method_bridge.equity_value, dataset.currency),
                 "Value per share": f"{method_bridge.value_per_share:,.2f}",
-                "TV share of EV": _pct(terminal.share_of(enterprise_value), 1),
+                "TV share of EV": format_pct(terminal.share_of(enterprise_value), 1),
                 # Each method is cross-checked by restating it in the *other*
                 # method's units, so the two columns are deliberately different
                 # quantities rather than a like-for-like pair.
@@ -1541,7 +1525,7 @@ def _reverse_message(result: reverse.ReverseDcfResult) -> tuple[str, str]:
             )
         if result.plausible is False:
             return "warning", (
-                f"**{_pct(result.growth)} a year is outside anything a company sustains for "
+                f"**{format_pct(result.growth)} a year is outside anything a company sustains for "
                 f"long.** Read this as *the price is not explained by revenue growth* rather "
                 f"than as a forecast — the difference is more likely to sit in the margin, "
                 f"the reinvestment rates, or the discount rate."
@@ -1624,7 +1608,7 @@ def _render_reverse_chart(
     if reverse_result.status is reverse.Status.SOLVED:
         add_path(
             _implied_revenue_path(base_revenue, reverse_result.growth, years),
-            f"Implied by the market price ({_pct(reverse_result.growth)})",
+            f"Implied by the market price ({format_pct(reverse_result.growth)})",
             "dash", 3.5, "#f2a900",
         )
     else:
@@ -1632,7 +1616,7 @@ def _render_reverse_chart(
         for index, root in enumerate(reverse_result.roots):
             add_path(
                 _implied_revenue_path(base_revenue, root, years),
-                f"Reproduces the price ({_pct(root)})",
+                f"Reproduces the price ({format_pct(root)})",
                 "dash", 2.5, ["#f2a900", "#e06666"][index % 2],
             )
 
@@ -1641,7 +1625,7 @@ def _render_reverse_chart(
     if history.ok:
         add_path(
             _implied_revenue_path(base_revenue, history.cagr, years),
-            f"History repeating ({_pct(history.cagr)} realised)",
+            f"History repeating ({format_pct(history.cagr)} realised)",
             "longdash", 1.5, "#8fd18f",
         )
 
@@ -1694,15 +1678,15 @@ def _render_reverse_dcf(
     columns = st.columns(4)
     columns[0].metric(
         "Implied revenue growth",
-        _pct(reverse_result.growth) if solved else
+        format_pct(reverse_result.growth) if solved else
         ("no single rate" if reverse_result.roots else "—"),
         help="The flat rate that makes this model's value per share equal the market price.",
     )
-    columns[1].metric("Your forecast", _pct(forecast))
+    columns[1].metric("Your forecast", format_pct(forecast))
     columns[2].metric(
         f"Realised CAGR ({history.first_period}–{history.last_period})"
         if history.ok else "Realised CAGR",
-        _pct(history.cagr) if history.ok else "n/a",
+        format_pct(history.cagr) if history.ok else "n/a",
         help=history.detail or (
             f"Compound annual growth over {history.intervals} interval(s) of reported revenue."
         ),
@@ -1715,13 +1699,13 @@ def _render_reverse_dcf(
 
     if solved:
         verdict = (
-            f"The market is pricing in **{_pct(reverse_result.growth)}** a year for {years} "
-            f"years. You are forecasting **{_pct(forecast)}**."
+            f"The market is pricing in **{format_pct(reverse_result.growth)}** a year for {years} "
+            f"years. You are forecasting **{format_pct(forecast)}**."
         )
         if history.ok:
             gap = (reverse_result.growth - history.cagr) * 100
             verdict += (
-                f" The company delivered **{_pct(history.cagr)}** over the "
+                f" The company delivered **{format_pct(history.cagr)}** over the "
                 f"{history.intervals} years to {history.last_period} — the market's number is "
                 f"**{gap:+.1f} points** {'above' if gap >= 0 else 'below'} what it has "
                 f"actually done."
@@ -1746,11 +1730,11 @@ def _render_reverse_dcf(
         st.caption(
             f"**Two ways to state past growth, and they are not the same number.** The "
             f"forecast driver above is pre-populated from the *arithmetic average* of yearly "
-            f"growth rates (**{_pct(history.arithmetic_mean)}**); the benchmark here is the "
-            f"*compound* rate (**{_pct(history.cagr)}**), which is the one comparable to a "
+            f"growth rates (**{format_pct(history.arithmetic_mean)}**); the benchmark here is the "
+            f"*compound* rate (**{format_pct(history.cagr)}**), which is the one comparable to a "
             f"flat forecast. They diverge whenever growth was uneven. Yearly rates ranged "
-            f"{_pct(history.minimum)} to {_pct(history.maximum)}, median "
-            f"{_pct(history.median)}, over {history.observations} year(s)."
+            f"{format_pct(history.minimum)} to {format_pct(history.maximum)}, median "
+            f"{format_pct(history.median)}, over {history.observations} year(s)."
             + (f" {history.detail}" if history.detail else "")
         )
 
@@ -1768,7 +1752,7 @@ def _render_reverse_dcf(
                     "Revenue growth": f"{growth:.2%}",
                     "Value per share": f"{value:,.2f}",
                     "vs market price": (
-                        _pct(value / dataset.last_price - 1) if dataset.last_price else "n/a"
+                        format_pct(value / dataset.last_price - 1) if dataset.last_price else "n/a"
                     ),
                 }
                 for growth, value in reverse_result.samples
@@ -1823,7 +1807,7 @@ def _render_reverse_whatif(
         if what_if.status is reverse.Status.SOLVED:
             st.markdown(
                 f"A price of **{price:,.2f}** implies flat revenue growth of "
-                f"**{_pct(what_if.growth)}** a year."
+                f"**{format_pct(what_if.growth)}** a year."
             )
             _provenance(
                 Sourced.derived(
@@ -1922,8 +1906,8 @@ def _render_filing_provenance(dataset: dcf_model.CompanyDataset) -> None:
                 {
                     "Fiscal year": str(int(year)),
                     "Period": record.get("Fiscal Period", ""),
-                    "Report date": _date_text(record.get("Report Date")),
-                    "Publish date": _date_text(record.get("Publish Date")),
+                    "Report date": format_date(record.get("Report Date"), missing="—"),
+                    "Publish date": format_date(record.get("Publish Date"), missing="—"),
                     "Restated": "yes" if record.get("Restated") else "no",
                     "Source filing": dataset.filing_link(int(year)),
                 }
@@ -1944,12 +1928,6 @@ def _render_filing_provenance(dataset: dcf_model.CompanyDataset) -> None:
             "always uses the restated figures, so that the time series the drivers are "
             "averaged over is a consistent one."
         )
-
-
-def _date_text(value) -> str:
-    if value is None or pd.isna(value):
-        return "—"
-    return pd.Timestamp(value).date().isoformat()
 
 
 def _render_validation_panel(

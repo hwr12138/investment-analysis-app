@@ -18,9 +18,9 @@ from html import escape
 import pandas as pd
 import streamlit as st
 
+from app.formatting import format_pct
 from app.logic.research.comparison import Comparison
 from app.logic.research.dataset import ResearchDataset
-from app.logic.research.formatting import format_pct
 
 #: Percentage widths for the six columns. The metric name carries the longest
 #: string by a distance; the three numeric columns are equal so the eye can

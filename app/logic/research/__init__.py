@@ -7,9 +7,10 @@ roughly the same scale.
 
 The layout is deliberately flat and the dependencies run one way:
 
-    formatting, comparison  ←  summary, valuation, growth  ←  dataset
+    comparison  ←  summary, valuation, growth  ←  dataset
 
-``formatting`` is shared by every tab. ``comparison`` is shared by the two that
+Number formatting is shared by every page, not just this one, so it lives at
+``app/formatting.py``. ``comparison`` is shared by the two tabs that
 answer a metric against its peers and against its own past — ``valuation`` and
 ``growth``, the ⚖️ tab's sub-tabs — and holds the record they both produce, the
 median-and-percentile summary, and the peer universe join. Beyond those, each tab
