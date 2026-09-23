@@ -20,7 +20,8 @@ import numpy as np
 import pandas as pd
 
 
-def _missing(value) -> bool:
+def is_missing(value) -> bool:
+    """``None``, ``NaN``, ``±inf`` or ``pd.NA`` — anything that prints as missing."""
     if value is None:
         return True
     if isinstance(value, (int, float, np.floating)):
@@ -29,7 +30,7 @@ def _missing(value) -> bool:
 
 
 def format_money(value, currency: str = "", digits: int = 2) -> str:
-    if _missing(value):
+    if is_missing(value):
         return "not reported"
     prefix = f"{currency} " if currency else ""
     magnitude = abs(float(value))
@@ -41,7 +42,7 @@ def format_money(value, currency: str = "", digits: int = 2) -> str:
 
 def format_count(value) -> str:
     """Whole units with thousands separators — volumes and share counts."""
-    if _missing(value):
+    if is_missing(value):
         return "not reported"
     magnitude = abs(float(value))
     for cutoff, suffix in ((1e12, "T"), (1e9, "B"), (1e6, "M"), (1e3, "K")):
@@ -51,25 +52,25 @@ def format_count(value) -> str:
 
 
 def format_ratio(value, digits: int = 2) -> str:
-    if _missing(value):
+    if is_missing(value):
         return "not reported"
     return f"{float(value):,.{digits}f}"
 
 
 def format_pct(value, digits: int = 2) -> str:
-    if _missing(value):
+    if is_missing(value):
         return "not reported"
     return f"{float(value):.{digits}%}"
 
 
 def format_date(value) -> str:
-    if _missing(value):
+    if is_missing(value):
         return "not reported"
     return pd.Timestamp(value).date().isoformat()
 
 
 def format_range(low, high, currency: str = "") -> str:
     """``USD 305.67 – 311.71``. The unit is stated once, on the left."""
-    if _missing(low) or _missing(high):
+    if is_missing(low) or is_missing(high):
         return "not reported"
     return f"{format_money(low, currency)} – {format_money(high)}"

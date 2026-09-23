@@ -29,7 +29,7 @@ from dataclasses import dataclass
 
 import pandas as pd
 
-from app.logic.research.formatting import _missing
+from app.logic.research.formatting import is_missing
 from app.provenance import Origin
 
 #: SF1 indicators carried on the universe snapshot for the year-on-year
@@ -253,4 +253,4 @@ def industry_of(peer_universe: pd.DataFrame, ticker: str) -> str:
     if match.empty:
         return ""
     value = match.iloc[0]["industry"]
-    return "" if _missing(value) else str(value)
+    return "" if is_missing(value) else str(value)

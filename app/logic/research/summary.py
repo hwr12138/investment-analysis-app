@@ -29,12 +29,12 @@ import pandas as pd
 from app.data import sharadar_client
 from app.logic.dcf import wacc as wacc_lib
 from app.logic.research.formatting import (
-    _missing,
     format_count,
     format_money,
     format_pct,
     format_range,
     format_ratio,
+    is_missing,
 )
 from app.provenance import Origin, Sourced
 
@@ -73,7 +73,7 @@ _FILING_LAG_QUARTERS = 8
 #: S&P 500 stand-in is the ETF — same convention as the DCF page.
 BENCHMARK = "SPY"
 
-_BETA_YEARS = 5
+BETA_YEARS = 5
 
 
 # ---------------------------------------------------------------------------
@@ -228,14 +228,14 @@ def _statement_value(frame: pd.DataFrame, indicator: str) -> tuple[float | None,
     value = row.get(caption)
     as_of = row.get("Report Date")
     return (
-        None if _missing(value) else float(value),
-        None if _missing(as_of) else pd.Timestamp(as_of).date(),
+        None if is_missing(value) else float(value),
+        None if is_missing(as_of) else pd.Timestamp(as_of).date(),
     )
 
 
 def days_range(ohlcv: pd.DataFrame, currency: str) -> StatTile:
     row = _last_row(ohlcv)
-    if row is None or _missing(row.get("Low")) or _missing(row.get("High")):
+    if row is None or is_missing(row.get("Low")) or is_missing(row.get("High")):
         return StatTile.unavailable(
             "Day's Range", "Sharadar SEP", "No high/low on the latest session."
         )
@@ -371,7 +371,7 @@ def _ex_dividend_tile(actions: pd.DataFrame, currency: str, today: date) -> Stat
     row = dividends.iloc[-1]
     ex_date = pd.Timestamp(row["date"]).date()
     amount = row.get("value")
-    detail = "" if _missing(amount) else f"{format_money(amount, currency)} per share"
+    detail = "" if is_missing(amount) else f"{format_money(amount, currency)} per share"
     # Sharadar carries declared ex-dates ahead of time, so the newest row is
     # sometimes in the future. Say which it is rather than implying it passed.
     if ex_date > today:
@@ -512,12 +512,12 @@ def build_key_stats(
     daily_row = _last_row(daily)
     price_date = None if ohlcv.empty else pd.Timestamp(ohlcv.index.max()).date()
 
-    close = None if price_row is None or _missing(price_row.get("Close")) else float(
+    close = None if price_row is None or is_missing(price_row.get("Close")) else float(
         price_row["Close"]
     )
 
     def from_daily(label: str, column: str, formatter, note: str = "") -> StatTile:
-        if daily_row is None or _missing(daily_row.get(column)):
+        if daily_row is None or is_missing(daily_row.get(column)):
             return StatTile.unavailable(
                 label, "Sharadar DAILY", f"{column} not reported for the latest session."
             )
@@ -527,7 +527,7 @@ def build_key_stats(
             origin=Origin.REPORTED,
             source=f"Sharadar DAILY · {column}",
             as_of=pd.Timestamp(daily_row["date"]).date()
-            if "date" in daily_row and not _missing(daily_row["date"])
+            if "date" in daily_row and not is_missing(daily_row["date"])
             else price_date,
             detail=note,
         )
@@ -554,7 +554,7 @@ def build_key_stats(
             Sourced.reported(
                 float(price_row["Volume"]), "Sharadar SEP · volume", as_of=price_date
             )
-            if price_row is not None and not _missing(price_row.get("Volume"))
+            if price_row is not None and not is_missing(price_row.get("Volume"))
             else Sourced.unavailable("Sharadar SEP", "No volume on the latest session."),
             format_count,
         )
@@ -611,7 +611,7 @@ def build_key_stats(
     tiles.append(_beta_tile(stock_closes, index_closes))
 
     # --- Shares ------------------------------------------------------------
-    if daily_row is not None and not _missing(daily_row.get("marketcap")) and close:
+    if daily_row is not None and not is_missing(daily_row.get("marketcap")) and close:
         tiles.append(
             StatTile.from_sourced(
                 "Shares Outstanding",
