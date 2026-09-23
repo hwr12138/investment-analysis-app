@@ -126,7 +126,9 @@ def _fetch_statements(
     asreported: bool = False,
 ) -> StatementSet:
     dimension = dimension_for(annual=annual, ttm=ttm, asreported=asreported)
-    meta = reference._fetch_ticker_meta(ticker)
+    # The cached lookup, not the bare one: every dimension asks, and the research
+    # page, the DCF and the tabs ask for four of them per company.
+    meta = reference.fetch_ticker_meta(ticker)
 
     rows = transport._request_all(
         "SF1", {"ticker": ticker, "dimension": dimension}, ticker=ticker

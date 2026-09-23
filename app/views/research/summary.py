@@ -1,9 +1,8 @@
 """The 📊 Summary tab: profile, price chart, and the key-statistics grid.
 
-Fetches nothing. ``st.tabs`` renders every tab body on every rerun, so this
-runs whenever the reader touches a control on another tab; everything it needs
-is already in the snapshot. Changing the price window is likewise free — the
-full history arrives once per search and every window is a slice of it.
+Fetches nothing: the search's snapshot is exactly what this tab draws, which is
+why a search opens here. Changing the price window is likewise free — the full
+history arrives once per search and every window is a slice of it.
 """
 
 from __future__ import annotations

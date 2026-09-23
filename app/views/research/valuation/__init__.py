@@ -15,12 +15,14 @@ growth.py      the Growth body
 A package rather than one module because the two bodies have no reason to know
 about each other: they share a table and a universe, not arithmetic.
 
-**Fetches nothing.** ``st.tabs`` renders every body on every rerun and reports
-nothing to Python about which is open — and this tab now nests a second strip
-inside the first, so *both* sub-tab bodies are built whenever anything on the
-page changes. That is affordable only because both are pure computation over the
-snapshot: the peer universe arrives once per search, keyed on a date rather than
-a ticker, and switching sub-tabs touches no network.
+**The peer universe is fetched here, once, on first open** — through
+``dataset.load_peers``, keyed on the company's last market session rather than
+its ticker, so one cache entry serves every company searched that day. Both
+sub-tabs take it as an argument; neither fetches.
+
+The sub-tab strip is stateful like the page's own (``on_change="rerun"``), so
+only the open sub-tab's body is built. This is still the only nested
+``st.tabs`` in the app.
 
 The stylesheet is injected **here, once**, rather than by each body. One tab, one
 stylesheet, however many sub-tabs it holds; injecting it twice would leave the
@@ -29,14 +31,22 @@ second copy fighting the first for no benefit.
 
 from __future__ import annotations
 
+from datetime import date
+
+import pandas as pd
 import streamlit as st
 
+from app.logic.research import dataset as research
 from app.logic.research.dataset import ResearchDataset
+from app.views.components import load_tab
 from app.views.research.valuation import growth, multiples
 
 #: Sub-tabs in display order. Valuation opens because it is the question the tab
 #: is named for; Growth reads as the follow-up to it.
 _SUB_TABS = ("Valuation", "Growth")
+
+#: Session key the sub-tab strip stores its selection under.
+_SUB_TAB_KEY = "research_val_tab"
 
 _VALUATION_CSS = """
 <style>
@@ -78,11 +88,26 @@ _VALUATION_CSS = """
 """
 
 
+@st.cache_data(show_spinner=False, ttl=60 * 60 * 6)
+def _load_cached(session: date | None, as_of: date) -> pd.DataFrame:
+    """Keyed on dates alone, never a ticker — see :func:`research.load_peers`."""
+    return research.load_peers(session, today=as_of)
+
+
 def render(dataset: ResearchDataset) -> None:
     st.markdown(_VALUATION_CSS, unsafe_allow_html=True)
 
-    tabs = dict(zip(_SUB_TABS, st.tabs(list(_SUB_TABS))))
-    with tabs["Valuation"]:
-        multiples.render(dataset)
-    with tabs["Growth"]:
-        growth.render(dataset)
+    peer_universe = load_tab(
+        "the peer universe", _load_cached, dataset.market_session, dataset.loaded_at
+    )
+    if peer_universe is None:
+        return
+
+    strip = st.tabs(list(_SUB_TABS), key=_SUB_TAB_KEY, on_change="rerun")
+    tabs = dict(zip(_SUB_TABS, strip))
+    if tabs["Valuation"].open:
+        with tabs["Valuation"]:
+            multiples.render(dataset, peer_universe)
+    if tabs["Growth"].open:
+        with tabs["Growth"]:
+            growth.render(dataset, peer_universe)

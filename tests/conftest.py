@@ -22,6 +22,20 @@ from __future__ import annotations
 
 import pandas as pd
 import pytest
+import streamlit as st
+
+
+@pytest.fixture(autouse=True)
+def _fresh_cache():
+    """Every test starts with an empty ``st.cache_data``.
+
+    The private fetchers now read each other through the cached public ones —
+    statements through ``fetch_ticker_meta``, prices through one full-history
+    entry — so without this a fixture company cached by one test would answer
+    for the same ticker in the next, whatever that test stubbed.
+    """
+    st.cache_data.clear()
+    yield
 
 _EDGAR = "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0000000999"
 

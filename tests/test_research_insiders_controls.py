@@ -59,13 +59,9 @@ def dataset(insider_frame) -> ResearchDataset:
         ohlcv=ohlcv,
         daily=pd.DataFrame(),
         actions=pd.DataFrame(),
-        insiders=insider_frame,
         statements_ttm={},
-        statements_annual={},
-        statements_quarterly={},
         quarterly_ar=pd.DataFrame(),
         stats=[],
-        peer_universe=pd.DataFrame(),
         currency="USD",
         loaded_at=TODAY,
     )
@@ -80,11 +76,14 @@ def test_the_tab_takes_the_snapshot():
     assert list(inspect.signature(view.render).parameters) == ["dataset"]
 
 
-def test_the_tab_makes_no_request():
-    """Every tab but the DCF reads the snapshot and fetches nothing."""
+def test_the_tab_fetches_only_through_its_loader():
+    """The filings come from ``dataset.load_insiders`` via the shared
+    ``load_tab`` — never from the client directly."""
     source = inspect.getsource(view)
     assert "sharadar_client" not in source
     assert "fetch_" not in source
+    assert "load_tab(" in inspect.getsource(view.render)
+    assert list(inspect.signature(view._load_cached).parameters) == ["ticker", "as_of"]
 
 
 def test_the_stylesheet_is_injected_first():
@@ -123,7 +122,7 @@ def test_the_sources_panel_counts_the_rows_that_were_excluded():
     """The expander title carries "N of M", so filtering is visible before the
     panel is even opened."""
     source = inspect.getsource(view._render_sources)
-    assert "of {len(dataset.insiders)} filed rows shown" in source
+    assert "of {len(frame)} filed rows shown" in source
 
 
 def test_a_company_with_no_filings_says_so_rather_than_drawing_an_empty_chart():
@@ -242,10 +241,12 @@ def test_the_price_line_is_a_slice_of_the_snapshot(dataset, insider_frame):
     assert min(close.x) >= pd.Timestamp("2021-08-05")
 
 
-def test_a_company_with_no_open_market_trades_still_draws_the_price(dataset):
+def test_a_company_with_no_open_market_trades_still_draws_the_price(
+    dataset, insider_frame
+):
     """Apple's case: five years, no open-market purchase. The chart is not empty,
     it just has no markers."""
-    quiet = dataset.insiders[dataset.insiders["transactioncode"].isin({"A", "M"})]
+    quiet = insider_frame[insider_frame["transactioncode"].isin({"A", "M"})]
     figure = view._events_figure(dataset, quiet, logic.InsiderTolerances())
     assert [trace.name for trace in figure.data] == ["Close"]
 

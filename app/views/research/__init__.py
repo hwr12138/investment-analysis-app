@@ -18,22 +18,16 @@ Three behaviours are deliberate and load-bearing:
 * **Changing the price window never refetches.** The full history is fetched
   once per search and every window is a slice of it, so the period buttons are
   free.
-* **Tab bodies fetch nothing** — with two exceptions, which take opposite
-  routes. ``st.tabs`` renders all eleven bodies on every rerun and tells Python
-  nothing about which one is open, so anything that loaded data would fire on
-  page load and on every window change.
+* **Only the open tab runs.** The strip is ``st.tabs(..., on_change="rerun")``,
+  so switching tabs reruns the script and each ``TabContainer.open`` says which
+  body is on screen; every other body is skipped. That is what lets a search
+  fetch only what 📊 Summary draws, and every other tab fetch its own the first
+  time it is opened — through ``components.load_tab``, so they all say
+  "loading" and fail the same way. It is also why a DCF slider reruns the shell
+  and the DCF and nothing else, and why no tab has a load button any more.
 
-  💰 DCF needs statements this page's search does not fetch, and it fetches them
-  **ungated**: a second set of Sharadar requests per company searched, paid
-  whether or not anyone opens the tab, with its own caches keeping it to once
-  per company. 🏛️ Holdings needs a third set — four requests and about ten
-  seconds for a register most searches never look at — and takes the other
-  route: **nothing is fetched until a button is pressed.** That is the rule
-  CLAUDE.md's UI conventions have stated since before any tab followed it, and
-  Holdings is the first that does.
-
-  See ``app.logic.research.dataset`` for what the same constraint costs the
-  tabs that do read the snapshot.
+  The selection is keyed, so it survives a new search: a reader on ⚖️ Valuation
+  who searches another ticker lands on the new company's Valuation.
 """
 
 from __future__ import annotations
@@ -92,6 +86,11 @@ _TAB_ORDER = (
     "🧭 Peers",
     "🕰️ History",
 )
+
+#: Session key the tab strip stores its selection under. Not cleared by
+#: :func:`_session_reset`: which tab a reader is on is a viewing preference, like
+#: the price window, not a fact about one company.
+_TAB_KEY = "research_tab"
 
 
 # ---------------------------------------------------------------------------
@@ -191,31 +190,36 @@ def render_page() -> None:
             return
         st.session_state["research_output"] = dataset
 
-    # Keyed by name rather than sliced by index: the built tabs are not a
-    # contiguous run at the front, and a reorder in `_TAB_ORDER` should not have
-    # to be mirrored here.
-    tabs = dict(zip(_TAB_ORDER, st.tabs(list(_TAB_ORDER))))
+    _render_tabs(dataset, loaded)
 
-    with tabs["📊 Summary"]:
+
+def _render_tabs(dataset: research.ResearchDataset, loaded: str) -> None:
+    """The strip, and the one body in it that is open."""
+    strip = st.tabs(list(_TAB_ORDER), key=_TAB_KEY, on_change="rerun")
+    for name, tab in zip(_TAB_ORDER, strip):
+        # `.open` is False for every tab but the selected one, so the closed
+        # bodies neither fetch nor build anything on this run.
+        if tab.open:
+            with tab:
+                _render_tab(name, dataset, loaded)
+
+
+def _render_tab(name: str, dataset: research.ResearchDataset, loaded: str) -> None:
+    """Draws one tab's body. The explicit dispatch the module docstring describes."""
+    if name == "📊 Summary":
         summary.render(dataset)
-
-    with tabs["📄 Financials"]:
+    elif name == "📄 Financials":
         financials.render(dataset)
-
-    with tabs["💰 DCF"]:
+    elif name == "💰 DCF":
         # `loaded`, not the ticker box: the DCF values the company the rest of
         # this page is showing, not one half-typed into the search field.
         dcf.render(loaded)
-
-    with tabs["⚖️ Valuation"]:
+    elif name == "⚖️ Valuation":
         valuation.render(dataset)
-
-    with tabs["👤 Insiders"]:
+    elif name == "👤 Insiders":
         insiders.render(dataset)
-
-    with tabs["🏛️ Holdings"]:
+    elif name == "🏛️ Holdings":
         holdings.render(dataset)
-
-    for name, (what, source) in placeholders.PLACEHOLDERS.items():
-        with tabs[name]:
-            placeholders.render(name, what, source)
+    else:
+        what, source = placeholders.PLACEHOLDERS[name]
+        placeholders.render(name, what, source)

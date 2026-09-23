@@ -17,6 +17,7 @@ wording here has to carry both:
 
 from __future__ import annotations
 
+import pandas as pd
 import streamlit as st
 
 from app.formatting import format_pct
@@ -32,22 +33,22 @@ from app.views.research.valuation import table
 _MATERIAL_GAP = 0.02
 
 
-def render(dataset: ResearchDataset) -> None:
-    industry = shared.industry_of(dataset.peer_universe, dataset.ticker)
+def render(dataset: ResearchDataset, peer_universe: pd.DataFrame) -> None:
+    industry = shared.industry_of(peer_universe, dataset.ticker)
     comparisons = research.build_comparison(
         statements_ttm=dataset.statements_ttm,
-        peer_universe=dataset.peer_universe,
+        peer_universe=peer_universe,
         industry=industry,
         today=dataset.loaded_at,
     )
 
-    table.render_heading(dataset, industry)
+    table.render_heading(dataset, peer_universe, industry)
     st.markdown(
         table.comparison_table_html(comparisons, _verdict), unsafe_allow_html=True
     )
     _render_legend(comparisons)
     table.render_sources(
-        dataset, industry, comparisons, legend=table.ORIGIN_LEGEND
+        dataset, peer_universe, industry, comparisons, legend=table.ORIGIN_LEGEND
     )
 
 
