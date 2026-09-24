@@ -56,18 +56,18 @@ view, never from the logic module.
 
 To add a **tab** to Stock Research: create `app/logic/research/<tab>.py` for the arithmetic and
 `app/views/research/<tab>.py` with a `render` function and its own CSS, then add the label to
-`_TAB_ORDER` and dispatch it in `views/research/__init__.py`. Remove its entry from
-`placeholders.PLACEHOLDERS` in the same commit — a test fails if the two disagree.
+`_TAB_ORDER` and dispatch it in `views/research/__init__.py` — a test fails if a label has no
+body. Only built tabs go in the strip: there are no "not built yet" stubs.
 
 A tab that compares metrics against peers and against history should be a **sub-tab of ⚖️
 Valuation** rather than a new top-level one: declare its metrics and its own usable/base rule,
 and reuse `logic/research/comparison.py` and `views/research/valuation/table.py` for everything
-else. That is what Growth is, and it is why the top-level 🌱 Growth placeholder was removed.
+else. That is what Growth is, and it is why there is no top-level 🌱 Growth tab.
 
 ### The Stock Research page
 
 The one feature that is a package on both layers rather than a pair of modules, because it
-carries eleven tabs — one of which is itself a package, holding two sub-tabs:
+carries six tabs — one of which is itself a package, holding two sub-tabs:
 
 ```
 app/views/research/            __init__.py = the shell; one module per tab beside it

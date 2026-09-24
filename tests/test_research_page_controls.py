@@ -31,7 +31,6 @@ from app.views.research import (
     financials,
     holdings,
     insiders,
-    placeholders,
     summary,
     valuation,
 )
@@ -169,14 +168,8 @@ def test_an_empty_session_always_loads():
 # ---------------------------------------------------------------------------
 
 
-def test_every_placeholder_names_what_it_will_show_and_where_it_comes_from():
-    for label, (what, source) in placeholders.PLACEHOLDERS.items():
-        assert what.strip()
-        assert "SHARADAR" in source or "sharadar" in source, label
-
-
 #: The tabs this module renders itself, plus the one it delegates to the DCF
-#: module. Everything else in `_TAB_ORDER` has to be a placeholder.
+#: module. `_TAB_ORDER` holds these and nothing else.
 _BUILT = (
     "📊 Summary",
     "📄 Financials",
@@ -187,21 +180,16 @@ _BUILT = (
 )
 
 
-def test_the_built_tabs_are_not_placeholders():
-    """Summary, Financials, DCF, Valuation and Insiders are built; the rest are not."""
-    for built in _BUILT:
-        assert built not in placeholders.PLACEHOLDERS, built
-    # Still five: neither Insiders nor Holdings was ever a placeholder, so
-    # nothing was promoted and no unrelated entry should be deleted to keep
-    # this number moving.
-    assert len(placeholders.PLACEHOLDERS) == 5
-
-
-def test_every_tab_is_either_built_or_a_placeholder():
-    """`render_page` indexes the tab dict by name, so an unclaimed name is a
-    ``KeyError`` at render time and a placeholder with no slot never shows."""
-    assert set(page._TAB_ORDER) == set(_BUILT) | set(placeholders.PLACEHOLDERS)
+def test_every_tab_in_the_strip_is_built():
+    """Unbuilt tabs are left out of the strip rather than shown as stubs."""
+    assert set(page._TAB_ORDER) == set(_BUILT)
     assert len(page._TAB_ORDER) == len(set(page._TAB_ORDER))
+
+
+def test_a_tab_with_no_body_fails_loudly():
+    """A label added to `_TAB_ORDER` without a dispatch must not render blank."""
+    with pytest.raises(ValueError, match="Earnings"):
+        page._render_tab("🎯 Earnings", _dataset("AAPL"), "AAPL")
 
 
 def test_the_insiders_tab_follows_the_valuation_pair():
@@ -250,8 +238,6 @@ def rendered(monkeypatch):
         monkeypatch.setattr(module, "render",
                             lambda dataset, m=module: calls.append(m.__name__))
     monkeypatch.setattr(dcf, "render", lambda ticker: calls.append(f"dcf:{ticker}"))
-    monkeypatch.setattr(placeholders, "render",
-                        lambda name, what, source: calls.append(f"placeholder:{name}"))
 
     def open_tab(selected: str) -> None:
         def tabs(labels, **kwargs):
@@ -288,7 +274,6 @@ def test_each_tab_dispatches_to_its_own_module(rendered):
         "⚖️ Valuation": valuation.__name__,
         "👤 Insiders": insiders.__name__,
         "🏛️ Holdings": holdings.__name__,
-        **{name: f"placeholder:{name}" for name in placeholders.PLACEHOLDERS},
     }
     for label in page._TAB_ORDER:
         calls.clear()
@@ -306,7 +291,7 @@ def test_a_new_search_keeps_the_open_tab(session):
 def test_every_built_tab_module_exposes_render():
     """The shell dispatches by that name and nothing else."""
     for module in (
-        summary, financials, dcf, valuation, insiders, holdings, placeholders
+        summary, financials, dcf, valuation, insiders, holdings
     ):
         assert callable(getattr(module, "render", None)), module.__name__
     assert not hasattr(dcf, "render_page")

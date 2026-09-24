@@ -1,4 +1,4 @@
-"""Stock research page — one ticker, eleven tabs, one module per tab.
+"""Stock research page — one ticker, six tabs, one module per tab.
 
 The general-purpose "what is this company" page. This module is the shell: the
 ticker box, the search gate, the snapshot in session state, and the tab strip.
@@ -44,16 +44,14 @@ from app.views.research import (
     financials,
     holdings,
     insiders,
-    placeholders,
     summary,
     valuation,
 )
 
-#: Every tab, in display order — the one place the order is decided. The five
-#: built tabs are dispatched by name in :func:`render_page` and everything else
-#: must have a ``placeholders.PLACEHOLDERS`` entry, so a tab can be reordered
-#: here without touching the rendering, and a name that belongs to neither
-#: fails a test.
+#: Every tab, in display order — the one place the order is decided. Each is
+#: dispatched by name in :func:`_render_tab`, so a tab can be reordered here
+#: without touching the rendering, and a name with no body fails a test.
+#: Only built tabs appear: an unbuilt one is not a stub in the strip.
 #:
 #: 💰 DCF sits directly before ⚖️ Valuation because the two answer the same
 #: question from opposite directions — intrinsic value from the cash flows, and
@@ -63,7 +61,7 @@ from app.views.research import (
 #: concluded. The reader arrives having just formed a view of what the company
 #: is worth and what it costs, and "what are the people with the best
 #: information doing about it" is only a question once that view exists. Ahead
-#: of the pair it is a curiosity; after Peers and History it reads as an
+#: of the pair it is a curiosity; at the end of the strip it reads as an
 #: appendix.
 #:
 #: 🏛️ Holdings sits beside 👤 Insiders for the same reason those two sit where
@@ -76,15 +74,10 @@ from app.views.research import (
 _TAB_ORDER = (
     "📊 Summary",
     "📄 Financials",
-    "🎯 Earnings",
-    "💵 Dividends",
     "💰 DCF",
     "⚖️ Valuation",
     "👤 Insiders",
     "🏛️ Holdings",
-    "💰 Profitability",
-    "🧭 Peers",
-    "🕰️ History",
 )
 
 #: Session key the tab strip stores its selection under. Not cleared by
@@ -221,5 +214,4 @@ def _render_tab(name: str, dataset: research.ResearchDataset, loaded: str) -> No
     elif name == "🏛️ Holdings":
         holdings.render(dataset)
     else:
-        what, source = placeholders.PLACEHOLDERS[name]
-        placeholders.render(name, what, source)
+        raise ValueError(f"No body for research tab {name!r}")
