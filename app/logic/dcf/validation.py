@@ -123,15 +123,16 @@ class Tolerances:
     growth_above_realised: float = 0.05
     #: Year-1 FCFF against the base period's, grown one year.
     jump_off: float = 0.25
-    #: Gordon against exit-multiple value per share. Wide on purpose: with
-    #: RONIC = WACC in the perpetuity, an exit-multiple headline sits well above
-    #: Gordon at most tech companies, and a threshold that fired on all of them
-    #: would say nothing.
+    #: Gordon against exit-multiple value per share. Wide on purpose: the exit
+    #: multiple sits well above Gordon at most tech companies — even at the
+    #: company's own RONIC, a perpetuity cannot rise above NOPAT ÷ (WACC − g) —
+    #: and a threshold that fired on all of them would say nothing.
     method_divergence: float = 0.35
     #: How far the final forecast year's capex ÷ D&A may fall below the
     #: company's own five-year ratio before the asset base reads as shrinking.
-    #: Compared to the company's history, not to 1.0: asset-light and
-    #: acquisitive companies depreciate acquired intangibles capex never replaces.
+    #: Compared to the company's history as well as to 1.0: asset-light and
+    #: acquisitive companies depreciate acquired intangibles capex never
+    #: replaces, and capex at or above D&A shrinks nothing.
     capex_to_dna_shortfall: float = 0.20
     #: Upside or downside beyond which an input error is likelier than an
     #: opportunity (WARNING), and upside beyond which the headline is marked
@@ -228,7 +229,7 @@ class Tolerances:
             ("Cash-flow residual (missing net change)", f"{self.cash_flow_residual_warning:.0%} of |CFO|"),
             ("Implied FX effect (foreign filer)", f"{self.implied_fx_max:.0%} of |CFO|"),
             (
-                "Final capex ÷ D&A below its 5-year ratio",
+                "Final capex ÷ D&A below 1.0 and its 5-year ratio",
                 f"by more than {self.capex_to_dna_shortfall:.2f}",
             ),
             ("FX spot vs Sharadar's rate", f"{self.fx_spot_vs_reported:.0%}"),
@@ -2577,14 +2578,23 @@ def check_terminal_reinvestment(
     ):
         capex_ratio = float(ctx.final_capex) / float(ctx.final_dna)
         history = float(ctx.historical_capex_to_dna)
-        if float(ctx.final_growth) > 0 and capex_ratio < history - tol.capex_to_dna_shortfall:
+        # Capex at or above D&A replaces everything D&A wears out, so the asset
+        # base cannot be shrinking whatever the history says — and with capex
+        # normalised from a build-out, the history is the build-out: MSFT's
+        # final year spends 1.75× D&A against 2.28× over its last five years.
+        if (
+            float(ctx.final_growth) > 0
+            and capex_ratio < 1.0
+            and capex_ratio < history - tol.capex_to_dna_shortfall
+        ):
             problems.append((
                 "capex ÷ D&A below its own history",
                 f"The final forecast year still grows but spends {capex_ratio:.2f}× D&A on "
-                f"capex, against {history:.2f}× over the last five years, so the asset base "
-                "reads as shrinking while revenue rises. (Capex below D&A alone is normal "
-                "where D&A includes amortisation of acquired intangibles, which capex never "
-                "replaces — the comparison is with the company's own ratio for that reason.)",
+                f"capex — less than it depreciates, and less than the {history:.2f}× of the "
+                "last five years — so the asset base reads as shrinking while revenue "
+                "rises. (Capex below D&A alone is normal where D&A includes amortisation of "
+                "acquired intangibles, which capex never replaces — the comparison is with "
+                "the company's own ratio for that reason.)",
             ))
     if problems:
         return _flag(
@@ -2600,8 +2610,8 @@ def check_terminal_reinvestment(
                 if _finite(ctx.historical_capex_to_dna) else "n/a",
             },
             tolerance=(
-                "RONIC ≥ WACC when g > 0; final capex ÷ D&A within "
-                f"{tol.capex_to_dna_shortfall:.2f} of its five-year ratio while growing"
+                "RONIC ≥ WACC when g > 0; while growing, final capex ÷ D&A at or above "
+                f"1.00 or within {tol.capex_to_dna_shortfall:.2f} of its five-year ratio"
             ),
             detail="; ".join(label for label, _ in problems),
         )

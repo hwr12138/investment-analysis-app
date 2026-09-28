@@ -293,8 +293,21 @@ double as a way to treat equity pay as free.
 flows on the forecast's own convention, so it takes the final row's (mid-year) exponent; an exit
 multiple is a sale at the *end* of year N. Both sit at the base period's end rolled forward by
 `elapsed` — the forecast is anchored to the base period, never to the next fiscal year end,
-which made the value jump overnight when a fiscal year closed. The exit multiple is the default
-headline; Gordon at RONIC = WACC is always shown beside it, and the reverse DCF solves both.
+which made the value jump overnight when a fiscal year closed. **Gordon is the default
+headline** (`model.DEFAULT_HEADLINE_METHOD`, the owner's choice, reversing round 2's exit
+multiple). The exit multiple is always shown beside it, and the reverse DCF solves both.
+
+**The terminal RONIC defaults to the company's own return on invested capital**
+(`financials.historical_roic`): NOPAT ÷ average invested capital, where invested capital is
+equity + debt + minority interest − cash − STI (the same cash the bridge adds back; goodwill
+stays in, so bought growth is charged for), median of the last five fiscal years. At or below the
+WACC it takes the WACC and says so — value-destroying growth is a claim to make by hand — and it
+is passed as `ronic=None` then, so the perpetuity keeps tracking the WACC across the sensitivity
+grid. Its reach is **bounded**: the Gordon value is NOPAT × (1 − g ÷ RONIC) ÷ (WACC − g), so even
+an infinite RONIC lifts it only by WACC ÷ (WACC − g), about +36% at a 9.5% WACC. Measured live,
+moving from RONIC = WACC lifted the headline 7–16% where ROIC clears the WACC (MSFT 43%, AAPL
+89%) and left most of the book 14–70% below its price: the rest of the gap is growth for longer
+than the ten-year fade, or the discount rate — not the terminal return.
 
 **The terminal-value-share warning is gone, on purpose.** Under a ten-year exit-multiple model
 it fired on every company and said nothing. The share is still shown beside each method; the
@@ -324,7 +337,16 @@ and the checks read the rate actually used (`_effective_growth_basis`).
 **The forecast starts from today.** The margin, capex % and D&A % default to the base period's
 own TTM ratios (`financials.base_period_driver`), because a TTM margin already reflects today's
 depreciation and a hyperscaler's AI-era capex is roughly double its five-year average. Each can
-move linearly to an optional year-N target. Working capital is **NWC as a % of revenue** (a level
+move linearly to a year-N target. **Capex has one by default: its own five-year average**
+(`financials.normal_capex`), symmetric, so neither a build-out nor a trough is held forever —
+held flat, AMZN's 21.8% TTM capex made every forecast year's FCFF negative, and TSM, off its peak,
+reverts *up*. D&A is deliberately not moved with it: the margin already deducts today's D&A, so
+holding both holds EBITDA's share, and moving D&A alone moves cash flow by the whole change rather
+than by its tax shield. Under the Gordon headline the normalisation moves only the explicit years
+(and the EBITA add-back): the terminal year reinvests g ÷ RONIC of NOPAT whatever year N's capex
+was. The capex ÷ D&A check therefore fires only below 1.0 *and* below the company's own ratio —
+capex at or above D&A shrinks nothing, and against a build-out's history the normalised path
+would otherwise read as under-investment. Working capital is **NWC as a % of revenue** (a level
 ratio, default five-year average; ΔNWC = ratio × Δrevenue), never ΔNWC ÷ Δrevenue, which divided
 by a near-zero change in a flat year — DHR's FY2024 read 2,453% and wrecked its whole valuation.
 

@@ -260,8 +260,9 @@ def render_sensitivity(
     dataset: dcf_model.CompanyDataset, grid: dcf_model.SensitivityGrid
 ) -> None:
     """Headline value per share across WACC × the headline's own terminal input."""
-    method = "Exit multiple" if grid.method == "exit_multiple" else "Gordon growth"
-    st.markdown(f"#### Sensitivity — value per share, {method.lower()} headline")
+    # Lower case mid-sentence, but Gordon is a name.
+    method = "exit multiple" if grid.method == "exit_multiple" else "Gordon growth"
+    st.markdown(f"#### Sensitivity — value per share, {method} headline")
     across = (
         "the exit multiple at −20%, −10%, as set, +10% and +20% across the top — terminal "
         "growth barely moves an exit-multiple value, so it is not what the grid varies"
@@ -269,7 +270,7 @@ def render_sensitivity(
         else "terminal growth across the top"
     )
     st.caption(
-        f"The {method.lower()} headline rerun with the WACC down the side and {across}; "
+        f"The {method} headline rerun with the WACC down the side and {across}; "
         "everything else as above. The centre cell is the headline. A blank cell is one "
         "where the model cannot be built — a WACC at or below terminal growth, where no "
         "perpetuity exists."

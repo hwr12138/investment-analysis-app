@@ -785,6 +785,17 @@ def test_growth_on_a_shrinking_asset_base_is_flagged_against_the_companys_own_ra
     assert "acquired intangibles" in issues[0].message
 
 
+def test_capex_above_dna_never_reads_as_a_shrinking_asset_base():
+    """MSFT with capex normalised from its build-out: 20.26% of revenue against
+    11.61% D&A is 1.75×, below the build-out's 2.28× — but it still replaces
+    everything D&A wears out."""
+    normalised = _context(
+        ronic=0.09, wacc=0.09, final_capex=20.26, final_dna=11.61, final_growth=0.025,
+        historical_capex_to_dna=2.28,
+    )
+    assert val.check_terminal_reinvestment(normalised, TOL)[0] == []
+
+
 def test_capex_below_dna_is_normal_when_it_always_has_been():
     """An asset-light or acquisitive company always spends less than D&A."""
     usual = _context(

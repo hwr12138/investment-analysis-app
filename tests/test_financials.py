@@ -640,6 +640,108 @@ def test_every_ttm_basis_falls_back_when_the_base_is_a_fiscal_year():
         assert not result.ok and "fiscal year" in result.detail
 
 
+def _capex_ratios(values: list[float]) -> pd.DataFrame:
+    years = range(2026 - len(values) + 1, 2027)
+    return pd.DataFrame({"capex_pct_revenue": values}, index=list(years))
+
+
+def test_capex_normalises_to_its_own_five_year_average():
+    """A build-out is not held forever: MSFT-like capex, doubled in two years,
+    returns to the average of the last five years — not to the pre-build-out
+    level, and the sixth year back plays no part."""
+    normal = fin.normal_capex(_capex_ratios([0.99, 0.12, 0.13, 0.18, 0.23, 0.35]))
+    assert normal.value == pytest.approx((0.12 + 0.13 + 0.18 + 0.23 + 0.35) / 5)
+    assert normal.basis == fin.NORMAL_CAPEX_BASIS
+    assert normal.periods == ("2022", "2023", "2024", "2025", "2026")
+    assert normal.detail == ""
+
+
+def test_capex_below_its_average_normalises_up():
+    """Symmetric, so the rule never only flatters: a foundry off its peak reverts up."""
+    normal = fin.normal_capex(_capex_ratios([0.50, 0.47, 0.43, 0.33, 0.34]))
+    assert normal.value > 0.34
+
+
+def test_a_missing_capex_year_is_excluded_not_zero_filled():
+    normal = fin.normal_capex(_capex_ratios([0.10, np.nan, 0.20, 0.30]))
+    assert normal.value == pytest.approx(0.20)
+    assert normal.years_used == 3
+    assert "Only 3 of the requested 5" in normal.detail
+
+
+def _roic_frame(**columns) -> pd.DataFrame:
+    base = {
+        "ebit": [100.0, 120.0, 150.0],
+        "pretax_income": [100.0, 120.0, 150.0],
+        "tax_expense": [-20.0, -24.0, -30.0],   # a 20% rate, signed as Sharadar ships it
+        "total_equity": [300.0, 400.0, 500.0],
+        "short_term_debt": [10.0, 10.0, 10.0],
+        "long_term_debt": [90.0, 90.0, 90.0],
+        "minority_interest": [0.0, 0.0, 0.0],
+        "cash": [50.0, 50.0, 50.0],
+        "short_term_investments": [50.0, 50.0, 50.0],
+    }
+    base.update(columns)
+    return pd.DataFrame(base, index=[2023, 2024, 2025])
+
+
+def test_invested_capital_is_the_financing_side_net_of_the_bridges_cash():
+    capital = fin.invested_capital(_roic_frame())
+    assert list(capital) == [300.0, 400.0, 500.0]   # equity + 100 debt − 100 cash and STI
+
+
+def test_an_unreported_debt_line_is_absent_not_a_reason_to_drop_the_year():
+    frame = _roic_frame().drop(columns=["short_term_debt", "long_term_debt"])
+    assert fin.invested_capital(frame).iloc[-1] == pytest.approx(400.0)
+
+
+def test_roic_is_nopat_over_average_invested_capital():
+    roic = fin.return_on_invested_capital(_roic_frame())
+    assert np.isnan(roic.iloc[0])                       # no opening balance to average
+    assert roic.iloc[1] == pytest.approx(120 * 0.8 / 350)
+    assert roic.iloc[2] == pytest.approx(150 * 0.8 / 450)
+
+
+def test_a_pretax_loss_year_has_no_return_rather_than_a_zero_one():
+    frame = _roic_frame(pretax_income=[100.0, -5.0, 150.0])
+    assert np.isnan(fin.return_on_invested_capital(frame).iloc[1])
+
+
+def test_negative_invested_capital_has_no_meaningful_return():
+    """Buybacks can run equity below zero; a return on less than nothing is noise."""
+    frame = _roic_frame(total_equity=[-500.0, -500.0, 500.0])
+    roic = fin.return_on_invested_capital(frame)
+    assert np.isnan(roic.iloc[1])
+
+
+def test_the_default_ronic_is_the_median_of_the_last_five_years():
+    years = list(range(2016, 2026))
+    ebit = [10.0] * 3 + [50.0, 30.0, 999.0, 20.0, 40.0, 10.0, 60.0]
+    frame = pd.DataFrame(
+        {
+            "ebit": ebit, "pretax_income": [1.0] * 10, "tax_expense": [0.0] * 10,
+            "total_equity": [100.0] * 10,
+        },
+        index=years,
+    )
+    roic = fin.historical_roic(frame)
+    assert roic.value == pytest.approx(0.40)            # median of 9.99, 0.2, 0.4, 0.1, 0.6
+    assert roic.periods == ("2021", "2022", "2023", "2024", "2025")
+    assert roic.basis == fin.ROIC_BASIS
+
+
+def test_no_measurable_return_leaves_the_default_ronic_unavailable():
+    frame = _roic_frame(pretax_income=[-1.0, -1.0, -1.0])
+    roic = fin.historical_roic(frame)
+    assert not roic.ok and roic.detail
+
+
+def test_no_capex_history_means_nothing_to_normalise_to():
+    normal = fin.normal_capex(_capex_ratios([np.nan, np.nan]))
+    assert not normal.ok
+    assert normal.detail
+
+
 # ---------------------------------------------------------------------------
 # Year-1 growth: the lower of TTM and the five-year CAGR
 # ---------------------------------------------------------------------------

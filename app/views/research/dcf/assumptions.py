@@ -57,8 +57,8 @@ estimate. A traded bond's yield is better evidence where one exists.
 #: the radio selects by default, and it is ordered to match
 #: ``dcf_model.DEFAULT_HEADLINE_METHOD`` so the UI and the engine agree.
 _HEADLINE_METHODS = {
-    "Exit multiple": "exit_multiple",
     "Gordon growth": "gordon",
+    "Exit multiple": "exit_multiple",
 }
 
 #: Share count bases, label to what they divide by. The first is the default.
@@ -304,8 +304,9 @@ def collect(dataset: dcf_model.CompanyDataset, valuation_date: date) -> dict | N
     bridge = _cash_sbc_and_bridge(dataset, base, records)
 
     # The growth path needs the terminal rate to fade toward, so it is shaped
-    # only once both are known. The margin moves to its target, if one is set;
-    # the other four drivers stay flat.
+    # only once both are known. The margin, capex and D&A move to their targets
+    # where one is set — capex has one by default, its five-year average; the
+    # tax rate and working capital stay flat.
     fade_to = terminal.terminal_growth if entered.fade else None
 
     def path(key: str) -> tuple[float, ...]:
@@ -519,8 +520,11 @@ def _forecast_drivers(
                 "capex_pct_revenue": _driver_target(
                     "capex % of revenue", "capex", driver_values["capex_pct_revenue"], years,
                     records,
-                    caption="D&A usually follows capex with a lag — if capex normalises, "
-                            "consider moving D&A too.",
+                    normal=fin.normal_capex(dataset.ratios),
+                    caption="D&A stays at its starting ratio, as the margin does: the "
+                            "margin already deducts today's D&A, so move the two together "
+                            "or cash flow moves by the whole change in D&A rather than by "
+                            "its tax shield.",
                 ),
                 "dna_pct_revenue": _driver_target(
                     "D&A % of revenue", "dna", driver_values["dna_pct_revenue"], years, records,
@@ -576,23 +580,38 @@ def _driver_target(
     years: int,
     records: list[dcf_export.AssumptionRecord],
     *,
+    normal: fin.DriverDefault | None = None,
     caption: str = "",
 ) -> float | None:
     """An optional year-N target the driver moves to, linearly from year 1.
 
-    Off by default: the path is flat at the starting value unless a target is
-    chosen, because a target is a claim about the business — whether AI-era
-    capex normalises, whether margins expand — not something history supplies.
+    ``normal`` is the level history says the driver returns to — only capex
+    has one (:func:`fin.normal_capex`). Where it can be computed the target is
+    on by default and starts there, derived rather than typed; where it cannot,
+    the toggle starts off and says why. The margin and D&A have none: whether a
+    margin expands is a claim about the business, not something history
+    supplies, so their paths stay flat unless someone chooses a target.
     Returns ``None`` when no target is set.
     """
     toggle_key, value_key = _TARGET_KEYS[key]
+    normalises = normal is not None and normal.ok
     use_target = st.toggle(
         f"Move the {label} to a target",
-        value=False,
+        value=normalises,
         key=toggle_key,
         help=f"The {label} moves linearly from its starting value in year 1 to the "
              "target in year N; the terminal year keeps the final year's value.",
     )
+    if normalises:
+        st.caption(
+            f"On by default: the {label} reaches its own {normal.basis.lower()} by year "
+            f"{years}, so neither today's build-out nor a trough is held forever."
+        )
+    elif normal is not None:
+        st.caption(
+            f"No {normal.basis.lower()} to normalise to — {normal.detail} The starting "
+            "value is held unless you set a target."
+        )
     if caption:
         st.caption(caption)
     if not use_target:
@@ -603,8 +622,9 @@ def _driver_target(
             )
         )
         return None
+    seed = normal.value if normalises else start
     if value_key not in st.session_state:
-        st.session_state[value_key] = round(start * 100, 4)
+        st.session_state[value_key] = round(seed * 100, 4)
     target_pct = st.number_input(
         f"Target {label} in year {years} (%)",
         step=0.5,
@@ -612,11 +632,23 @@ def _driver_target(
         format="%.4f",
     )
     target = target_pct / 100.0
-    records.append(
-        dcf_export.AssumptionRecord(
-            "Forecast drivers", f"Target {label}", target,
-            Sourced.user(target, f"Reached in year {years}, linearly from year 1."),
+    reached = f"Reached in year {years}, linearly from year 1."
+    if normalises:
+        sourced = Sourced.derived(
+            value=normal.value,
+            source=f"{normal.basis} of reported figures",
+            formula=f"{fin.DRIVER_LABELS[normal.key]} over {normal.years_used} period(s): "
+            f"{', '.join(str(p) for p in normal.periods)}. {reached}",
         )
+        if not _untouched(target_pct, round(normal.value * 100, 4), 4):
+            sourced = sourced.with_user_value(target)
+        common.provenance(sourced)
+        if normal.detail:
+            st.caption(f"⚠️ {normal.detail}")
+    else:
+        sourced = Sourced.user(target, reached)
+    records.append(
+        dcf_export.AssumptionRecord("Forecast drivers", f"Target {label}", target, sourced)
     )
     return target
 
@@ -1143,31 +1175,7 @@ def _terminal_and_conventions(
                 )
             )
 
-            ronic_at_wacc = st.toggle(
-                "Return on new capital = WACC",
-                value=True,
-                key="dcf_input_ronic_at_wacc",
-                help="The terminal year reinvests g ÷ RONIC of NOPAT to grow at g. At "
-                     "RONIC = WACC, growth beyond the forecast neither creates nor "
-                     "destroys value — the conservative default for a company without a "
-                     "durable advantage. Set it higher for one that has one.",
-            )
-            if ronic_at_wacc:
-                ronic = None
-                ronic_sourced = Sourced.estimate(
-                    wacc_result.wacc,
-                    "Set equal to the WACC",
-                    "No value is created by growth after the forecast.",
-                )
-            else:
-                if "dcf_input_ronic" not in st.session_state:
-                    st.session_state["dcf_input_ronic"] = round(wacc_result.wacc * 100, 2)
-                ronic_pct = st.number_input(
-                    "Return on new invested capital (%)", step=0.5, key="dcf_input_ronic",
-                    min_value=0.1,
-                )
-                ronic = ronic_pct / 100.0
-                ronic_sourced = Sourced.user(ronic, "Return earned on terminal reinvestment.")
+            ronic, ronic_sourced = _return_on_new_capital(dataset, wacc_result)
             common.provenance(ronic_sourced)
             incremental_return_slot = st.empty()
             records.append(
@@ -1298,6 +1306,76 @@ def _terminal_and_conventions(
         terminal_growth, exit_multiple, headline_method, mid_year, elapsed, ronic,
         terminal_tax_rate, ebita_proxy, incremental_return_slot,
     )
+
+
+#: Where the terminal year's return on new capital comes from. The company's
+#: own ROIC leads, and is the default, wherever its history supplies one.
+_OWN_ROIC = "Company's own ROIC"
+_RONIC_AT_WACC = "Equal to the WACC"
+_RONIC_MANUAL = "Manual"
+
+
+def _return_on_new_capital(
+    dataset: dcf_model.CompanyDataset, wacc_result: wacc_lib.WaccResult
+) -> tuple[float | None, Sourced]:
+    """The terminal year's RONIC and its provenance; ``None`` means the WACC.
+
+    ``None`` rather than the WACC's value, so the perpetuity keeps tracking the
+    WACC wherever it moves — the sensitivity grid reruns it at other rates. The
+    company's own return is used only above the WACC: below it, the default
+    would have growth destroy value, which is a claim to make on purpose, so it
+    takes the WACC and says why. Growth that destroys value stays available by
+    hand.
+    """
+    wacc = wacc_result.wacc
+    own = fin.historical_roic(dataset.annual)
+    options = ((_OWN_ROIC,) if own.ok else ()) + (_RONIC_AT_WACC, _RONIC_MANUAL)
+    choice = st.radio(
+        "Return on new invested capital (RONIC)",
+        options,
+        key="dcf_input_ronic_basis",
+        help="The terminal year reinvests g ÷ RONIC of NOPAT to grow at g. Above the "
+             "WACC, growth beyond the forecast creates value; at it, growth neither "
+             "creates nor destroys any — the floor for a company without a durable "
+             "advantage. However high it goes, the Gordon value rises by at most "
+             "WACC ÷ (WACC − g).",
+    )
+    if not own.ok:
+        st.caption(f"No own ROIC to default to — {own.detail}")
+    at_wacc = Sourced.estimate(
+        wacc, "Set equal to the WACC", "No value is created by growth after the forecast."
+    )
+
+    if choice == _OWN_ROIC:
+        formula = (
+            "NOPAT ÷ average invested capital (equity + debt + minority interest − cash − "
+            f"short-term investments), median of {own.years_used} fiscal year(s): "
+            f"{', '.join(own.periods)}"
+        )
+        if own.detail:
+            st.caption(f"⚠️ {own.detail}")
+        if own.value <= wacc:
+            st.caption(
+                f"The company's own ROIC, {own.value:.1%}, does not exceed its WACC, so new "
+                "capital is taken to earn the WACC: growth that destroys value is not "
+                "assumed by default."
+            )
+            return None, Sourced.estimate(
+                wacc, "Set equal to the WACC",
+                f"Own ROIC {own.value:.2%} does not exceed the WACC — {formula}.",
+            )
+        return own.value, Sourced.derived(own.value, f"{own.basis} of reported figures", formula)
+    if choice == _RONIC_AT_WACC:
+        return None, at_wacc
+
+    if "dcf_input_ronic" not in st.session_state:
+        seed = own.value if own.ok and own.value > wacc else wacc
+        st.session_state["dcf_input_ronic"] = round(seed * 100, 2)
+    ronic_pct = st.number_input(
+        "Return on new invested capital (%)", step=0.5, key="dcf_input_ronic", min_value=0.1,
+    )
+    ronic = ronic_pct / 100.0
+    return ronic, Sourced.user(ronic, "Return earned on terminal reinvestment.")
 
 
 def _show_incremental_return(

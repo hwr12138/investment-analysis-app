@@ -38,11 +38,14 @@ DEFAULT_BENCHMARK = "SPY"
 #: Both methods always compute and both are always displayed; this only decides
 #: which one the single headline number comes from.
 #:
-#: The exit multiple — the owner's choice for a book of tech and high-growth
-#: companies, where Gordon at RONIC = WACC excludes the value such companies
-#: create beyond the forecast. Gordon is always computed beside it as the
-#: fundamentals cross-check, and the checks flag when the two part company.
-DEFAULT_HEADLINE_METHOD = "exit_multiple"
+#: Gordon growth — the owner's choice, reversing round 2's exit multiple: the
+#: headline should rest on the company's own cash flows, not on the multiple it
+#: traded at while it grew faster than the forecast lets it grow by year N. Its
+#: terminal year earns the company's own return on new capital, never below the
+#: WACC (``financials.historical_roic``); the exit multiple is always computed
+#: beside it as the market's cross-check, and the checks flag when the two part
+#: company.
+DEFAULT_HEADLINE_METHOD = "gordon"
 
 
 @dataclass

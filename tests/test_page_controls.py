@@ -399,17 +399,18 @@ def test_the_two_methods_really_do_cross_imply_each_other():
 # ---------------------------------------------------------------------------
 
 
-def test_the_exit_multiple_is_the_default_headline_method():
-    """DCF_ROUND2_INSTRUCTIONS.md §2.1: the owner's choice for a tech book, where
-    Gordon at RONIC = WACC excludes value created beyond the forecast. Gordon is
-    still computed and shown beside it as the cross-check."""
-    assert dcf_model.DEFAULT_HEADLINE_METHOD == "exit_multiple"
+def test_gordon_growth_is_the_default_headline_method():
+    """The owner's choice, reversing DCF_ROUND2_INSTRUCTIONS.md §2.1: the headline
+    rests on the company's own cash flows rather than on the multiple it traded
+    at. The exit multiple is still computed and shown beside it as the
+    cross-check."""
+    assert dcf_model.DEFAULT_HEADLINE_METHOD == "gordon"
 
 
 def test_the_radio_offers_the_default_first():
     """Streamlit selects the first option, so the order is the default."""
     labels = list(assumptions._HEADLINE_METHODS)
-    assert labels[0] == "Exit multiple"
+    assert labels[0] == "Gordon growth"
 
 
 def test_the_ui_and_the_engine_agree_on_the_default():
@@ -419,6 +420,141 @@ def test_the_ui_and_the_engine_agree_on_the_default():
 
 def test_both_methods_remain_selectable():
     assert set(assumptions._HEADLINE_METHODS.values()) == {"exit_multiple", "gordon"}
+
+
+# ---------------------------------------------------------------------------
+# Capex normalisation
+# ---------------------------------------------------------------------------
+
+
+def _capex_target(normal_value):
+    """Draws the capex target alone, as the panel does, and keeps what it returned."""
+    import streamlit as st
+
+    from app.logic.dcf import financials as fin
+    from app.views.research.dcf import assumptions
+
+    periods = ("2022", "2023", "2024", "2025", "2026")
+    normal = fin.DriverDefault(
+        "capex_pct_revenue", normal_value, fin.NORMAL_CAPEX_BASIS,
+        len(periods) if normal_value is not None else 0,
+        periods if normal_value is not None else (),
+        "" if normal_value is not None else "No period had every component needed.",
+    )
+    records = []
+    st.session_state["_target"] = assumptions._driver_target(
+        "capex % of revenue", "capex", 0.35, 10, records, normal=normal
+    )
+    st.session_state["_origin"] = records[-1].sourced.origin.value
+
+
+def _run_capex_target(normal_value):
+    from streamlit.testing.v1 import AppTest
+
+    app = AppTest.from_function(_capex_target, args=(normal_value,))
+    app.run()
+    assert not app.exception
+    return app
+
+
+def test_capex_moves_to_its_five_year_average_by_default():
+    """Today's capex is where the forecast starts, not where it stays: the
+    target is on without anyone touching it, and it is derived, not typed."""
+    app = _run_capex_target(0.20)
+    assert app.toggle(key="dcf_input_target_capex_on").value is True
+    assert app.session_state["_target"] == pytest.approx(0.20)
+    assert app.session_state["_origin"] == "derived"
+
+
+def test_a_typed_capex_target_reads_as_the_users():
+    app = _run_capex_target(0.20)
+    app.number_input(key="dcf_input_target_capex").set_value(15.0).run()
+    assert app.session_state["_target"] == pytest.approx(0.15)
+    assert app.session_state["_origin"] == "user"
+
+
+def test_turning_normalisation_off_holds_todays_capex():
+    app = _run_capex_target(0.20)
+    app.toggle(key="dcf_input_target_capex_on").set_value(False).run()
+    assert app.session_state["_target"] is None
+
+
+def test_no_history_leaves_capex_flat_and_says_why():
+    """No silent fallback: with nothing to normalise to, nothing is substituted."""
+    app = _run_capex_target(None)
+    assert app.toggle(key="dcf_input_target_capex_on").value is False
+    assert app.session_state["_target"] is None
+    assert any("No 5-year average to normalise to" in c.value for c in app.caption)
+
+
+# ---------------------------------------------------------------------------
+# Return on new invested capital
+# ---------------------------------------------------------------------------
+
+
+def _ronic_panel(ebit):
+    """Draws the RONIC choice for a company whose ROIC is ebit × 0.8 ÷ 100 a year."""
+    from types import SimpleNamespace
+
+    import pandas as pd
+    import streamlit as st
+
+    from app.views.research.dcf import assumptions
+
+    years = 6
+    annual = pd.DataFrame(
+        {
+            "ebit": [ebit] * years, "pretax_income": [ebit] * years,
+            "tax_expense": [-0.2 * ebit] * years, "total_equity": [100.0] * years,
+        },
+        index=list(range(2020, 2020 + years)),
+    )
+    ronic, sourced = assumptions._return_on_new_capital(
+        SimpleNamespace(annual=annual), SimpleNamespace(wacc=0.09)
+    )
+    st.session_state["_ronic"] = ronic
+    st.session_state["_origin"] = sourced.origin.value
+
+
+def _run_ronic(ebit):
+    from streamlit.testing.v1 import AppTest
+
+    app = AppTest.from_function(_ronic_panel, args=(ebit,))
+    app.run()
+    assert not app.exception
+    return app
+
+
+def test_the_default_ronic_is_the_companys_own_return_above_the_wacc():
+    """RONIC = WACC credited nothing to growth beyond year N; the company's own
+    record is the default evidence for what its new capital earns."""
+    app = _run_ronic(ebit=30.0)                          # 30 × 0.8 ÷ 100 = 24%
+    assert app.radio(key="dcf_input_ronic_basis").value == assumptions._OWN_ROIC
+    assert app.session_state["_ronic"] == pytest.approx(0.24)
+    assert app.session_state["_origin"] == "derived"
+
+
+def test_an_own_return_below_the_wacc_defaults_to_the_wacc_not_to_destroying_value():
+    app = _run_ronic(ebit=5.0)                           # 4%, against a 9% WACC
+    assert app.session_state["_ronic"] is None
+    assert app.session_state["_origin"] == "estimate"
+    assert any("does not exceed its WACC" in c.value for c in app.caption)
+
+
+def test_no_measurable_return_offers_only_the_wacc_and_a_manual_figure():
+    app = _run_ronic(ebit=-10.0)
+    radio = app.radio(key="dcf_input_ronic_basis")
+    assert list(radio.options) == [assumptions._RONIC_AT_WACC, assumptions._RONIC_MANUAL]
+    assert app.session_state["_ronic"] is None
+    assert any("No own ROIC to default to" in c.value for c in app.caption)
+
+
+def test_ronic_can_still_be_set_to_the_wacc_or_by_hand():
+    app = _run_ronic(ebit=30.0)
+    app.radio(key="dcf_input_ronic_basis").set_value(assumptions._RONIC_AT_WACC).run()
+    assert app.session_state["_ronic"] is None
+    app.radio(key="dcf_input_ronic_basis").set_value(assumptions._RONIC_MANUAL).run()
+    assert app.number_input(key="dcf_input_ronic").value == pytest.approx(24.0)
 
 
 # ---------------------------------------------------------------------------

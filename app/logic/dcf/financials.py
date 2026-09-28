@@ -480,6 +480,31 @@ def driver_default(ratios: pd.DataFrame, key: str, basis: str) -> DriverDefault:
     )
 
 
+#: The level capex % of revenue returns to by year N unless the user says
+#: otherwise — see :func:`normal_capex`.
+NORMAL_CAPEX_BASIS = "5-year average"
+
+
+def normal_capex(ratios: pd.DataFrame) -> DriverDefault:
+    """The capex % of revenue the forecast normalises to by its final year.
+
+    Capex starts from the base period's own ratio, which is where the business
+    is now; held for the whole forecast, that ratio carries an AI build-out — or
+    a cyclical trough — into perpetuity. AMZN's TTM capex at 21.8% of revenue,
+    held for ten years, made every forecast year's FCFF negative. Moving it to
+    the company's own five-year average by year N keeps the jump-off honest and
+    lets the spending cycle turn. Symmetric on purpose: a company below its
+    average (TSM, off a peak) reverts up, one above it (MSFT, GOOGL, AMZN)
+    reverts down, so the rule never only flatters.
+
+    D&A is deliberately not normalised with it. The operating margin already
+    deducts today's D&A, so holding both at their TTM ratios holds EBITDA's
+    share of revenue; moving D&A alone would move cash flow by the whole change
+    rather than by its tax shield.
+    """
+    return driver_default(ratios, "capex_pct_revenue", NORMAL_CAPEX_BASIS)
+
+
 #: The trailing bases. Neither is a history window: each reads the latest
 #: trailing-twelve-month period, which is where the business is *now* — the
 #: starting point a forecast for a company whose growth or margins are moving
@@ -664,6 +689,85 @@ def base_period_driver(
             f"The base period does not report the {DRIVER_LABELS[key].split(' ')[0]} line.",
         )
     return DriverDefault(key, float(numerator) / float(revenue), basis, 1, (label,))
+
+
+# ---------------------------------------------------------------------------
+# Return on invested capital, for the terminal year's RONIC
+# ---------------------------------------------------------------------------
+
+
+def invested_capital(values: pd.DataFrame) -> pd.Series:
+    """Equity + debt + minority interest − cash − short-term investments.
+
+    The financing side of the balance sheet, net of the cash the equity bridge
+    adds back, so the capital a return is measured on is the same capital the
+    enterprise value is. Goodwill stays in: an acquirer's growth was bought,
+    and a return that ignored the price paid would flatter it. Equity is
+    required; the other components, where not reported, are absent from the sum
+    rather than zero balances — the same rule as :func:`net_working_capital`.
+    """
+    if "total_equity" not in values.columns:
+        return pd.Series(np.nan, index=values.index)
+
+    def _optional(series: pd.Series | None) -> pd.Series:
+        if series is None:
+            return pd.Series(0.0, index=values.index)
+        return series.fillna(0.0)
+
+    return (
+        values["total_equity"]
+        + _optional(total_debt(values))
+        + _optional(values.get("minority_interest"))
+        - _optional(values.get("cash"))
+        - _optional(values.get("short_term_investments"))
+    )
+
+
+def return_on_invested_capital(values: pd.DataFrame) -> pd.Series:
+    """NOPAT ÷ average invested capital, per fiscal year.
+
+    NOPAT is EBIT after that year's effective tax rate, so a year with a pretax
+    loss has no rate and no return. The first year has no opening balance to
+    average with, and invested capital at or below zero — a company whose
+    buybacks have run its equity negative — has no meaningful return; all three
+    come back ``NaN`` and are excluded upstream, never zero.
+    """
+    if "ebit" not in values.columns:
+        return pd.Series(np.nan, index=values.index)
+    nopat = values["ebit"] * (1.0 - effective_tax_rate(values))
+    capital = invested_capital(values)
+    average = (capital + capital.shift(1)) / 2.0
+    return nopat / average.where(average > 0)
+
+
+#: The window the terminal year's default return on new capital is read over.
+ROIC_BASIS = "5-year median"
+
+
+def historical_roic(values: pd.DataFrame) -> DriverDefault:
+    """The company's own return on invested capital — the default terminal RONIC.
+
+    The terminal year reinvests g ÷ RONIC of NOPAT. At RONIC = WACC, growth
+    after year N creates nothing, which read ten of the eleven companies the
+    model is checked against 24–72% below their prices; the company's own
+    record is the evidence for what its new capital earns. A median, so one restructuring or tax year does not
+    set a perpetuity. Its reach is bounded: even an infinite RONIC only lifts
+    the Gordon value by WACC ÷ (WACC − g), so a 100% return reads little
+    differently from a 30% one.
+    """
+    series = return_on_invested_capital(values).dropna()
+    if series.empty:
+        return DriverDefault(
+            "roic", None, ROIC_BASIS, 0, (),
+            "No fiscal year had positive pretax income, EBIT and positive invested "
+            "capital at both ends.",
+        )
+    used = series.iloc[-5:]
+    detail = f"Only {len(used)} of the requested 5 years had usable data." if len(used) < 5 else ""
+    return DriverDefault(
+        "roic", float(used.median()), ROIC_BASIS, len(used),
+        tuple(str(p) for p in used.index), detail,
+    )
 
 
 # ---------------------------------------------------------------------------
