@@ -239,6 +239,24 @@ def common_shares_frame(statements: StatementSet) -> pd.DataFrame:
     )
 
 
+def share_factor(statements: StatementSet) -> float | None:
+    """The latest ``sharefactor`` — ADR shares per underlying share, and the like.
+
+    :func:`common_shares_frame` multiplies it through already. Weighted counts
+    and per-share figures (EPS) are published per *underlying* share, so any
+    count compared with a price per ADR has to be multiplied by it too. ``None``
+    when the column is absent or empty, which callers read as a factor of one.
+    """
+    frame = statements.frame("DERIVED")
+    caption = SF1_CAPTIONS["sharefactor"]
+    if frame.empty or caption not in frame.columns:
+        return None
+    ordered = frame.sort_values("Report Date") if "Report Date" in frame.columns else frame
+    values = pd.to_numeric(ordered[caption], errors="coerce").dropna()
+    values = values[values > 0]
+    return float(values.iloc[-1]) if not values.empty else None
+
+
 def weighted_shares_frame(statements: StatementSet) -> pd.DataFrame:
     """Weighted-average basic and diluted counts per fiscal period."""
     columns = ["endDate", "fyear", "period", "basic", "diluted"]

@@ -15,6 +15,7 @@ import pytest
 from app.logic.dcf import financials as fin
 from app.logic.dcf import model as dcf_model
 from app.logic.dcf import reverse
+from app.logic.dcf import valuation as dcf
 from app.logic.dcf.reverse import Shape, Status
 from app.logic.dcf.valuation import ProjectionError, TerminalValueError
 from tests.test_golden import GOLDEN, build_model
@@ -309,7 +310,7 @@ def solve(built):
             for key in list(overrides)
             if key in {
                 "operating_margin", "effective_tax_rate", "capex_pct_revenue",
-                "dna_pct_revenue", "dnwc_pct_drevenue",
+                "dna_pct_revenue", "nwc_pct_revenue",
             }
         }
         if driver_overrides:
@@ -321,7 +322,7 @@ def solve(built):
             wacc_result=built["wacc_result"],
             terminal_growth=0.025,
             exit_multiple=12.0,
-            stub=built["stub"],
+            elapsed=built["elapsed"],
             mid_year=True,
             shares=built["dataset"].shares_weighted_diluted,
             share_basis="Diluted weighted-average (FY2025)",
@@ -329,6 +330,7 @@ def solve(built):
             operating_cash_floor=0.0,
             non_operating_assets=None,
             base_fcff=built["base_fcff"],
+            terminal_tax_rate=built["wacc_result"].marginal_tax_rate,
         )
         kwargs.update(overrides)
         return dcf_model.solve_implied_growth(
@@ -345,13 +347,13 @@ def forward(built, growth: float, **overrides) -> float:
         built["drivers"], revenue_growth=(growth,) * built["drivers"].years
     )
     for key, value in list(overrides.items()):
-        if key in {"dnwc_pct_drevenue", "operating_margin"}:
+        if key in {"nwc_pct_revenue", "operating_margin"}:
             drivers = dataclasses.replace(drivers, **{key: (overrides.pop(key),) * drivers.years})
     kwargs = dict(
         wacc_result=built["wacc_result"],
         terminal_growth=0.025,
         exit_multiple=12.0,
-        stub=built["stub"],
+        elapsed=built["elapsed"],
         mid_year=True,
         shares=built["dataset"].shares_weighted_diluted,
         share_basis="Diluted weighted-average (FY2025)",
@@ -359,6 +361,7 @@ def forward(built, growth: float, **overrides) -> float:
         operating_cash_floor=0.0,
         non_operating_assets=None,
         base_fcff=built["base_fcff"],
+        terminal_tax_rate=built["wacc_result"].marginal_tax_rate,
     )
     kwargs.update(overrides)
     return dcf_model.run_model(
@@ -408,17 +411,36 @@ def test_only_revenue_growth_moves_and_the_other_five_drivers_survive(built, sol
 
 def test_the_fixture_price_implies_an_implausible_rate_and_says_so(built, solve):
     """The fixture trades at 50.00 — reachable, but only on heroic growth."""
-    result = solve(built["dataset"].last_price)
+    result = solve(built["dataset"].last_price, headline_method="gordon")
     assert result.status is Status.SOLVED
-    assert result.growth == pytest.approx(0.676601, abs=1e-5)
+    assert result.growth == pytest.approx(0.837991, abs=1e-5)
     assert result.plausible is False
     assert result.growth_creates_value is True
 
 
+def test_moderate_working_capital_no_longer_turns_the_curve_over(built, solve):
+    """The artefact DCF_MODEL_REVIEW.md F5 describes, fixed.
+
+    With the final forecast year's FCFF capitalised at terminal growth, 60% of
+    each revenue dollar tied up in working capital made value peak and then
+    fall as growth rose — reinvestment sized for forecast growth, carried into
+    a 2.5% perpetuity. The normalised terminal year reinvests only what growing
+    at g costs, so the same company's value now rises with growth.
+    """
+    result = solve(3.45, headline_method="gordon", nwc_pct_revenue=0.6)
+    assert result.status is Status.SOLVED
+    assert result.growth_creates_value is True
+
+
 def test_growth_that_destroys_value_gives_two_rates_and_no_headline(built, solve):
-    """Working capital consuming more than the margin earns turns the curve
-    over, and two rates then reproduce the same price."""
-    result = solve(3.45, headline_method="gordon", dnwc_pct_drevenue=0.6)
+    """Working capital consuming far more than the margin earns turns the curve
+    over, and two rates then reproduce the same price.
+
+    It takes a lot now: 2.45 of working capital per dollar of revenue growth,
+    which releases cash as revenue shrinks and consumes it as revenue grows,
+    until the larger terminal year wins.
+    """
+    result = solve(2.92, headline_method="gordon", nwc_pct_revenue=2.45)
     assert result.status is Status.MULTIPLE_SOLUTIONS
     assert result.growth is None
     assert len(result.roots) == 2
@@ -426,7 +448,7 @@ def test_growth_that_destroys_value_gives_two_rates_and_no_headline(built, solve
 
 
 def test_a_price_above_the_peak_is_unreachable_at_any_growth_rate(built, solve):
-    result = solve(50.0, headline_method="gordon", dnwc_pct_drevenue=0.6)
+    result = solve(50.0, headline_method="gordon", nwc_pct_revenue=3.0)
     assert result.status is Status.TARGET_ABOVE_RANGE
     assert result.growth is None
     assert "-100.00%" in result.reason and "200.00%" in result.reason
@@ -434,7 +456,7 @@ def test_a_price_above_the_peak_is_unreachable_at_any_growth_rate(built, solve):
 
 def test_a_single_rate_on_a_falling_branch_is_solved_and_labelled(built, solve):
     """Legitimate, but the reading inverts: a higher price means *less* growth."""
-    result = solve(0.10, headline_method="gordon", dnwc_pct_drevenue=1.2)
+    result = solve(2.0, headline_method="gordon", nwc_pct_revenue=3.0)
     assert result.status is Status.SOLVED
     assert result.local_slope < 0
     assert result.growth_creates_value is False
@@ -480,12 +502,12 @@ def test_no_usable_price_is_not_an_answer(built, solve, price):
     [
         {"operating_margin": -0.5},
         {"mid_year": False},
-        {"stub": 1.0},
-        {"sbc": 1e9, "deduct_sbc": True},
+        {"elapsed": 0.0},
+        {"ronic": 0.001},
         {"shares": 1.0},
         {"operating_cash_floor": 1e9},
     ],
-    ids=["loss making", "end of year", "no stub", "huge sbc", "one share", "cash floor"],
+    ids=["loss making", "end of year", "no roll-forward", "tiny ronic", "one share", "cash floor"],
 )
 def test_the_solve_never_raises_on_adversarial_assumptions(built, solve, overrides):
     result = solve(50.0, **overrides)
@@ -501,8 +523,9 @@ def test_the_model_is_never_asked_for_growth_below_total_extinction(built, solve
 def test_an_independent_polynomial_gives_the_same_roots(built, solve):
     """Derived from the formulae rather than from `project()`.
 
-    With no stub, no mid-year shift and no SBC, each year's cash flow is
-    ``u^(i-1) * K(g)`` with ``K`` linear in ``g``, so enterprise value is a
+    With no roll-forward, no mid-year shift and no SBC, each year's cash flow is
+    ``u^(i-1) * K(g)`` with ``K`` linear in ``g``, and the normalised terminal
+    year is revenue ``u^N`` times constants, so enterprise value is a
     polynomial in ``u = 1 + g``. Rooting that polynomial answers the same
     question without going through the projector, which is what makes it a
     check on the solver rather than a restatement of it.
@@ -513,7 +536,7 @@ def test_an_independent_polynomial_gives_the_same_roots(built, solve):
     years = drivers.years
     margin, tax = drivers.operating_margin[0], drivers.effective_tax_rate[0]
     dna, capex = drivers.dna_pct_revenue[0], drivers.capex_pct_revenue[0]
-    nwc = drivers.dnwc_pct_drevenue[0]
+    nwc = drivers.nwc_pct_revenue[0]
 
     contribution = margin * (1 - tax) + dna - capex
     terminal_growth = 0.025
@@ -522,8 +545,13 @@ def test_an_independent_polynomial_gives_the_same_roots(built, solve):
         u = 1.0 + growth
         constant = base_revenue * (contribution * u - nwc * growth)
         explicit = sum(u ** (i - 1) * constant / (1 + wacc) ** i for i in range(1, years + 1))
-        final = u ** (years - 1) * constant
-        terminal = final * (1 + terminal_growth) / (wacc - terminal_growth)
+        # Year N + 1: NOPAT at the final margin and the marginal tax rate,
+        # reinvesting g ÷ RONIC of it, with RONIC equal to the WACC.
+        terminal_tax = built["wacc_result"].marginal_tax_rate
+        next_nopat = (
+            base_revenue * u**years * (1 + terminal_growth) * margin * (1 - terminal_tax)
+        )
+        terminal = next_nopat * (1 - terminal_growth / wacc) / (wacc - terminal_growth)
         return explicit + terminal / (1 + wacc) ** years
 
     target_growth = 0.11
@@ -533,6 +561,57 @@ def test_an_independent_polynomial_gives_the_same_roots(built, solve):
     offset = bridge.equity_value - built["result"].enterprise_values["gordon"]
 
     price = (enterprise_value(target_growth) + offset) / shares
-    result = solve(price, headline_method="gordon", mid_year=False, stub=1.0)
+    result = solve(price, headline_method="gordon", mid_year=False, elapsed=0.0)
     assert result.status is Status.SOLVED
     assert result.growth == pytest.approx(target_growth, abs=1e-7)
+
+
+def test_a_faded_forecast_round_trips_with_the_same_fade(built, solve):
+    """With a fade, the solve returns the year-1 rate of the same shaped path.
+
+    Solving for a flat rate against a faded forward run would invert a
+    different model from the one on screen.
+    """
+    start = 0.12
+    drivers = dataclasses.replace(
+        built["drivers"],
+        revenue_growth=dcf.growth_path(start, built["drivers"].years, 0.025),
+    )
+    price = dcf_model.run_model(
+        built["dataset"], built["base"], drivers=drivers,
+        wacc_result=built["wacc_result"], terminal_growth=0.025, exit_multiple=12.0,
+        elapsed=built["elapsed"], mid_year=True,
+        shares=built["dataset"].shares_weighted_diluted,
+        share_basis="Diluted weighted-average (FY2025)",
+        include_short_term_investments=True, operating_cash_floor=0.0,
+        non_operating_assets=None, base_fcff=built["base_fcff"],
+        terminal_tax_rate=built["wacc_result"].marginal_tax_rate,
+    ).headline_bridge.value_per_share
+    result = solve(price, drivers=drivers, growth_fade_to=0.025)
+    assert result.status is Status.SOLVED
+    assert result.growth == pytest.approx(start, abs=1e-7)
+
+
+@pytest.mark.parametrize("method", ["gordon", "exit_multiple"])
+def test_a_held_then_faded_forecast_round_trips_under_both_methods(built, solve, method):
+    """§2.1/§2.3: each method's solve inverts the same held-then-faded path."""
+    years, hold, start = built["drivers"].years, 3, 0.18
+    drivers = dataclasses.replace(
+        built["drivers"],
+        revenue_growth=dcf.growth_path(start, years, 0.025, hold=hold),
+    )
+    price = dcf_model.run_model(
+        built["dataset"], built["base"], drivers=drivers,
+        wacc_result=built["wacc_result"], terminal_growth=0.025, exit_multiple=12.0,
+        elapsed=built["elapsed"], mid_year=True,
+        shares=built["dataset"].shares_weighted_diluted,
+        share_basis="Diluted weighted-average (FY2025)",
+        include_short_term_investments=True, operating_cash_floor=0.0,
+        non_operating_assets=None, base_fcff=built["base_fcff"],
+        terminal_tax_rate=built["wacc_result"].marginal_tax_rate, headline_method=method,
+    ).headline_bridge.value_per_share
+    result = solve(
+        price, drivers=drivers, growth_fade_to=0.025, growth_hold=hold, headline_method=method
+    )
+    assert result.status is Status.SOLVED
+    assert result.growth == pytest.approx(start, abs=1e-7)

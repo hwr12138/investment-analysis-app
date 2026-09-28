@@ -31,7 +31,6 @@ than this module guessing.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import date
 
 import numpy as np
 import pandas as pd
@@ -46,7 +45,7 @@ DRIVER_KEYS = (
     "effective_tax_rate",
     "capex_pct_revenue",
     "dna_pct_revenue",
-    "dnwc_pct_drevenue",
+    "nwc_pct_revenue",
 )
 
 DRIVER_LABELS = {
@@ -55,7 +54,7 @@ DRIVER_LABELS = {
     "effective_tax_rate": "Effective tax rate",
     "capex_pct_revenue": "CapEx as % of revenue",
     "dna_pct_revenue": "D&A as % of revenue",
-    "dnwc_pct_drevenue": "ΔNWC as % of change in revenue",
+    "nwc_pct_revenue": "NWC as % of revenue",
 }
 
 
@@ -261,6 +260,19 @@ def capex(values: pd.DataFrame) -> CapexResult:
     )
 
 
+def acquisition_spend(values: pd.DataFrame) -> pd.Series:
+    """Cash spent on business acquisitions, net of disposals, as a positive number.
+
+    Sharadar signs the line negative for cash spent, like capex. ``NaN`` where
+    it is not reported — missing is not the same as a company that bought
+    nothing.
+    """
+    reported = values.get("acquisitions")
+    if reported is None:
+        return pd.Series(np.nan, index=values.index)
+    return -reported
+
+
 def total_debt(values: pd.DataFrame) -> pd.Series:
     """Current debt + non-current debt.
 
@@ -347,7 +359,6 @@ def driver_ratios(values: pd.DataFrame) -> pd.DataFrame:
 
     revenue_positive = revenue.where(revenue > 0)
     capex_values = capex(values).values
-    d_revenue = revenue.diff()
 
     ratios = pd.DataFrame(index=values.index)
     ratios["revenue_growth"] = revenue.pct_change()
@@ -355,9 +366,25 @@ def driver_ratios(values: pd.DataFrame) -> pd.DataFrame:
     ratios["effective_tax_rate"] = effective_tax_rate(values)
     ratios["capex_pct_revenue"] = capex_values / revenue_positive
     ratios["dna_pct_revenue"] = dna / revenue_positive
-    # Only meaningful when revenue actually moved; a flat year divides by ~zero.
-    ratios["dnwc_pct_drevenue"] = (delta_nwc(values) / d_revenue).where(d_revenue.abs() > 0)
+    # A ratio of levels, not of year-on-year changes. ΔNWC ÷ Δrevenue divided
+    # by a near-zero change in a flat year — DHR's FY2024 read 2,453% on a $15m
+    # revenue move — and one such year dominated any average. The projection
+    # applies this ratio to each year's change in revenue, which in steady state
+    # is the same thing and never divides by a small number. Negative is
+    # allowed: a business funded by its customers releases cash as it grows.
+    ratios["nwc_pct_revenue"] = net_working_capital(values) / revenue_positive
+    # Not a forecast driver on its own — see `ACQUISITIONS_KEY`.
+    ratios[ACQUISITIONS_KEY] = acquisition_spend(values) / revenue_positive
     return ratios
+
+
+#: Acquisition spend as a share of revenue. Kept beside the six drivers rather
+#: than among them: it only reaches the forecast when the user folds it into
+#: the capex driver, for a company whose reported growth was partly bought.
+ACQUISITIONS_KEY = "acquisitions_pct_revenue"
+
+#: Display labels for every column :func:`driver_ratios` returns.
+RATIO_LABELS = {**DRIVER_LABELS, ACQUISITIONS_KEY: "Acquisitions as % of revenue"}
 
 
 @dataclass(frozen=True)
@@ -381,6 +408,17 @@ class DriverDefault:
 #: Bases the user can pick between for every driver default.
 BASES = ("Most recent year", "3-year average", "5-year average", "10-year average", "Median (all years)")
 
+#: Bases for revenue growth, which alone among the drivers compounds. The
+#: compound rate comes first because it is the one comparable to a forecast
+#: that compounds: the arithmetic mean of yearly rates is biased upward
+#: whenever growth was uneven (see :func:`revenue_growth_history`).
+GROWTH_BASES = ("5-year CAGR", "3-year CAGR", "10-year CAGR") + BASES
+
+_WINDOWS = {
+    "3-year average": 3, "5-year average": 5, "10-year average": 10,
+    "3-year CAGR": 3, "5-year CAGR": 5, "10-year CAGR": 10,
+}
+
 
 def driver_default(ratios: pd.DataFrame, key: str, basis: str) -> DriverDefault:
     """Computes one driver default on the requested basis.
@@ -399,13 +437,28 @@ def driver_default(ratios: pd.DataFrame, key: str, basis: str) -> DriverDefault:
             "No period had every component needed for this ratio.",
         )
 
-    window = {"3-year average": 3, "5-year average": 5, "10-year average": 10}.get(basis)
+    window = _WINDOWS.get(basis)
+    if basis.endswith("CAGR") and key != "revenue_growth":
+        return DriverDefault(
+            key, None, basis, 0, (), "A compound rate only applies to revenue growth."
+        )
     if basis == "Most recent year":
         used = series.iloc[-1:]
         value = float(used.iloc[0])
     elif basis == "Median (all years)":
         used = series
         value = float(series.median())
+    elif basis.endswith("CAGR"):
+        # The geometric mean of (1 + g): the one constant rate that compounds
+        # to the same place the reported years did.
+        used = series.iloc[-window:]
+        growth_factors = 1.0 + used
+        if (growth_factors <= 0).any():
+            return DriverDefault(
+                key, None, basis, len(used), tuple(str(p) for p in used.index),
+                "A year in the window lost all its revenue, so no compound rate exists.",
+            )
+        value = float(np.prod(growth_factors) ** (1.0 / len(used)) - 1.0)
     elif window is not None:
         used = series.iloc[-window:]
         value = float(used.mean())
@@ -425,6 +478,192 @@ def driver_default(ratios: pd.DataFrame, key: str, basis: str) -> DriverDefault:
         periods=tuple(str(p) for p in used.index),
         detail=detail,
     )
+
+
+#: The trailing bases. Neither is a history window: each reads the latest
+#: trailing-twelve-month period, which is where the business is *now* — the
+#: starting point a forecast for a company whose growth or margins are moving
+#: fast should jump off from.
+TTM_GROWTH_BASIS = "TTM year-over-year"
+#: The base period's own ratio — margin, capex %, D&A %, NWC % — for a base
+#: that is a trailing twelve months.
+TTM_BASIS = "TTM"
+
+#: How far either side of exactly a year the prior TTM period may end and
+#: still count as "four quarters earlier" — 52/53-week fiscal calendars move
+#: period ends by a few days a year.
+_YEAR_WINDOW_DAYS = (345, 385)
+
+
+def _ttm_pair(ttm: pd.DataFrame, ttm_meta: pd.DataFrame) -> tuple[pd.Series, pd.Series] | str:
+    """The latest TTM period and the one ending about a year before it.
+
+    Sharadar's TTM dimension steps a quarter at a time, so the pair spans the
+    last eight quarters. Returns the reason instead when there is no such pair.
+    """
+    if ttm is None or ttm.empty or "revenue" not in ttm.columns or ttm_meta is None \
+            or ttm_meta.empty or "report_date" not in ttm_meta.columns:
+        return "Sharadar publishes no trailing-twelve-month series for this company."
+    frame = pd.DataFrame(
+        {
+            "label": [str(label) for label in ttm.index],
+            "revenue": ttm["revenue"].to_numpy(),
+            "acquisitions": (
+                ttm["acquisitions"].to_numpy() if "acquisitions" in ttm.columns
+                else np.full(len(ttm), np.nan)
+            ),
+            "date": pd.to_datetime(
+                ttm_meta["report_date"].reindex(ttm.index), errors="coerce"
+            ).to_numpy(),
+        }
+    ).dropna(subset=["revenue", "date"]).sort_values("date")
+    if len(frame) < 2:
+        return "Fewer than two trailing-twelve-month periods are reported."
+    latest = frame.iloc[-1]
+    gaps = (latest["date"] - frame["date"]).dt.days
+    low, high = _YEAR_WINDOW_DAYS
+    prior = frame[(gaps >= low) & (gaps <= high)]
+    if prior.empty:
+        return (
+            f"No trailing-twelve-month period ends about a year before "
+            f"{latest['date'].date()}, so there is no like-for-like comparison."
+        )
+    return prior.iloc[-1], latest
+
+
+def ttm_revenue_growth(ttm: pd.DataFrame, ttm_meta: pd.DataFrame) -> DriverDefault:
+    """Latest TTM revenue ÷ the TTM revenue four quarters earlier, less one.
+
+    Read off Sharadar's own trailing-twelve-month dimension, whose rows step a
+    quarter at a time, so the comparison period is the one ending about a year
+    before the latest. ``None`` with the reason when there is no TTM series (a
+    foreign filer may publish none) or no period a year back.
+    """
+    basis = TTM_GROWTH_BASIS
+    pair = _ttm_pair(ttm, ttm_meta)
+    if isinstance(pair, str):
+        return DriverDefault("revenue_growth", None, basis, 0, (), pair)
+    prior, latest = pair
+    if prior["revenue"] <= 0:
+        return DriverDefault(
+            "revenue_growth", None, basis, 0, (),
+            "Revenue four quarters earlier was not positive.",
+        )
+    return DriverDefault(
+        key="revenue_growth",
+        value=float(latest["revenue"] / prior["revenue"] - 1.0),
+        basis=basis,
+        years_used=1,
+        periods=(prior["label"], latest["label"]),
+    )
+
+
+#: The default year-1 growth basis: whichever of the trailing rate and the
+#: five-year compound rate is lower.
+LOWER_GROWTH_BASIS = "Lower of TTM YoY and 5-year CAGR"
+
+
+def lower_of_growth(trailing: DriverDefault, compound: DriverDefault) -> DriverDefault:
+    """The lower of TTM year-over-year growth and the five-year CAGR.
+
+    The forecast holds year-1 growth for several years and then fades it over a
+    ten-year horizon, so the starting rate compounds hard. A trailing rate far
+    above the company's own five-year record — NVDA 83% against 67%, AVGO 49%
+    against 22% — took NVDA's revenue to 70× today's by year 10. Starting from
+    the lower of the two keeps a recent slowdown (the trailing rate is lower)
+    and refuses to extrapolate a recent burst (the compound rate is lower).
+    ``detail`` names which one was used and what the other read.
+
+    Unavailable, with the reason, when either input is: the rule needs both,
+    and the caller falls back explicitly rather than calling one of them "the
+    lower".
+    """
+    basis = LOWER_GROWTH_BASIS
+    for source in (trailing, compound):
+        if not source.ok:
+            return DriverDefault(
+                "revenue_growth", None, basis, 0, (),
+                f"{source.basis} is unavailable — {source.detail}",
+            )
+    chosen, other = (
+        (trailing, compound) if trailing.value <= compound.value else (compound, trailing)
+    )
+    return DriverDefault(
+        key="revenue_growth",
+        value=chosen.value,
+        basis=basis,
+        years_used=chosen.years_used,
+        periods=chosen.periods,
+        detail=(
+            f"Using {chosen.basis} ({chosen.value:.2%}), the lower; "
+            f"{other.basis} reads {other.value:.2%}."
+        ),
+    )
+
+
+def ttm_window_acquisitions(
+    ttm: pd.DataFrame, ttm_meta: pd.DataFrame
+) -> tuple[float, tuple[str, str]] | None:
+    """Acquisition spend over the TTM growth comparison's window ÷ TTM revenue.
+
+    The window is the two trailing-twelve-month periods the growth rate
+    compares — the last eight quarters — so this says whether *that* growth
+    rate may include bought revenue, unlike the five-year acquisitions check.
+    ``None`` when either period's acquisitions line is not reported.
+    """
+    pair = _ttm_pair(ttm, ttm_meta)
+    if isinstance(pair, str):
+        return None
+    prior, latest = pair
+    if pd.isna(prior["acquisitions"]) or pd.isna(latest["acquisitions"]) or latest["revenue"] <= 0:
+        return None
+    spend = -(float(prior["acquisitions"]) + float(latest["acquisitions"]))
+    return spend / float(latest["revenue"]), (prior["label"], latest["label"])
+
+
+def base_period_driver(
+    key: str, flows: pd.Series, stocks: pd.Series, *, is_ttm: bool, label: str
+) -> DriverDefault:
+    """One driver's ratio in the base period — the TTM basis.
+
+    ``operating_margin``, ``capex_pct_revenue`` and ``dna_pct_revenue`` read the
+    base period's flows over its revenue; ``nwc_pct_revenue`` reads the base
+    balance sheet's working capital over the TTM revenue. Pairing a TTM margin
+    with five-year-average capex and D&A mixes starting points: the margin
+    already reflects today's depreciation, and a hyperscaler whose capex has
+    doubled with an AI build-out would start its forecast spending half of what
+    it spends now.
+
+    Offered only when the base period *is* a trailing twelve months; an
+    annual-only filer's base is its last fiscal year, which the "Most recent
+    year" basis already covers. ``None`` with the reason otherwise.
+    """
+    basis = TTM_BASIS
+    if not is_ttm:
+        return DriverDefault(
+            key, None, basis, 0, (),
+            "The base period is a fiscal year, not a trailing twelve months.",
+        )
+    revenue = flows.get("revenue")
+    if revenue is None or pd.isna(revenue) or revenue <= 0:
+        return DriverDefault(key, None, basis, 0, (), "The base period has no positive revenue.")
+    frame = pd.DataFrame([flows])
+    if key == "operating_margin":
+        numerator = flows.get("ebit")
+    elif key == "capex_pct_revenue":
+        numerator = capex(frame).values.iloc[0]
+    elif key == "dna_pct_revenue":
+        numerator = flows.get("dna")
+    elif key == "nwc_pct_revenue":
+        numerator = net_working_capital(pd.DataFrame([stocks])).iloc[0]
+    else:
+        return DriverDefault(key, None, basis, 0, (), "No trailing basis for this driver.")
+    if numerator is None or pd.isna(numerator):
+        return DriverDefault(
+            key, None, basis, 0, (),
+            f"The base period does not report the {DRIVER_LABELS[key].split(' ')[0]} line.",
+        )
+    return DriverDefault(key, float(numerator) / float(revenue), basis, 1, (label,))
 
 
 # ---------------------------------------------------------------------------
@@ -599,34 +838,3 @@ STOCK_KEYS = (
     "minority_interest",
     "long_term_investments",
 )
-
-
-# ---------------------------------------------------------------------------
-# Fiscal calendar
-# ---------------------------------------------------------------------------
-
-
-def fiscal_year_end(
-    fiscal_year_end_month: int | None, reference: date, latest_report_date: date | None
-) -> date | None:
-    """The next fiscal year end on or after ``reference``.
-
-    The fiscal year end is carried as a *month* (9 for Apple), so the day comes
-    from the most recent annual report date where we have one — Apple's fiscal
-    year ends on the Saturday nearest 30 September, not always on the 30th.
-    """
-    if not fiscal_year_end_month:
-        return None
-
-    day = 30
-    if latest_report_date is not None and latest_report_date.month == fiscal_year_end_month:
-        day = latest_report_date.day
-
-    for year in (reference.year, reference.year + 1):
-        try:
-            candidate = date(year, int(fiscal_year_end_month), day)
-        except ValueError:  # e.g. 31 February after a day carried over
-            candidate = date(year, int(fiscal_year_end_month), 28)
-        if candidate >= reference:
-            return candidate
-    return None

@@ -17,7 +17,7 @@ from datetime import date, timedelta
 import numpy as np
 import pandas as pd
 
-from app.data import sharadar_client
+from app.data import market_data, sharadar_client
 from app.data.sharadar_client import StatementSet
 from app.logic.dcf import financials as fin
 from app.logic.dcf import reverse
@@ -37,6 +37,11 @@ DEFAULT_BENCHMARK = "SPY"
 #: Terminal value method driving the headline figure and the equity bridge.
 #: Both methods always compute and both are always displayed; this only decides
 #: which one the single headline number comes from.
+#:
+#: The exit multiple — the owner's choice for a book of tech and high-growth
+#: companies, where Gordon at RONIC = WACC excludes the value such companies
+#: create beyond the forecast. Gordon is always computed beside it as the
+#: fundamentals cross-check, and the checks flag when the two part company.
 DEFAULT_HEADLINE_METHOD = "exit_multiple"
 
 
@@ -56,6 +61,37 @@ class BasePeriod:
     stocks_as_of: date | None
     is_ttm: bool
     detail: str
+    #: The last day the flows cover — what the forecast is anchored to. See
+    #: :func:`~app.logic.dcf.valuation.elapsed_years`.
+    flows_as_of: date | None = None
+    #: The currency ``flows`` and ``stocks`` are in. Always the price's: a
+    #: foreign reporter's base is converted at spot on the way in.
+    currency: str = ""
+    #: Spot units of ``currency`` per unit of the reporting currency; 1.0 when
+    #: no conversion was needed.
+    fx_rate: float = 1.0
+
+    def converted(self, dataset: "CompanyDataset") -> "BasePeriod":
+        """This base period in the price's currency, at the dataset's spot rate.
+
+        Base revenue, SBC, every balance-sheet item the bridge and the WACC read,
+        and so both base-period FCFF builds — everything that meets a dollar
+        figure — pass through here. Ratios need no conversion, and the history
+        tables stay in the reporting currency.
+        """
+        rate = dataset.fx_rate_value
+        return replace(
+            self,
+            flows=_to_valuation_currency(self.flows, rate),
+            stocks=_to_valuation_currency(self.stocks, rate),
+            currency=dataset.valuation_currency,
+            fx_rate=rate,
+            detail=self.detail + (
+                f" Converted from {dataset.currency} at a spot rate of {rate:.6g} USD per "
+                f"{dataset.currency}."
+                if dataset.is_converted else ""
+            ),
+        )
 
 
 @dataclass
@@ -79,6 +115,9 @@ class CompanyDataset:
     ttm: pd.Series | None
     ttm_label: str | None
     manual_ttm: pd.Series | None
+    #: Every trailing-twelve-month period, for the historical exit multiple.
+    ttm_history: pd.DataFrame
+    ttm_history_meta: pd.DataFrame
 
     prices: pd.DataFrame
     common_shares: pd.DataFrame
@@ -88,9 +127,19 @@ class CompanyDataset:
 
     statements_annual: StatementSet
     asreported: bool
+    #: The ``asreported`` flag of every statement set actually fetched — annual,
+    #: quarterly and TTM — so the basis check compares real flags, not one.
+    statement_bases: tuple[bool, ...]
+    #: ADR shares per underlying share (Sharadar's ``sharefactor``); 1 for an
+    #: ordinary listing. Applied to every share count compared with the price.
+    share_factor: float
     fiscal_year_end_month: int | None
     capex_result: fin.CapexResult
     ratios: pd.DataFrame
+
+    #: Spot US dollars per unit of the reporting currency, for a company that
+    #: does not report in dollars; ``None`` for one that does.
+    fx_rate: Sourced | None = None
 
     # Quote and share counts, each with its own as-of date.
     last_price: float | None = None
@@ -107,6 +156,27 @@ class CompanyDataset:
     shares_weighted_basic: float | None = None
     shares_weighted_label: str = ""
     shares_eps_implied: float | None = None
+
+    @property
+    def valuation_currency(self) -> str:
+        """The currency the valuation is struck in — always the price's."""
+        return sharadar_client.PRICE_CURRENCY
+
+    @property
+    def is_converted(self) -> bool:
+        """True when the statements are in a currency other than the price's."""
+        return self.fx_rate is not None
+
+    @property
+    def fx_rate_value(self) -> float:
+        """The spot rate applied at the valuation boundary; 1.0 when none is needed."""
+        return float(self.fx_rate.value) if self.fx_rate is not None else 1.0
+
+    @property
+    def foreign_filer(self) -> bool:
+        """A non-US filer, whatever it reports in — the ``TICKERS`` category says so."""
+        category = str((self.listing or {}).get("category") or "")
+        return bool(category) and not category.startswith("Domestic")
 
     @property
     def sector_name(self) -> str | None:
@@ -147,6 +217,27 @@ def _reject_financial_sector(
         raise val.UnsupportedSectorError(ticker, sector, statements.template)
 
 
+def _spot_rate(ticker: str, statements: StatementSet) -> Sourced | None:
+    """Spot US dollars per unit of the reporting currency, or ``None`` for a USD reporter.
+
+    The drivers come from the company's own reporting-currency history, so its
+    growth and margins carry no FX noise; everything is converted once, at the
+    valuation boundary, at this rate (:meth:`BasePeriod.converted`). No rate
+    means no valuation: :class:`~app.logic.dcf.validation.UnsupportedCurrencyError`
+    is raised with the reason rather than a rate substituted. An empty currency
+    is let through as missing data, which the checks report.
+    """
+    currency = (statements.currency or "").strip().upper()
+    if not currency or currency == sharadar_client.PRICE_CURRENCY:
+        return None
+    rate = market_data.fetch_fx_rate(currency)
+    if not rate.ok:
+        raise val.UnsupportedCurrencyError(
+            ticker, currency, sharadar_client.PRICE_CURRENCY, rate.detail or ""
+        )
+    return rate
+
+
 def _series_value(series: pd.Series | None, key: str) -> float | None:
     if series is None or key not in series.index:
         return None
@@ -177,6 +268,7 @@ def load_company(ticker: str, *, asreported: bool = False) -> CompanyDataset:
         ticker, annual=True, asreported=asreported
     )
     _reject_financial_sector(ticker, annual_statements, listing)
+    fx_rate = _spot_rate(ticker, annual_statements)
 
     schema = resolve_schema(
         annual_statements.frames, ticker, annual_statements.template
@@ -209,16 +301,18 @@ def load_company(ticker: str, *, asreported: bool = False) -> CompanyDataset:
     ttm_series: pd.Series | None = None
     ttm_label: str | None = None
     ttm_statements: StatementSet | None = None
+    ttm_frame, ttm_meta = pd.DataFrame(), pd.DataFrame()
     try:
         ttm_statements = sharadar_client.fetch_statements(
             ticker, annual=False, ttm=True, asreported=asreported
         )
-        ttm_frame, _ = fin.build_concept_table(ttm_statements, schema)
+        ttm_frame, ttm_meta = fin.build_concept_table(ttm_statements, schema)
         if not ttm_frame.empty:
             ttm_series = ttm_frame.iloc[-1]
             ttm_label = str(ttm_frame.index[-1])
     except sharadar_client.SharadarError:
         ttm_series, ttm_label, ttm_statements = None, None, None
+        ttm_frame, ttm_meta = pd.DataFrame(), pd.DataFrame()
 
     manual = fin.manual_ttm(quarterly, fin.FLOW_KEYS)
 
@@ -254,6 +348,8 @@ def load_company(ticker: str, *, asreported: bool = False) -> CompanyDataset:
         ttm=ttm_series,
         ttm_label=ttm_label,
         manual_ttm=manual,
+        ttm_history=ttm_frame,
+        ttm_history_meta=ttm_meta,
         prices=prices,
         # Point-in-time shares come off the newest filing we have, which is the
         # latest quarter where the company files one.
@@ -265,6 +361,13 @@ def load_company(ticker: str, *, asreported: bool = False) -> CompanyDataset:
         filings=sharadar_client.filings_frame(annual_statements),
         statements_annual=annual_statements,
         asreported=asreported,
+        statement_bases=tuple(
+            statements.asreported
+            for statements in (annual_statements, quarterly_statements, ttm_statements)
+            if statements is not None
+        ),
+        share_factor=sharadar_client.share_factor(annual_statements) or 1.0,
+        fx_rate=fx_rate,
         fiscal_year_end_month=sharadar_client.fiscal_year_end_month(annual_statements),
         capex_result=fin.capex(annual),
         ratios=fin.driver_ratios(annual),
@@ -275,7 +378,13 @@ def load_company(ticker: str, *, asreported: bool = False) -> CompanyDataset:
 
 
 def _attach_quote_and_shares(dataset: CompanyDataset) -> None:
-    """Reads the current quote and all three share-count sources onto the dataset."""
+    """Reads the current quote and all three share-count sources onto the dataset.
+
+    The point-in-time count arrives with ``sharefactor`` already applied. The
+    weighted counts and EPS are per *underlying* share, so they are multiplied
+    by the same factor here — otherwise an ADR's default denominator would be
+    in a different unit from its price.
+    """
     prices = dataset.prices
     if not prices.empty:
         latest = prices.iloc[-1]
@@ -293,22 +402,23 @@ def _attach_quote_and_shares(dataset: CompanyDataset) -> None:
         dataset.shares_point_in_time = float(row["value"])
         dataset.shares_point_in_time_date = pd.Timestamp(row["endDate"]).date()
 
+    factor = dataset.share_factor
     if not dataset.weighted_shares_ttm.empty:
         row = dataset.weighted_shares_ttm.iloc[-1]
         dataset.shares_weighted_diluted = (
-            float(row["diluted"]) if not pd.isna(row.get("diluted")) else None
+            float(row["diluted"]) * factor if not pd.isna(row.get("diluted")) else None
         )
         dataset.shares_weighted_basic = (
-            float(row["basic"]) if not pd.isna(row.get("basic")) else None
+            float(row["basic"]) * factor if not pd.isna(row.get("basic")) else None
         )
         dataset.shares_weighted_label = f"TTM to FY{row['fyear']} {row['period']}"
     elif not dataset.weighted_shares_annual.empty:
         row = dataset.weighted_shares_annual.iloc[-1]
         dataset.shares_weighted_diluted = (
-            float(row["diluted"]) if not pd.isna(row.get("diluted")) else None
+            float(row["diluted"]) * factor if not pd.isna(row.get("diluted")) else None
         )
         dataset.shares_weighted_basic = (
-            float(row["basic"]) if not pd.isna(row.get("basic")) else None
+            float(row["basic"]) * factor if not pd.isna(row.get("basic")) else None
         )
         dataset.shares_weighted_label = f"FY{row['fyear']}"
 
@@ -319,7 +429,7 @@ def _attach_quote_and_shares(dataset: CompanyDataset) -> None:
     net_income = _series_value(source, "net_income")
     eps_diluted = _series_value(source, "eps_diluted")
     if net_income is not None and eps_diluted:
-        dataset.shares_eps_implied = net_income / eps_diluted
+        dataset.shares_eps_implied = net_income / eps_diluted * factor
 
 
 def base_period(dataset: CompanyDataset) -> BasePeriod:
@@ -348,7 +458,8 @@ def base_period(dataset: CompanyDataset) -> BasePeriod:
             is_ttm=True,
             detail="Trailing twelve months, as published by Sharadar under its "
                    "trailing-twelve-month dimension.",
-        )
+            flows_as_of=_last_date(dataset.ttm_history_meta),
+        ).converted(dataset)
 
     latest = dataset.annual.iloc[-1] if not dataset.annual.empty else pd.Series(dtype="float64")
     label = str(dataset.annual.index[-1]) if not dataset.annual.empty else "n/a"
@@ -360,7 +471,30 @@ def base_period(dataset: CompanyDataset) -> BasePeriod:
         is_ttm=False,
         detail="Sharadar returned no trailing-twelve-month period, so the last "
                "reported fiscal year is the base.",
-    )
+        flows_as_of=_last_date(dataset.annual_meta),
+    ).converted(dataset)
+
+
+#: Concepts that are not money and so are never converted.
+NON_MONETARY_CONCEPTS = frozenset({"fx_to_usd"})
+
+
+def _to_valuation_currency(series: pd.Series, rate: float) -> pd.Series:
+    """Every monetary line of ``series`` at spot; rates left untouched."""
+    if rate == 1.0 or series is None or series.empty:
+        return series
+    monetary = [key for key in series.index if str(key) not in NON_MONETARY_CONCEPTS]
+    converted = series.copy()
+    converted[monetary] = pd.to_numeric(series[monetary], errors="coerce") * rate
+    return converted
+
+
+def _last_date(meta: pd.DataFrame) -> date | None:
+    """The report period of the newest row, or ``None``."""
+    if meta is None or meta.empty or "report_date" not in meta.columns:
+        return None
+    raw = meta["report_date"].iloc[-1]
+    return None if pd.isna(raw) else pd.Timestamp(raw).date()
 
 
 # ---------------------------------------------------------------------------
@@ -382,7 +516,7 @@ def base_period_delta_nwc(dataset: CompanyDataset, base: BasePeriod) -> tuple[fl
     if base.is_ttm and len(dataset.quarterly) >= 5:
         nwc = fin.net_working_capital(dataset.quarterly).dropna()
         if len(nwc) >= 5:
-            change = float(nwc.iloc[-1] - nwc.iloc[-5])
+            change = float(nwc.iloc[-1] - nwc.iloc[-5]) * base.fx_rate
             return change, (
                 f"Trailing twelve months: net working capital at {nwc.index[-1]} "
                 f"less {nwc.index[-5]}"
@@ -397,7 +531,7 @@ def base_period_delta_nwc(dataset: CompanyDataset, base: BasePeriod) -> tuple[fl
     )
     if base.is_ttm:
         span += " — annual basis, because fewer than five quarters are available"
-    return float(annual.iloc[-1]), span
+    return float(annual.iloc[-1]) * base.fx_rate, span
 
 
 @dataclass
@@ -557,28 +691,96 @@ def regress_company_beta(
 # ---------------------------------------------------------------------------
 
 
+def _model_ebitda_history(dataset: CompanyDataset) -> pd.Series:
+    """Operating income plus D&A per period, indexed by period end date.
+
+    Trailing-twelve-month periods where Sharadar has them, fiscal years where it
+    does not — the same EBITDA the exit multiple is applied to.
+    """
+    for values, meta in (
+        (dataset.ttm_history, dataset.ttm_history_meta),
+        (dataset.annual, dataset.annual_meta),
+    ):
+        if values.empty or meta.empty or not {"ebit", "dna"}.issubset(values.columns):
+            continue
+        ebitda = values["ebit"] + values["dna"]
+        if dataset.is_converted:
+            # DAILY enterprise value is in US dollars, so each period's EBITDA is
+            # converted at the rate Sharadar published for that period — units
+            # of the reporting currency per dollar, hence the division. A period
+            # with no published rate drops out rather than borrowing another's.
+            rate = values.get("fx_to_usd", pd.Series(np.nan, index=values.index))
+            ebitda = ebitda / rate.where(rate > 0)
+        ebitda = ebitda.to_numpy()
+        dates = pd.to_datetime(meta["report_date"].reindex(values.index), errors="coerce")
+        series = pd.Series(ebitda, index=dates.to_numpy()).dropna()
+        series = series[series.index.notna()]
+        if not series.empty:
+            return series.sort_index()
+    return pd.Series(dtype="float64")
+
+
 def historical_ev_ebitda(dataset: CompanyDataset) -> Sourced:
-    """The company's own historical EV/EBITDA range, from Sharadar's daily series."""
+    """The company's own historical EV/EBITDA range, on the model's EBITDA.
+
+    Sharadar's own ``EV/EBITDA`` builds on *its* EBITDA — net income plus tax,
+    interest and D&A, so non-operating items included — while the exit multiple
+    is applied to operating income plus D&A. Where Sharadar's daily enterprise
+    value is available, each day's EV is therefore divided by the model's
+    EBITDA for the latest period reported by then, so the multiple is measured
+    on the number it is later applied to — for a foreign reporter, in dollars at
+    each period's own published rate, since DAILY EV is in dollars. Sharadar's
+    ratio is the fallback, and
+    says so.
+    """
+    source = "Sharadar DAILY (enterprise value) ÷ operating income + D&A"
+    if not dataset.prices.empty and "Enterprise Value" in dataset.prices.columns:
+        ebitda = _model_ebitda_history(dataset)
+        daily = dataset.prices[["Date", "Enterprise Value"]].copy()
+        daily["Date"] = pd.to_datetime(daily["Date"], errors="coerce")
+        daily["Enterprise Value"] = pd.to_numeric(daily["Enterprise Value"], errors="coerce")
+        daily = daily.dropna().sort_values("Date")
+        if not ebitda.empty and not daily.empty:
+            frame = pd.merge_asof(
+                daily,
+                ebitda.rename("ebitda").rename_axis("period_end").reset_index(),
+                left_on="Date",
+                right_on="period_end",
+            ).dropna(subset=["ebitda"])
+            frame = frame[frame["ebitda"] > 0]
+            multiple = frame["Enterprise Value"] / frame["ebitda"]
+            multiple = multiple[(multiple > 0) & (multiple < 200)]
+            if not multiple.empty:
+                return Sourced.derived(
+                    value=float(multiple.median()),
+                    source=source,
+                    formula=(
+                        f"Median of {len(multiple):,} daily EV ÷ (operating income + D&A) "
+                        f"observations (range {multiple.min():.1f}× – {multiple.max():.1f}×)"
+                    ),
+                )
+
     column = "EV/EBITDA - ttm"
-    source = "Sharadar DAILY (EV/EBITDA)"
+    fallback = "Sharadar DAILY (EV/EBITDA)"
     if dataset.prices.empty or column not in dataset.prices.columns:
         return Sourced.unavailable(
-            source=source,
+            source=fallback,
             reason="Sharadar returned no EV/EBITDA series for this company.",
         )
     series = pd.to_numeric(dataset.prices[column], errors="coerce").dropna()
     series = series[(series > 0) & (series < 200)]
     if series.empty:
         return Sourced.unavailable(
-            source=source,
+            source=fallback,
             reason="Every EV/EBITDA observation was missing or implausible.",
         )
     return Sourced.derived(
         value=float(series.median()),
-        source=source,
+        source=fallback,
         formula=(
             f"Median of {len(series):,} daily observations "
-            f"(range {series.min():.1f}× – {series.max():.1f}×)"
+            f"(range {series.min():.1f}× – {series.max():.1f}×). Sharadar's EBITDA "
+            "includes non-operating items the model's does not."
         ),
     )
 
@@ -618,7 +820,7 @@ def run_model(
     wacc_result: wacc_lib.WaccResult,
     terminal_growth: float,
     exit_multiple: float,
-    stub: float,
+    elapsed: float,
     mid_year: bool,
     shares: float,
     share_basis: str,
@@ -627,10 +829,18 @@ def run_model(
     non_operating_assets: float | None,
     base_fcff: BaseFcff,
     headline_method: str = DEFAULT_HEADLINE_METHOD,
-    sbc: float | None = None,
-    deduct_sbc: bool = False,
+    ronic: float | None = None,
+    terminal_tax_rate: float | None = None,
+    ebita_proxy: bool = True,
 ) -> ModelResult:
-    """Projects, terminates both ways, and bridges each to a value per share."""
+    """Projects, terminates both ways, and bridges each to a value per share.
+
+    ``elapsed`` is the time from the base period's end to the valuation date
+    (:func:`~app.logic.dcf.valuation.elapsed_years`). ``ronic`` of ``None``
+    sets the terminal year's return on new capital to the WACC,
+    ``terminal_tax_rate`` of ``None`` carries the final forecast year's rate, and
+    ``ebita_proxy`` adds back amortisation in the terminal year.
+    """
     base_revenue = _series_value(base.flows, "revenue")
     if base_revenue is None:
         raise dcf.ProjectionError(
@@ -641,13 +851,16 @@ def run_model(
         base_revenue,
         drivers,
         wacc=wacc_result.wacc,
-        stub=stub,
+        elapsed=elapsed,
         mid_year=mid_year,
-        sbc=sbc,
-        deduct_sbc=deduct_sbc,
     )
     terminal_values = dcf.build_terminal_values(
-        projection, terminal_growth=terminal_growth, exit_multiple=exit_multiple
+        projection,
+        terminal_growth=terminal_growth,
+        exit_multiple=exit_multiple,
+        ronic=ronic,
+        terminal_tax_rate=terminal_tax_rate,
+        ebita_proxy=ebita_proxy,
     )
 
     stocks = base.stocks
@@ -701,14 +914,19 @@ def solve_implied_growth(
     drivers: dcf.DriverPath,
     bounds: tuple[float, float] = reverse.GROWTH_BOUNDS,
     grid: tuple[float, ...] = reverse.GROWTH_GRID,
+    growth_fade_to: float | None = None,
+    growth_hold: int = 1,
     **run_model_kwargs,
 ) -> reverse.ReverseDcfResult:
-    """What flat revenue growth rate reproduces ``target_price`` per share.
+    """What year-1 revenue growth rate reproduces ``target_price`` per share.
 
     The forward model asks what the shares are worth given a forecast. This asks
     what forecast the market price already contains, by holding every other
     assumption at the value the forward run used and solving the one remaining
-    unknown.
+    unknown. With ``growth_fade_to`` set, the solved rate is held for
+    ``growth_hold`` years and then fades toward it exactly as the forward
+    forecast's does, so the two describe the same shape of path; without it
+    the rate is flat.
 
     ``run_model_kwargs`` is a deliberate pass-through: the reverse model has to
     invert *the model on screen*, and forwarding the arguments untouched is what
@@ -731,7 +949,12 @@ def solve_implied_growth(
         # `replace`, never `DriverPath.flat`: only revenue growth may move. The
         # other five drivers have to arrive byte-identical to the forward run,
         # or this inverts a different model than the one being displayed.
-        path = replace(drivers, revenue_growth=(growth,) * drivers.years)
+        path = replace(
+            drivers,
+            revenue_growth=dcf.growth_path(
+                growth, drivers.years, growth_fade_to, hold=growth_hold
+            ),
+        )
         return run_model(
             dataset, base, drivers=path, **run_model_kwargs
         ).headline_bridge.value_per_share
@@ -753,7 +976,13 @@ def solve_implied_growth(
 #: :func:`~app.logic.dcf.validation.check_cash_flow_ties` already treats an
 #: absent FX line as expected rather than suspect — flagging it here as well
 #: would have the two checks contradict each other on the same figure.
-ZERO_FILL_UNINFORMATIVE = frozenset({"fx_effect"})
+#:
+#: The three plausibility inputs are here for the same reason: none reaches the
+#: valuation, and the checks that read them treat a zero as nil — which is what
+#: it means for the great majority of companies.
+ZERO_FILL_UNINFORMATIVE = frozenset(
+    {"fx_effect", "net_income_nci", "preferred_dividends", "acquisitions"}
+)
 
 
 def _zero_filled_base_items(
@@ -803,6 +1032,13 @@ def build_validation_context(
     risk_free_rate: float | None = None,
     sbc: float | None = None,
     periods_in_use: frozenset[str] | None = None,
+    drivers: dcf.DriverPath | None = None,
+    beta_in_use: float | None = None,
+    acquisitions_in_capex: bool = False,
+    growth_basis: str | None = None,
+    implied_growth: dict[str, float | None] | None = None,
+    assumed_margins: dict[str, float] | None = None,
+    spread_table_as_of: date | None = None,
 ) -> val.ValidationContext:
     """Packs everything the checks need into one context.
 
@@ -823,8 +1059,11 @@ def build_validation_context(
         quarterly=dataset.quarterly_all,
         api_ttm=dataset.ttm,
         manual_ttm=dataset.manual_ttm,
-        currencies_seen=(dataset.currency,) if dataset.currency else (),
-        asreported_flags=(dataset.asreported,),
+        statement_currency=base.currency or dataset.currency or None,
+        price_currency=sharadar_client.PRICE_CURRENCY,
+        reporting_currency=dataset.currency or None,
+        foreign_filer=dataset.foreign_filer,
+        asreported_flags=dataset.statement_bases,
         price_date=dataset.price_date,
         last_price=dataset.last_price,
         reported_market_cap=dataset.reported_market_cap,
@@ -850,18 +1089,231 @@ def build_validation_context(
     if base_fcff is not None:
         context.fcff_method_a = base_fcff.method_a
         context.fcff_method_b = base_fcff.method_b
+    context.base_sbc = _series_value(base.flows, "sbc")
 
     if beta is not None and beta.result is not None:
         context.beta_r_squared = beta.result.r_squared
         context.beta_observations = beta.result.observations
+    context.beta = beta_in_use
+
+    # Plausibility of what the data layer derived rather than reported.
+    if "net_income_nci" in annual.columns:
+        context.net_income_nci = tuple(
+            float(v) for v in annual["net_income_nci"].tail(3) if not pd.isna(v)
+        )
+    context.preferred_dividends = _series_value(base.flows, "preferred_dividends")
+    if not annual.empty and "revenue" in annual.columns:
+        paired = pd.concat(
+            [
+                fin.acquisition_spend(annual).tail(5),
+                fin.capex(annual).values.tail(5),
+                annual["revenue"].tail(5),
+            ],
+            axis=1,
+        ).dropna()
+        if not paired.empty and float(paired.iloc[:, 1].sum()) > 0:
+            context.acquisitions_to_capex = float(
+                paired.iloc[:, 0].sum() / paired.iloc[:, 1].sum()
+            )
+        if not paired.empty and float(paired.iloc[:, 2].sum()) > 0:
+            context.acquisitions_to_revenue = float(
+                paired.iloc[:, 0].sum() / paired.iloc[:, 2].sum()
+            )
+        context.acquisitions_by_year = tuple(
+            (f"FY{label}", float(spend)) for label, spend in paired.iloc[:, 0].items()
+        )
+    window = fin.ttm_window_acquisitions(dataset.ttm_history, dataset.ttm_history_meta)
+    if window is not None:
+        context.ttm_window_acquisitions, context.ttm_window_periods = window
+    context.base_net_income = _series_value(base.flows, "net_income")
+    context.spread_table_as_of = spread_table_as_of
+    context.acquisitions_in_capex = acquisitions_in_capex
+
+    margins = (
+        fin.driver_ratios(annual)["operating_margin"].dropna().tolist()
+        if not annual.empty else []
+    )
+    trailing = fin.base_period_driver(
+        "operating_margin", base.flows, base.stocks, is_ttm=base.is_ttm, label=base.label
+    )
+    if trailing.ok:
+        margins.append(trailing.value)
+    if margins:
+        context.historical_margin_range = (float(min(margins)), float(max(margins)))
+    context.assumed_margins = dict(assumed_margins or {})
+    ratios = fin.driver_ratios(annual) if not annual.empty else pd.DataFrame()
+    five_year = fin.driver_default(ratios, "revenue_growth", "5-year CAGR")
+    context.realised_cagr = five_year.value if five_year.ok else None
+    context.growth_basis = growth_basis
+    context.implied_growth = dict(implied_growth or {})
+
+    if not annual.empty and "dna" in annual.columns:
+        paired = pd.concat(
+            [fin.capex(annual).values.tail(5), annual["dna"].tail(5)], axis=1
+        ).dropna()
+        if not paired.empty and float(paired.iloc[:, 1].sum()) > 0:
+            context.historical_capex_to_dna = float(
+                paired.iloc[:, 0].sum() / paired.iloc[:, 1].sum()
+            )
+
+    if dataset.is_converted:
+        context.fx_spot = dataset.fx_rate_value
+        context.fx_spot_as_of = dataset.fx_rate.as_of
+        rates = _published_rates(dataset)
+        context.fx_reported = rates[-1][1] if rates else None
+        context.fx_history = rates
+
+    if drivers is not None:
+        context.forecast_tax_rates = drivers.effective_tax_rate
+        context.forecast_growth = drivers.revenue_growth
 
     if result is not None:
         context.debt_weight = result.wacc.debt_weight
+        context.equity_weight = result.wacc.equity_weight
         context.wacc = result.wacc.wacc
-        context.forecast_years = len(result.projection.rows)
+        context.cost_of_debt = result.wacc.cost_of_debt
+        context.cost_of_equity = result.wacc.cost_of_equity
         context.long_term_debt = _series_value(base.stocks, "long_term_debt")
-        terminal = result.headline_terminal
-        enterprise_value = result.enterprise_values[result.headline_method]
-        context.terminal_value_share = terminal.share_of(enterprise_value)
+        context.pv_explicit = result.projection.pv_explicit
+
+        gordon = result.terminal_values["gordon"]
+        exit_multiple = result.terminal_values["exit_multiple"]
+        context.ronic = gordon.implied_ronic
+        context.exit_implied_growth = exit_multiple.implied_growth
+        context.exit_implied_ronic = exit_multiple.implied_ronic
+        context.gordon_terminal_value = gordon.value
+        context.gordon_value_per_share = result.bridges["gordon"].value_per_share
+        context.exit_value_per_share = result.bridges["exit_multiple"].value_per_share
+        context.enterprise_values = dict(result.enterprise_values)
+        context.headline_equity_value = result.headline_bridge.equity_value
+        if dataset.last_price:
+            context.upside = result.headline_bridge.upside_vs(dataset.last_price)
+
+        final = result.projection.final_row
+        context.final_capex = final.capex
+        context.final_dna = final.dna
+        context.final_growth = final.revenue_growth
+        context.year_one_fcff = result.projection.rows[0].fcff
 
     return context
+
+
+def _published_rates(dataset: CompanyDataset, years: int = 5) -> tuple[tuple[date, float], ...]:
+    """Sharadar's ``fxusd`` over up to the last ``years`` fiscal years, oldest first.
+
+    Annual periods, so the depreciation check measures a trend rather than a
+    quarter's noise. Units of the reporting currency per US dollar.
+    """
+    annual, meta = dataset.annual, dataset.annual_meta
+    if annual.empty or meta.empty or "fx_to_usd" not in annual.columns:
+        return ()
+    dates = pd.to_datetime(meta["report_date"].reindex(annual.index), errors="coerce")
+    frame = pd.DataFrame({"date": dates.to_numpy(), "rate": annual["fx_to_usd"].to_numpy()})
+    frame = frame.dropna()
+    frame = frame[frame["rate"] > 0].sort_values("date")
+    if frame.empty:
+        return ()
+    cutoff = frame["date"].iloc[-1] - pd.DateOffset(years=years)
+    frame = frame[frame["date"] >= cutoff]
+    return tuple(
+        (pd.Timestamp(when).date(), float(rate))
+        for when, rate in zip(frame["date"], frame["rate"])
+    )
+
+
+# ---------------------------------------------------------------------------
+# Sensitivity
+# ---------------------------------------------------------------------------
+
+
+#: Exit multiples in the sensitivity grid, as offsets from the chosen multiple.
+EXIT_MULTIPLE_STEPS = (-0.20, -0.10, 0.0, 0.10, 0.20)
+
+
+@dataclass(frozen=True)
+class SensitivityGrid:
+    """Headline value per share across WACC and the headline's own terminal input.
+
+    ``values[i][j]`` pairs ``waccs[i]`` with ``columns[j]``: terminal growth
+    under a Gordon headline, the exit multiple under an exit headline — the
+    input that actually moves the headline. ``None`` where the model cannot be
+    built, which includes a WACC at or below terminal growth (Gordon is always
+    computed, even beside an exit headline).
+    """
+
+    method: str
+    waccs: tuple[float, ...]
+    column_label: str
+    columns: tuple[float, ...]
+    values: tuple[tuple[float | None, ...], ...]
+
+    def column_heading(self, value: float) -> str:
+        if self.method == "exit_multiple":
+            return f"{value:,.2f}×"
+        return f"g {value:.2%}"
+
+
+def sensitivity_grid(
+    dataset: CompanyDataset,
+    base: BasePeriod,
+    *,
+    wacc_result: wacc_lib.WaccResult,
+    terminal_growth: float,
+    exit_multiple: float,
+    headline_method: str = DEFAULT_HEADLINE_METHOD,
+    wacc_step: float = 0.005,
+    growth_step: float = 0.005,
+    steps: int = 2,
+    **run_model_kwargs,
+) -> SensitivityGrid:
+    """Reruns the model on screen across WACC × the headline's terminal input.
+
+    The range matters more than the point estimate for a decision, and each
+    cell is only the arithmetic — no fetch — so the grid is cheap. Under an
+    exit-multiple headline terminal growth barely moves the value, so the
+    columns there are the multiple at ±10% and ±20%; under Gordon they are
+    terminal growth. The WACC is overridden whole rather than rebuilt from its
+    inputs: the grid asks what a different discount rate does, not which input
+    moved it.
+    """
+    offsets = range(-steps, steps + 1)
+    waccs = tuple(wacc_result.wacc + k * wacc_step for k in offsets)
+    exit_headline = headline_method == "exit_multiple"
+    if exit_headline:
+        columns = tuple(exit_multiple * (1.0 + step) for step in EXIT_MULTIPLE_STEPS)
+        column_label = "Exit multiple"
+    else:
+        columns = tuple(terminal_growth + k * growth_step for k in offsets)
+        column_label = "Terminal growth"
+
+    rows: list[tuple[float | None, ...]] = []
+    for rate in waccs:
+        cells: list[float | None] = []
+        for column in columns:
+            growth = terminal_growth if exit_headline else column
+            multiple = column if exit_headline else exit_multiple
+            if growth >= rate or rate <= 0:
+                cells.append(None)
+                continue
+            try:
+                outcome = run_model(
+                    dataset,
+                    base,
+                    wacc_result=replace(wacc_result, wacc=rate),
+                    terminal_growth=growth,
+                    exit_multiple=multiple,
+                    headline_method=headline_method,
+                    **run_model_kwargs,
+                )
+            except (dcf.ProjectionError, dcf.TerminalValueError):
+                cells.append(None)
+                continue
+            cells.append(outcome.headline_bridge.value_per_share)
+        rows.append(tuple(cells))
+    return SensitivityGrid(
+        method=headline_method,
+        waccs=waccs,
+        column_label=column_label,
+        columns=columns,
+        values=tuple(rows),
+    )

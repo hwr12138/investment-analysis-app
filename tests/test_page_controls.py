@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+from datetime import date
 import inspect
 import pkgutil
 
@@ -10,6 +11,7 @@ import pandas as pd
 import pytest
 
 from app.formatting import format_date, format_pct
+from app.logic.dcf import export as dcf_export
 from app.logic.dcf import model as dcf_model
 from app.logic.dcf import reverse
 from app.logic.dcf import valuation as dcf
@@ -25,7 +27,7 @@ def _inputs(**overrides) -> dict:
         effective_tax_rate=0.16,
         capex_pct_revenue=0.03,
         dna_pct_revenue=0.03,
-        dnwc_pct_drevenue=-0.40,
+        nwc_pct_revenue=-0.40,
     )
     wacc = type("W", (), {"wacc": 0.0905})()
     base = dict(
@@ -33,8 +35,18 @@ def _inputs(**overrides) -> dict:
         wacc=wacc,
         terminal_growth=0.025,
         exit_multiple=23.2,
-        stub=0.167,
+        elapsed=0.25,
         mid_year=True,
+        ronic=None,
+        terminal_tax_rate=0.25,
+        growth_fade_to=0.025,
+        growth_hold=3,
+        growth_basis="TTM year-over-year",
+        assumed_margins={},
+        ebita_proxy=True,
+        spread_table_as_of=None,
+        acquisitions_in_capex=False,
+        beta=1.1,
         shares=14_837_004_750.0,
         share_basis="Diluted weighted-average (TTM)",
         include_sti=True,
@@ -42,7 +54,6 @@ def _inputs(**overrides) -> dict:
         non_operating=None,
         headline_method="gordon",
         sbc=None,
-        deduct_sbc=False,
         etr=0.1561,
     )
     base.update(overrides)
@@ -73,8 +84,17 @@ def test_fingerprint_is_hashable_so_it_can_live_in_session_state():
     [
         ("terminal_growth", 0.03),
         ("exit_multiple", 18.0),
-        ("stub", 0.5),
+        ("elapsed", 0.5),
         ("mid_year", False),
+        ("ronic", 0.15),
+        ("terminal_tax_rate", None),
+        ("growth_fade_to", None),
+        ("growth_hold", 1),
+        ("assumed_margins", {"Target margin": 0.35}),
+        ("ebita_proxy", False),
+        ("spread_table_as_of", date(2026, 1, 1)),
+        ("acquisitions_in_capex", True),
+        ("beta", 1.3),
         ("shares", 15_000_000_000.0),
         ("share_basis", "Point-in-time outstanding"),
         ("include_sti", False),
@@ -82,7 +102,6 @@ def test_fingerprint_is_hashable_so_it_can_live_in_session_state():
         ("non_operating", 5e9),
         ("headline_method", "exit_multiple"),
         ("sbc", 1.2e10),
-        ("deduct_sbc", True),
         ("etr", 0.21),
     ],
 )
@@ -100,7 +119,7 @@ def test_a_driver_change_moves_the_fingerprint():
         effective_tax_rate=0.16,
         capex_pct_revenue=0.03,
         dna_pct_revenue=0.03,
-        dnwc_pct_drevenue=-0.40,
+        nwc_pct_revenue=-0.40,
     )
     assert page._assumption_fingerprint(_inputs(drivers=changed)) != page._assumption_fingerprint(
         _inputs()
@@ -246,6 +265,37 @@ def test_an_implied_revenue_path_compounds_from_the_base():
     assert path == pytest.approx([1100.0, 1210.0, 1331.0])
 
 
+def test_an_implied_revenue_path_follows_the_forecast_fade():
+    path = implied._implied_revenue_path(1000.0, 0.20, 3, fade_to=0.02)
+    assert path == pytest.approx([1200.0, 1200.0 * 1.14, 1200.0 * 1.14 * 1.08])
+
+
+def test_an_implied_revenue_path_holds_before_it_fades():
+    path = implied._implied_revenue_path(1000.0, 0.20, 3, fade_to=0.02, hold=2)
+    assert path == pytest.approx([1200.0, 1440.0, 1440.0 * 1.11])
+
+
+def test_the_reverse_dcf_reads_gordon_first_as_the_fundamentals():
+    """§2.1: both methods are solved, Gordon leading."""
+    assert implied.METHOD_ORDER == ("gordon", "exit_multiple")
+    assert "fundamentals" in implied.METHOD_LABELS["gordon"]
+
+
+# ---------------------------------------------------------------------------
+# One set of model arguments for all three calls
+# ---------------------------------------------------------------------------
+
+
+def test_every_run_model_argument_comes_from_one_place():
+    """The forward run, the reverse solve and the what-if price share
+    `common.model_kwargs`, so the reverse DCF cannot invert a different model.
+    Every keyword `run_model` takes beyond the dataset, base and drivers has to
+    be in it."""
+    parameters = set(inspect.signature(dcf_model.run_model).parameters)
+    supplied = set(common.model_kwargs(_inputs(base_fcff=None, shares=1.0)))
+    assert supplied == parameters - {"dataset", "base", "drivers"}
+
+
 # ---------------------------------------------------------------------------
 # Filing provenance
 #
@@ -299,12 +349,14 @@ def test_gordon_row_is_restated_as_an_exit_multiple():
     assert results._cross_implied(terminal) == "an exit multiple of 13.60×"
 
 
-def test_exit_multiple_row_is_restated_as_perpetual_growth():
+def test_exit_multiple_row_is_restated_as_growth_and_a_return_on_capital():
     terminal = dcf.TerminalValue(
         method="Exit multiple", value=1000.0, present_value=800.0,
-        discount_exponent=3.5, formula="", implied_growth=0.0511,
+        discount_exponent=3.5, formula="", implied_growth=0.0511, implied_ronic=0.184,
     )
-    assert results._cross_implied(terminal) == "perpetual growth of 5.11%"
+    assert results._cross_implied(terminal) == (
+        "perpetual growth of at least 5.11%; RONIC of 18.4% at the terminal rate"
+    )
 
 
 def test_cross_check_is_blank_when_neither_is_computable():
@@ -316,10 +368,10 @@ def test_cross_check_is_blank_when_neither_is_computable():
 
 
 def test_the_two_methods_really_do_cross_imply_each_other():
-    """The Gordon row's multiple and the exit row's growth are not swapped."""
+    """The Gordon row's multiple and the exit row's figures are not swapped."""
     drivers = dcf.DriverPath.flat(
         3, revenue_growth=0.10, operating_margin=0.20, effective_tax_rate=0.25,
-        capex_pct_revenue=0.05, dna_pct_revenue=0.04, dnwc_pct_drevenue=0.10,
+        capex_pct_revenue=0.05, dna_pct_revenue=0.04, nwc_pct_revenue=0.10,
     )
     projection = dcf.project(1000.0, drivers, wacc=0.08, mid_year=False)
     terminals = dcf.build_terminal_values(
@@ -327,16 +379,19 @@ def test_the_two_methods_really_do_cross_imply_each_other():
     )
 
     gordon, exit_multiple = terminals["gordon"], terminals["exit_multiple"]
+    steady = gordon.terminal_year
     # Gordon states a multiple; feeding it back reproduces Gordon's own value.
     assert gordon.implied_growth is None
     assert dcf.exit_multiple_terminal_value(
-        projection.terminal_ebitda, gordon.implied_exit_multiple
+        projection.final_ebitda, gordon.implied_exit_multiple
     ) == pytest.approx(gordon.value)
-    # The exit multiple states a growth rate; feeding it back reproduces its value.
+    # The exit multiple states a return on new capital; feeding it back through
+    # the value-driver formula reproduces the exit value.
     assert exit_multiple.implied_exit_multiple is None
-    assert dcf.gordon_growth_terminal_value(
-        projection.terminal_row.fcff_full_year, exit_multiple.implied_growth, projection.wacc
-    ) == pytest.approx(exit_multiple.value)
+    reinvested = steady.nopat * (1 - 0.02 / exit_multiple.implied_ronic)
+    assert dcf.gordon_growth_terminal_value(reinvested, 0.02, 0.08) == pytest.approx(
+        exit_multiple.value
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -344,7 +399,10 @@ def test_the_two_methods_really_do_cross_imply_each_other():
 # ---------------------------------------------------------------------------
 
 
-def test_exit_multiple_is_the_default_headline_method():
+def test_the_exit_multiple_is_the_default_headline_method():
+    """DCF_ROUND2_INSTRUCTIONS.md §2.1: the owner's choice for a tech book, where
+    Gordon at RONIC = WACC excludes value created beyond the forecast. Gordon is
+    still computed and shown beside it as the cross-check."""
     assert dcf_model.DEFAULT_HEADLINE_METHOD == "exit_multiple"
 
 
@@ -361,3 +419,68 @@ def test_the_ui_and_the_engine_agree_on_the_default():
 
 def test_both_methods_remain_selectable():
     assert set(assumptions._HEADLINE_METHODS.values()) == {"exit_multiple", "gordon"}
+
+
+# ---------------------------------------------------------------------------
+# Driver basis selector (DCF_ROUND2_INSTRUCTIONS.md §2.2)
+# ---------------------------------------------------------------------------
+
+
+def test_changing_a_drivers_basis_reseeds_its_value_and_its_provenance():
+    state: dict = {}
+    seed = lambda basis, default: assumptions._seed_driver_value(  # noqa: E731
+        state, "dcf_input_growth_value", "dcf_input_growth_seeded_from", basis, default
+    )
+
+    seed("5-year CAGR", 8.0)
+    assert state["dcf_input_growth_value"] == 8.0
+
+    # Typed by hand: kept while the basis stays put, and read as an override.
+    state["dcf_input_growth_value"] = 12.0
+    seed("5-year CAGR", 8.0)
+    assert state["dcf_input_growth_value"] == 12.0
+    assert not assumptions._untouched(12.0, 8.0, 4)
+
+    # A new basis brings its own default, which is then read as untouched —
+    # derived provenance, not a user override.
+    seed("5-year average", 9.5)
+    assert state["dcf_input_growth_value"] == 9.5
+    assert assumptions._untouched(state["dcf_input_growth_value"], 9.5, 4)
+
+
+
+def test_the_projection_view_formats_only_columns_the_export_produces():
+    """The live check caught a column the export had dropped (SBC added back)
+    still being formatted by the view. Pin the two together."""
+    import re
+
+    source = inspect.getsource(results.render_projection)
+    body = source.split("frame = dcf_export")[1].split("st.dataframe(display")[0]
+    formatted = set(re.findall(r'"([^"]+)"', body))
+    drivers = dcf.DriverPath.flat(
+        2, revenue_growth=0.1, operating_margin=0.2, effective_tax_rate=0.2,
+        capex_pct_revenue=0.05, dna_pct_revenue=0.04, nwc_pct_revenue=0.1,
+    )
+    projection = dcf.project(100.0, drivers, wacc=0.09)
+    result = type("R", (), {"projection": projection})()
+    columns = set(dcf_export.projection_frame(result).columns)
+    assert {c for c in formatted if c[:1].isupper()} <= columns
+
+
+def test_the_effective_growth_basis_names_the_rate_actually_used():
+    """The TTM-window acquisitions check reads it: it applies only when the
+    trailing rate is the one in use."""
+    from app.logic.dcf import financials as fin
+
+    ttm = fin.DriverDefault("revenue_growth", 0.83, fin.TTM_GROWTH_BASIS, 1, ("P",))
+    cagr = fin.DriverDefault("revenue_growth", 0.67, "5-year CAGR", 5, ("P",))
+    slow = fin.DriverDefault("revenue_growth", 0.04, fin.TTM_GROWTH_BASIS, 1, ("P",))
+    burst = fin.lower_of_growth(ttm, cagr)
+    slowdown = fin.lower_of_growth(slow, cagr)
+    assert assumptions._effective_growth_basis(fin.LOWER_GROWTH_BASIS, burst, ttm) == "5-year CAGR"
+    assert assumptions._effective_growth_basis(
+        fin.LOWER_GROWTH_BASIS, slowdown, slow
+    ) == fin.TTM_GROWTH_BASIS
+    assert assumptions._effective_growth_basis(
+        fin.TTM_GROWTH_BASIS, burst, ttm
+    ) == fin.TTM_GROWTH_BASIS

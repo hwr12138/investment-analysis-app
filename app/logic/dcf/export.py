@@ -61,9 +61,9 @@ def projection_frame(result: ModelResult) -> pd.DataFrame:
         rows.append(
             {
                 "Period": row.label,
-                "Period fraction": row.period_fraction,
+                "Years after base period": row.cumulative_time,
                 "Revenue growth": row.revenue_growth,
-                "Revenue (full year)": row.revenue,
+                "Revenue": row.revenue,
                 "Operating margin": row.operating_margin,
                 "EBIT": row.ebit,
                 "Tax rate": row.tax_rate,
@@ -71,9 +71,7 @@ def projection_frame(result: ModelResult) -> pd.DataFrame:
                 "D&A": row.dna,
                 "CapEx": row.capex,
                 "ΔNWC": row.delta_nwc,
-                "SBC deducted": row.sbc_deduction,
-                "FCFF (full year)": row.fcff_full_year,
-                "FCFF (this period)": row.fcff_period,
+                "FCFF": row.fcff,
                 "Discount exponent": row.discount_exponent,
                 "Discount factor": row.discount_factor,
                 "PV of FCFF": row.present_value,
@@ -81,9 +79,10 @@ def projection_frame(result: ModelResult) -> pd.DataFrame:
         )
     frame = pd.DataFrame(rows)
     frame.attrs["formula"] = (
-        "FCFF = EBIT × (1 − tax) + D&A − CapEx − ΔNWC − SBC deducted; "
-        "PV = FCFF (this period) × discount factor; "
-        "discount factor = 1 ÷ (1 + WACC)^exponent"
+        "FCFF = EBIT × (1 − tax) + D&A − CapEx − ΔNWC, with SBC expensed inside EBIT; "
+        "PV = FCFF × discount factor; discount factor = 1 ÷ (1 + WACC)^exponent; "
+        f"exponent = years after base period − {0.5 if result.projection.mid_year else 0.0} "
+        f"− {result.projection.elapsed:.4f} elapsed since the base period ended"
     )
     return frame
 
@@ -141,12 +140,34 @@ def terminal_value_frame(result: ModelResult) -> pd.DataFrame:
                 "Enterprise value": enterprise_value,
                 "Terminal share of EV": terminal.share_of(enterprise_value),
                 "Implied exit multiple": terminal.implied_exit_multiple,
-                "Implied perpetuity growth": terminal.implied_growth,
+                "Growth required (no reinvestment)": terminal.implied_growth,
+                "RONIC (input or implied)": terminal.implied_ronic,
                 "Formula": terminal.formula,
                 "Headline": "yes" if method == result.headline_method else "no",
             }
         )
     return pd.DataFrame(rows)
+
+
+def terminal_year_frame(result: ModelResult) -> pd.DataFrame:
+    """Year N + 1, the normalised steady state the Gordon value capitalises."""
+    steady = result.terminal_values["gordon"].terminal_year
+    if steady is None:
+        return pd.DataFrame(columns=["Item", "Value"])
+    rows = [
+        ("Revenue (N + 1)", steady.revenue),
+        ("Terminal growth", steady.growth),
+        ("Operating margin", steady.operating_margin),
+        ("EBIT", steady.ebit),
+        ("Amortisation add-back (EBITA proxy)", steady.amortisation),
+        ("Tax rate", steady.tax_rate),
+        ("NOPAT", steady.nopat),
+        ("Return on new invested capital", steady.ronic),
+        ("Reinvestment rate (g ÷ RONIC)", steady.reinvestment_rate),
+        ("Reinvestment", steady.reinvestment),
+        ("FCFF (N + 1)", steady.fcff),
+    ]
+    return pd.DataFrame(rows, columns=["Item", "Value"])
 
 
 def summary_frame(
@@ -172,6 +193,8 @@ def summary_frame(
         ("Exported at", datetime.now().isoformat(timespec="seconds")),
         ("Statement basis", "as-reported" if dataset.asreported else "restated (default)"),
         ("Base period", result.base.label),
+        ("Base period ends", str(result.base.flows_as_of or "n/a")),
+        ("Years from base period end to valuation date", result.projection.elapsed),
         ("Balance sheet as of", str(result.base.stocks_as_of or "n/a")),
         ("Last price", dataset.last_price),
         ("Last price date", str(dataset.price_date or "n/a")),
@@ -218,6 +241,7 @@ def build_workbook(
         "Assumptions": pd.DataFrame([a.as_row() for a in assumptions]),
         "Projection": projection_frame(result),
         "Terminal Values": terminal_value_frame(result),
+        "Terminal Year": terminal_year_frame(result),
         "Equity Bridge": bridge_frame(result),
         "Historical Financials": historical.reset_index(),
         "Historical Ratios": dataset.ratios.reset_index(),
@@ -271,6 +295,7 @@ def build_csv(
     _section("Assumptions", pd.DataFrame([a.as_row() for a in assumptions]))
     _section("Projection", projection_frame(result))
     _section("Terminal Values", terminal_value_frame(result))
+    _section("Terminal Year", terminal_year_frame(result))
     _section("Equity Bridge", bridge_frame(result))
     _section("Validation Results", val.results_frame(check_results))
     _section("Issues", val.issues_frame(issues, acknowledged))

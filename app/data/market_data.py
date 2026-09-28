@@ -9,6 +9,12 @@ Every fetcher here returns :class:`~app.provenance.Sourced` rather than a bare
 float: a scrape or a third-party rate can fail, and a page must be able to tell
 "4.18% scraped from Damodaran on 1 July 2026" apart from "the scrape broke and
 you are looking at a constant". Nothing here substitutes a default on failure.
+
+**Failures are never cached.** Each cached function *raises* :class:`FetchFailed`
+on failure — ``st.cache_data`` does not store an exception — and a thin
+uncached wrapper turns it into ``Sourced.unavailable``. Returning the failure
+from the cached function instead, as this module once did, cached a transient
+outage for the full day.
 """
 
 import re
@@ -25,6 +31,37 @@ from app.provenance import Sourced
 ERP_PLAUSIBLE_BAND = (0.02, 0.10)
 
 DAMODARAN_URL = "https://pages.stern.nyu.edu/~adamodar/New_Home_Page/home.htm"
+
+
+class FetchFailed(Exception):
+    """A market-data fetch that must not be cached. Carries the reason."""
+
+
+def _yahoo_last_close(symbol: str) -> tuple[float, date | None]:
+    """The latest populated daily close for a Yahoo Finance symbol.
+
+    Raises :class:`FetchFailed` with the reason. Several trading days are
+    requested and the last populated one taken, so a weekend or a market
+    holiday is not mistaken for an outage.
+    """
+    try:
+        history = yf.Ticker(symbol).history(
+            period="5d", interval="1d", auto_adjust=False, timeout=10
+        )
+    except Exception:
+        raise FetchFailed(f"Could not reach Yahoo Finance for {symbol}") from None
+
+    # yfinance absorbs an unknown symbol, a rate limit, and an outage alike into
+    # an empty frame rather than raising, so empty is the failure path here and
+    # not an edge case.
+    if history is None or history.empty or "Close" not in history:
+        raise FetchFailed(f"Yahoo Finance returned no quotes for {symbol}")
+    closes = history["Close"].dropna()
+    if closes.empty:
+        raise FetchFailed(f"Yahoo Finance returned no closing level for {symbol}")
+
+    stamp = closes.index[-1]
+    return float(closes.iloc[-1]), (stamp.date() if hasattr(stamp, "date") else None)
 
 
 # --- Treasury Rates (Yahoo Finance yield indices) ---
@@ -47,44 +84,32 @@ YIELD_PLAUSIBLE_BAND_PCT = (-1.0, 25.0)
 
 
 @st.cache_data(show_spinner=False, ttl=3600 * 24)
+def _cached_yahoo_yield(symbol: str) -> tuple[float, date | None]:
+    """The cache entry: a plausible yield in percent and its date, or a raise."""
+    rate_pct, as_of = _yahoo_last_close(symbol)
+    low, high = YIELD_PLAUSIBLE_BAND_PCT
+    if not low <= rate_pct <= high:
+        raise FetchFailed(
+            f"{symbol} quoted {rate_pct:.2f}, outside the plausible "
+            f"{low:g}% to {high:g}% band, so the quoting convention is assumed "
+            "to have changed"
+        )
+    return rate_pct, as_of
+
+
 def _fetch_yahoo_yield(symbol: str) -> tuple[float | None, date | None, str]:
     """Fetches the latest daily close of a Yahoo Finance Treasury-yield index.
 
     Returns ``(rate_percent, as_of, error)``. ``rate_percent`` is ``None``
     exactly when the fetch failed, and ``error`` then says why. The reason is
     what lets callers that must not fabricate a rate explain themselves;
-    callers that tolerate a default can ignore it.
+    callers that tolerate a default can ignore it. Uncached, so a failure is
+    retried on the next call rather than remembered for a day.
     """
     try:
-        history = yf.Ticker(symbol).history(
-            period="5d", interval="1d", auto_adjust=False, timeout=10
-        )
-    except Exception:
-        return None, None, f"Could not reach Yahoo Finance for {symbol}"
-
-    # yfinance absorbs an unknown symbol, a rate limit, and an outage alike into
-    # an empty frame rather than raising, so empty is the failure path here and
-    # not an edge case.
-    if history is None or history.empty or "Close" not in history:
-        return None, None, f"Yahoo Finance returned no quotes for {symbol}"
-
-    # Several trading days are requested and the last populated one taken, so a
-    # weekend or a market holiday is not mistaken for an outage.
-    closes = history["Close"].dropna()
-    if closes.empty:
-        return None, None, f"Yahoo Finance returned no closing level for {symbol}"
-
-    rate_pct = float(closes.iloc[-1])
-    low, high = YIELD_PLAUSIBLE_BAND_PCT
-    if not low <= rate_pct <= high:
-        return None, None, (
-            f"{symbol} quoted {rate_pct:.2f}, outside the plausible "
-            f"{low:g}% to {high:g}% band, so the quoting convention is assumed "
-            "to have changed"
-        )
-
-    stamp = closes.index[-1]
-    as_of = stamp.date() if hasattr(stamp, "date") else None
+        rate_pct, as_of = _cached_yahoo_yield(symbol)
+    except FetchFailed as failure:
+        return None, None, str(failure)
     return rate_pct, as_of, ""
 
 
@@ -135,30 +160,15 @@ def fetch_10y_treasury_rate() -> Sourced:
 
 
 @st.cache_data(show_spinner=False, ttl=3600 * 24)
-def fetch_erp() -> Sourced:
-    """Scrapes Aswath Damodaran's site for the current Implied Equity Risk Premium.
-
-    The page states it as ``Implied ERP on July 1, 2026 = 4.18%``, so the as-of
-    date comes off the same line as the number and both are reported together.
-
-    Scraping is fragile by nature. If the request fails, the pattern stops
-    matching, or the value lands outside :data:`ERP_PLAUSIBLE_BAND`, this
-    returns an unavailable :class:`Sourced` with the reason. It never
-    substitutes a constant — the caller is expected to fall through to manual
-    entry and say why.
-    """
+def _cached_erp() -> tuple[float, date | None]:
+    """The cache entry: the scraped ERP and its date, or a :class:`FetchFailed`."""
     try:
         response = requests.get(DAMODARAN_URL, timeout=10)
     except Exception:
-        return Sourced.unavailable(
-            source=DAMODARAN_URL, reason="Could not reach the Damodaran page"
-        )
+        raise FetchFailed("Could not reach the Damodaran page") from None
 
     if response.status_code != 200:
-        return Sourced.unavailable(
-            source=DAMODARAN_URL,
-            reason=f"The Damodaran page returned HTTP {response.status_code}",
-        )
+        raise FetchFailed(f"The Damodaran page returned HTTP {response.status_code}")
 
     # Tags are stripped to nothing, not to a space: the page splits the figure
     # across elements as `4.<span></span><span>18%`, so anything inserted
@@ -188,32 +198,102 @@ def fetch_erp() -> Sourced:
             r"Implied\s+ERP.*?=\s*(\d+(?:\.\d+)?)\s*%", text, re.IGNORECASE
         )
         if not undated:
-            return Sourced.unavailable(
-                source=DAMODARAN_URL,
-                reason="The 'Implied ERP' figure was not found — the page layout has changed",
+            raise FetchFailed(
+                "The 'Implied ERP' figure was not found — the page layout has changed"
             )
         raw_value = undated.group(1)
 
     try:
         erp = float(raw_value) / 100.0
     except ValueError:
-        return Sourced.unavailable(
-            source=DAMODARAN_URL,
-            reason=f"Could not read '{raw_value}' as an ERP percentage",
-        )
+        raise FetchFailed(f"Could not read '{raw_value}' as an ERP percentage") from None
 
     low, high = ERP_PLAUSIBLE_BAND
     if not low <= erp <= high:
-        return Sourced.unavailable(
-            source=DAMODARAN_URL,
-            reason=(
-                f"Scraped ERP of {erp:.2%} is outside the plausible "
-                f"{low:.0%}-{high:.0%} band, so the scrape is assumed broken"
-            ),
+        raise FetchFailed(
+            f"Scraped ERP of {erp:.2%} is outside the plausible "
+            f"{low:.0%}-{high:.0%} band, so the scrape is assumed broken"
         )
+    return erp, as_of
 
+
+def fetch_erp() -> Sourced:
+    """Scrapes Aswath Damodaran's site for the current Implied Equity Risk Premium.
+
+    The page states it as ``Implied ERP on July 1, 2026 = 4.18%``, so the as-of
+    date comes off the same line as the number and both are reported together.
+
+    Scraping is fragile by nature. If the request fails, the pattern stops
+    matching, or the value lands outside :data:`ERP_PLAUSIBLE_BAND`, this
+    returns an unavailable :class:`Sourced` with the reason. It never
+    substitutes a constant — the caller is expected to fall through to manual
+    entry and say why.
+    """
+    try:
+        erp, as_of = _cached_erp()
+    except FetchFailed as failure:
+        return Sourced.unavailable(source=DAMODARAN_URL, reason=str(failure))
     return Sourced.reported(
         value=erp,
         source="Damodaran — Implied Equity Risk Premium (S&P 500)",
         as_of=as_of,
     )
+
+
+# --- Exchange rates ---
+
+#: A quote outside this band — USD per unit of a currency — is a broken or
+#: misread quote rather than a rate. Wide on purpose: it spans the Kuwaiti dinar
+#: (~3.3) to the Iranian rial (~0.00002).
+FX_PLAUSIBLE_BAND = (1e-6, 1e3)
+
+
+@st.cache_data(show_spinner=False, ttl=3600 * 6)
+def _cached_fx_rate(currency: str) -> tuple[float, date | None, str]:
+    """The cache entry: USD per unit of ``currency``, its date and the symbol read.
+
+    Tries ``{CCY}USD=X`` (USD per unit) first, then ``USD{CCY}=X`` inverted —
+    Yahoo lists some pairs only one way. Raises :class:`FetchFailed` naming both
+    attempts when neither yields a plausible rate.
+    """
+    reasons = []
+    for symbol, invert in ((f"{currency}USD=X", False), (f"USD{currency}=X", True)):
+        try:
+            close, as_of = _yahoo_last_close(symbol)
+        except FetchFailed as failure:
+            reasons.append(str(failure))
+            continue
+        if close <= 0:
+            reasons.append(f"{symbol} quoted {close}")
+            continue
+        rate = 1.0 / close if invert else close
+        low, high = FX_PLAUSIBLE_BAND
+        if not low <= rate <= high:
+            reasons.append(f"{symbol} implies {rate:g} USD per {currency}, not plausible")
+            continue
+        return rate, as_of, symbol
+    raise FetchFailed("; ".join(reasons))
+
+
+def fetch_fx_rate(currency: str) -> Sourced:
+    """Spot US dollars per one unit of ``currency``, with its provenance.
+
+    Unavailable — never substituted — when Yahoo has no usable quote either
+    way round. Cached six hours on success; a failure is retried next call.
+    """
+    currency = currency.strip().upper()
+    try:
+        rate, as_of, symbol = _cached_fx_rate(currency)
+    except FetchFailed as failure:
+        return Sourced.unavailable(
+            source=f"Yahoo Finance ({currency}USD=X / USD{currency}=X)",
+            reason=str(failure),
+        )
+    inverted = symbol.startswith("USD")
+    return Sourced.reported(
+        value=rate,
+        source=f"Yahoo Finance {symbol}" + (" (inverted)" if inverted else "")
+        + f" — USD per {currency}",
+        as_of=as_of,
+    )
+

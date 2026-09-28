@@ -242,20 +242,34 @@ def test_driver_default_reports_no_value_when_nothing_is_usable():
     assert "No period had every component" in default.detail
 
 
-def test_nwc_ratio_skips_years_where_revenue_did_not_move():
-    values = pd.DataFrame(
+def _nwc_history(revenue: list[float], nwc: list[float]) -> pd.DataFrame:
+    return pd.DataFrame(
         {
-            "revenue": [1000.0, 1000.0],
-            "ebit": [200.0, 200.0],
-            "dna": [40.0, 40.0],
-            "total_current_assets": [400.0, 450.0],
-            "total_current_liabilities": [300.0, 300.0],
-            "cash": [0.0, 0.0],
+            "revenue": revenue,
+            "total_current_assets": [n + 300.0 for n in nwc],
+            "total_current_liabilities": [300.0] * len(nwc),
+            "cash": [0.0] * len(nwc),
         },
-        index=[2024, 2025],
+        index=[2021 + i for i in range(len(nwc))],
     )
-    ratios = fin.driver_ratios(values)
-    assert pd.isna(ratios.loc[2025, "dnwc_pct_drevenue"])
+
+
+def test_the_nwc_driver_is_a_level_ratio():
+    ratios = fin.driver_ratios(_nwc_history([1000.0, 1100.0], [50.0, 66.0]))
+    assert ratios["nwc_pct_revenue"].tolist() == pytest.approx([0.05, 0.06])
+
+
+def test_a_near_flat_revenue_year_no_longer_dominates_the_default():
+    """DCF_ROUND4_INSTRUCTIONS.md §2.1 — DHR's shape: revenue moves $15m and
+    working capital $368m. ΔNWC ÷ Δrevenue read 2,453% that year and dragged
+    the five-year average to 518%; the level ratio barely notices."""
+    history = _nwc_history(
+        [24802.0, 26643.0, 23890.0, 23875.0, 24568.0], [930.0, 2090.0, 1494.0, 1126.0, 1336.0]
+    )
+    default = fin.driver_default(fin.driver_ratios(history), "nwc_pct_revenue", "5-year average")
+    assert 0.04 < default.value < 0.06
+    old_style = (history["total_current_assets"].diff() / history["revenue"].diff()).iloc[-2]
+    assert old_style > 20  # what the replaced driver read for that year
 
 
 # ---------------------------------------------------------------------------
@@ -369,27 +383,65 @@ def test_stock_and_flow_keys_do_not_overlap():
 
 
 # ---------------------------------------------------------------------------
-# Fiscal calendar
+# Compound growth default
 # ---------------------------------------------------------------------------
 
 
-def test_fiscal_year_end_uses_the_reported_day():
-    """Apple's fiscal year ends on the Saturday nearest 30 September."""
-    result = fin.fiscal_year_end(9, date(2026, 7, 31), date(2025, 9, 27))
-    assert result == date(2026, 9, 27)
+def _growth_ratios(rates: list[float]) -> pd.DataFrame:
+    return pd.DataFrame(
+        {"revenue_growth": rates}, index=[2020 + i for i in range(len(rates))]
+    )
 
 
-def test_fiscal_year_end_rolls_into_next_year_when_already_past():
-    assert fin.fiscal_year_end(6, date(2026, 7, 31), date(2026, 6, 30)) == date(2027, 6, 30)
+def test_growth_defaults_to_the_compound_rate_not_the_average():
+    """DCF_MODEL_REVIEW.md F7: 100 → 200 → 100 averages +25% and compounds at 0%."""
+    ratios = _growth_ratios([1.0, -0.5])
+    cagr = fin.driver_default(ratios, "revenue_growth", "3-year CAGR")
+    average = fin.driver_default(ratios, "revenue_growth", "3-year average")
+    assert cagr.value == pytest.approx(0.0)
+    assert average.value == pytest.approx(0.25)
+    assert fin.GROWTH_BASES[0] == "5-year CAGR"
 
 
-def test_fiscal_year_end_is_none_without_a_month():
-    assert fin.fiscal_year_end(None, date(2026, 7, 31), None) is None
+def test_cagr_compounds_the_reported_years():
+    ratios = _growth_ratios([0.10, 0.20, 0.05])
+    result = fin.driver_default(ratios, "revenue_growth", "3-year CAGR")
+    assert result.value == pytest.approx((1.10 * 1.20 * 1.05) ** (1 / 3) - 1)
+    assert result.years_used == 3
 
 
-def test_calendar_and_fiscal_year_ends_are_both_handled():
-    assert fin.fiscal_year_end(12, date(2026, 7, 31), date(2025, 12, 31)) == date(2026, 12, 31)
-    assert fin.fiscal_year_end(1, date(2026, 7, 31), date(2026, 1, 31)) == date(2027, 1, 31)
+def test_cagr_is_refused_for_a_driver_that_does_not_compound():
+    ratios = pd.DataFrame({"operating_margin": [0.2, 0.3]}, index=[2024, 2025])
+    result = fin.driver_default(ratios, "operating_margin", "5-year CAGR")
+    assert not result.ok
+
+
+def test_cagr_across_a_total_loss_of_revenue_is_not_invented():
+    result = fin.driver_default(_growth_ratios([0.1, -1.0, 0.2]), "revenue_growth", "3-year CAGR")
+    assert not result.ok
+    assert "no compound rate" in result.detail
+
+
+# ---------------------------------------------------------------------------
+# Acquisitions
+# ---------------------------------------------------------------------------
+
+
+def test_acquisition_spend_is_positive_for_cash_out_and_missing_stays_missing():
+    values = pd.DataFrame({"acquisitions": [-50.0, np.nan, 10.0]})
+    spend = fin.acquisition_spend(values)
+    assert spend.iloc[0] == 50.0
+    assert pd.isna(spend.iloc[1])
+    assert spend.iloc[2] == -10.0  # a net disposal
+    assert fin.acquisition_spend(pd.DataFrame({"revenue": [1.0]})).isna().all()
+
+
+def test_acquisitions_are_a_ratio_but_not_a_forecast_driver(concept_table):
+    values, _, _ = concept_table
+    assert values["acquisitions"].notna().all()
+    ratios = fin.driver_ratios(values)
+    assert fin.ACQUISITIONS_KEY in ratios.columns
+    assert fin.ACQUISITIONS_KEY not in fin.DRIVER_KEYS
 
 
 # ---------------------------------------------------------------------------
@@ -427,7 +479,7 @@ def test_ttm_base_period_uses_a_trailing_twelve_month_working_capital_change():
         index=[2024, 2025],
     )
     dataset = type("D", (), {"quarterly": quarterly, "annual": annual})()
-    base = type("B", (), {"is_ttm": True})()
+    base = type("B", (), {"is_ttm": True, "fx_rate": 1.0})()
 
     change, span = dcf_model.base_period_delta_nwc(dataset, base)
     assert change == pytest.approx(100.0)  # 500 − 400, four quarters apart
@@ -450,7 +502,7 @@ def test_annual_base_period_uses_the_annual_working_capital_change():
         index=[2024, 2025],
     )
     dataset = type("D", (), {"quarterly": pd.DataFrame(), "annual": annual})()
-    base = type("B", (), {"is_ttm": False})()
+    base = type("B", (), {"is_ttm": False, "fx_rate": 1.0})()
 
     change, span = dcf_model.base_period_delta_nwc(dataset, base)
     assert change == pytest.approx(230.0)
@@ -471,7 +523,7 @@ def test_ttm_base_falls_back_to_annual_and_says_so_with_thin_quarters():
         index=[2024, 2025],
     )
     dataset = type("D", (), {"quarterly": pd.DataFrame(), "annual": annual})()
-    base = type("B", (), {"is_ttm": True})()
+    base = type("B", (), {"is_ttm": True, "fx_rate": 1.0})()
 
     change, span = dcf_model.base_period_delta_nwc(dataset, base)
     assert change == pytest.approx(230.0)
@@ -487,7 +539,138 @@ def test_no_consecutive_balance_sheets_yields_no_change():
         index=[2025],
     )
     dataset = type("D", (), {"quarterly": pd.DataFrame(), "annual": annual})()
-    base = type("B", (), {"is_ttm": False})()
+    base = type("B", (), {"is_ttm": False, "fx_rate": 1.0})()
     change, span = dcf_model.base_period_delta_nwc(dataset, base)
     assert change is None
     assert "No two consecutive balance sheets" in span
+
+
+def test_the_base_period_working_capital_change_is_converted_at_spot():
+    """ΔNWC feeds method B, which meets dollar figures, so it is converted too."""
+    from app.logic.dcf import model as dcf_model
+
+    annual = pd.DataFrame(
+        {
+            "total_current_assets": [200.0, 430.0],
+            "total_current_liabilities": [300.0, 300.0],
+            "cash": [0.0, 0.0],
+            "short_term_investments": [0.0, 0.0],
+            "short_term_debt": [0.0, 0.0],
+        },
+        index=[2024, 2025],
+    )
+    dataset = type("D", (), {"quarterly": pd.DataFrame(), "annual": annual})()
+    local = type("B", (), {"is_ttm": False, "fx_rate": 1.0})()
+    converted = type("B", (), {"is_ttm": False, "fx_rate": 0.032})()
+    change, _ = dcf_model.base_period_delta_nwc(dataset, local)
+    converted_change, _ = dcf_model.base_period_delta_nwc(dataset, converted)
+    assert converted_change == pytest.approx(change * 0.032)
+
+
+# ---------------------------------------------------------------------------
+# Trailing bases (DCF_ROUND2_INSTRUCTIONS.md §2.3)
+# ---------------------------------------------------------------------------
+
+
+def _ttm_series(revenues: list[float], ends: list[str]):
+    labels = [f"P{i}" for i in range(len(revenues))]
+    values = pd.DataFrame({"revenue": revenues}, index=labels)
+    meta = pd.DataFrame({"report_date": pd.to_datetime(ends)}, index=labels)
+    return values, meta
+
+
+def test_ttm_growth_compares_with_the_period_four_quarters_earlier():
+    values, meta = _ttm_series(
+        [100.0, 104.0, 108.0, 113.0, 120.0],
+        ["2025-06-28", "2025-09-27", "2025-12-27", "2026-03-28", "2026-06-27"],
+    )
+    result = fin.ttm_revenue_growth(values, meta)
+    assert result.ok and result.basis == fin.TTM_GROWTH_BASIS
+    assert result.value == pytest.approx(0.20)
+    assert result.periods == ("P0", "P4")
+
+
+def test_ttm_growth_is_unavailable_without_a_period_a_year_back():
+    values, meta = _ttm_series([100.0, 120.0], ["2026-03-28", "2026-06-27"])
+    result = fin.ttm_revenue_growth(values, meta)
+    assert not result.ok
+    assert "about a year before" in result.detail
+
+
+def test_ttm_growth_is_unavailable_for_a_filer_with_no_ttm_series():
+    result = fin.ttm_revenue_growth(pd.DataFrame(), pd.DataFrame())
+    assert not result.ok and "no trailing-twelve-month" in result.detail
+
+
+def test_the_ttm_margin_basis_is_the_base_periods_own_margin():
+    flows = pd.Series({"revenue": 400.0, "ebit": 120.0})
+    stocks = pd.Series(dtype="float64")
+    margin = fin.base_period_driver("operating_margin", flows, stocks, is_ttm=True, label="TTM")
+    assert margin.value == pytest.approx(0.30)
+    fiscal = fin.base_period_driver(
+        "operating_margin", flows, stocks, is_ttm=False, label="FY2025"
+    )
+    assert not fiscal.ok and "fiscal year" in fiscal.detail
+
+
+def test_ttm_capex_dna_and_nwc_bases_read_the_base_period():
+    """DCF_ROUND4_INSTRUCTIONS.md §2.1/§2.2: today's capex, D&A and working
+    capital, not five-year averages that predate an AI build-out."""
+    flows = pd.Series({"revenue": 400.0, "ebit": 120.0, "dna": 20.0, "capex_acquisition": -60.0})
+    stocks = pd.Series({
+        "total_current_assets": 150.0, "total_current_liabilities": 100.0,
+        "cash": 20.0, "short_term_investments": 10.0, "short_term_debt": 5.0,
+    })
+    read = lambda key: fin.base_period_driver(  # noqa: E731
+        key, flows, stocks, is_ttm=True, label="TTM to FY2026 Q2"
+    )
+    assert read("capex_pct_revenue").value == pytest.approx(0.15)
+    assert read("dna_pct_revenue").value == pytest.approx(0.05)
+    # NWC = (150 − 20 − 10) − (100 − 5) = 25, over TTM revenue of 400.
+    assert read("nwc_pct_revenue").value == pytest.approx(0.0625)
+    assert read("capex_pct_revenue").basis == fin.TTM_BASIS
+
+
+def test_every_ttm_basis_falls_back_when_the_base_is_a_fiscal_year():
+    flows = pd.Series({"revenue": 400.0, "ebit": 120.0, "dna": 20.0, "capex_acquisition": -60.0})
+    for key in ("operating_margin", "capex_pct_revenue", "dna_pct_revenue", "nwc_pct_revenue"):
+        result = fin.base_period_driver(
+            key, flows, pd.Series(dtype="float64"), is_ttm=False, label="FY2025"
+        )
+        assert not result.ok and "fiscal year" in result.detail
+
+
+# ---------------------------------------------------------------------------
+# Year-1 growth: the lower of TTM and the five-year CAGR
+# ---------------------------------------------------------------------------
+
+
+def _growth_default(value, basis):
+    return fin.DriverDefault("revenue_growth", value, basis, 1, ("P",))
+
+
+def test_a_trailing_burst_above_the_five_year_record_is_not_extrapolated():
+    """NVDA: 83% trailing against a 67% five-year CAGR — start from 67%."""
+    lower = fin.lower_of_growth(
+        _growth_default(0.834, fin.TTM_GROWTH_BASIS), _growth_default(0.669, "5-year CAGR")
+    )
+    assert lower.value == pytest.approx(0.669)
+    assert lower.basis == fin.LOWER_GROWTH_BASIS
+    assert lower.detail.startswith("Using 5-year CAGR (66.90%), the lower")
+
+
+def test_a_trailing_slowdown_is_kept():
+    lower = fin.lower_of_growth(
+        _growth_default(0.04, fin.TTM_GROWTH_BASIS), _growth_default(0.10, "5-year CAGR")
+    )
+    assert lower.value == pytest.approx(0.04)
+    assert "TTM year-over-year" in lower.detail
+
+
+def test_the_lower_of_rule_needs_both_rates():
+    """No silent fallback: with one side missing the basis is unavailable."""
+    missing = fin.DriverDefault(
+        "revenue_growth", None, fin.TTM_GROWTH_BASIS, 0, (), "no TTM series."
+    )
+    lower = fin.lower_of_growth(missing, _growth_default(0.10, "5-year CAGR"))
+    assert not lower.ok and "TTM year-over-year is unavailable" in lower.detail

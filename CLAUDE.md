@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 pip install -r requirements-dev.txt          # requirements.txt + pytest; deployed app installs only requirements.txt
 streamlit run streamlit_app.py               # run the app
-python -m pytest tests/ -q                   # full suite (~960 tests, no network; CI runs it too)
+python -m pytest tests/ -q                   # full suite (~1,135 tests, no network; CI runs it too)
 python -m pytest tests/test_valuation.py -q  # one file
 python -m pytest tests/test_wacc.py::test_market_value_of_equity -q  # one test
 python -m pytest tests/ -k "fcff" -q         # by name
@@ -266,6 +266,87 @@ Sharadar's vendor `sector` label. That gate is the DCF's, not the research page'
 Valuation tab compares banks on P/B, which is the point of the metric. Peer *grouping*, unlike
 the gate, uses the vendor `industry` label — it is the classification a reader recognises, and
 the two disagree often enough that which one is in use has to be a deliberate choice.
+
+**Non-USD reporters are converted, once, at spot.** Drivers come from the reporting-currency
+history, so growth and margins carry no FX noise; `BasePeriod.converted` puts every monetary
+line of the base period into USD at the spot rate `market_data.fetch_fx_rate` returns, and
+everything downstream — the projection, the bridge, the WACC's debt, both base-period FCFF
+builds — is in USD. History tables stay in the reporting currency and say so. Two facts about
+the data, both confirmed live: **Sharadar's `fxusd` is units of the reporting currency per
+dollar** (TSM ≈ 31, EUR ≈ 0.85 — the inverse of the spot quote; `revenueusd = revenue ÷ fxusd`),
+and **DAILY `ev`/`marketcap` are in USD**, so the historical exit multiple divides USD EV by
+EBITDA converted at each period's own `fxusd`. No spot rate is still BLOCKING
+(`validation.UnsupportedCurrencyError`); a rate is never substituted. ADRs keep `sharefactor` on
+**every** share count compared with the price — the weighted counts and EPS are per underlying
+share.
+
+**One BLOCKING check rests on plausibility, not absence:** `check_currency_depreciation` blocks
+when the reporting currency has lost more than 10% a year against the dollar (measured from
+Sharadar's own `fxusd`, so no currency list is hardcoded), because the spot-rate assumption is
+then not credible. Every other plausibility check stops at CRITICAL.
+
+**SBC is expensed once, inside EBIT, and cannot be added back.** The margin driver is GAAP
+operating income, which already deducts it; the add-back option was removed rather than left to
+double as a way to treat equity pay as free.
+
+**The two terminal values are discounted differently on purpose.** Gordon is a perpetuity of
+flows on the forecast's own convention, so it takes the final row's (mid-year) exponent; an exit
+multiple is a sale at the *end* of year N. Both sit at the base period's end rolled forward by
+`elapsed` — the forecast is anchored to the base period, never to the next fiscal year end,
+which made the value jump overnight when a fiscal year closed. The exit multiple is the default
+headline; Gordon at RONIC = WACC is always shown beside it, and the reverse DCF solves both.
+
+**The terminal-value-share warning is gone, on purpose.** Under a ten-year exit-multiple model
+it fired on every company and said nothing. The share is still shown beside each method; the
+check that replaced it, "Explicit forecast adds value", fires only when the forecast years are
+worth less than zero in total. Upside beyond `Tolerances.extreme_upside_critical` (+200%) is
+CRITICAL, so an implausible headline is marked red rather than shown quietly.
+
+**The cash-flow tie scales its gap by the largest of the two sides *and* |CFO|**, not by the
+change in cash alone, which is often small beside the flows that net to it. It handles two
+Sharadar feed defects, both confirmed against SEC filings, rather than reporting them as breaks:
+a **net change in cash of exactly 0** where the filing reports one (TSM) is treated as missing
+and the balance-sheet cash change compared instead; and a **zero-filled FX line at a foreign
+filer** (SAP), where the net change agrees with the balance sheet, is read as the undisclosed FX
+effect and raised at WARNING with the implied amount. The thresholds
+(`cash_flow_residual_warning`, `implied_fx_max`) are in `Tolerances`; a domestic filer's gap stays
+CRITICAL. **Known data caveat:** SAP's Sharadar capex runs 11–16% below its filed
+"PP&E, intangibles and other non-current assets" line (it looks like PP&E only) — about 0.3% of
+revenue, left as is.
+
+**Year-1 growth defaults to the lower of TTM year-over-year and the five-year CAGR**
+(`financials.lower_of_growth`). The rate is held for several years and faded over ten, so it
+compounds hard: a trailing burst far above the five-year record (NVDA 83% vs 67%, AVGO 49% vs 22%)
+took NVDA's year-10 revenue to 70× today's and its headline to 42× its price. The lower rate keeps
+a recent slowdown and refuses to extrapolate a recent burst; the trailing rate stays selectable,
+and the checks read the rate actually used (`_effective_growth_basis`).
+
+**The forecast starts from today.** The margin, capex % and D&A % default to the base period's
+own TTM ratios (`financials.base_period_driver`), because a TTM margin already reflects today's
+depreciation and a hyperscaler's AI-era capex is roughly double its five-year average. Each can
+move linearly to an optional year-N target. Working capital is **NWC as a % of revenue** (a level
+ratio, default five-year average; ΔNWC = ratio × Δrevenue), never ΔNWC ÷ Δrevenue, which divided
+by a near-zero change in a flat year — DHR's FY2024 read 2,453% and wrecked its whole valuation.
+
+**The terminal year adds back amortisation (EBITA proxy, on by default):**
+`NOPAT_{N+1} = (EBIT_{N+1} + max(D&A_N − capex_N, 0) × (1 + g)) × (1 − t)`. Without it an acquirer
+whose D&A is mostly acquired-intangible amortisation (AVGO) saw FCFF halve between year N and
+N + 1. It moves the Gordon value and the exit row's implied figures, never the exit value.
+
+**The credit-spread table is hardcoded and dated, on purpose — refresh it each January.**
+`wacc.SYNTHETIC_RATINGS` is Damodaran's large non-financial-firm table. To refresh: open
+<https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ratings.html>, check the "Data used
+is as of" line, copy the fifteen spreads (the coverage bands rarely change), and update
+`SYNTHETIC_RATINGS_AS_OF` and `SYNTHETIC_RATINGS_AS_OF_DATE` to match; `test_wacc.py` pins the
+values, so update it in the same change. "Credit spread table is current" warns once the table is
+more than `Tolerances.spread_table_max_age_months` (15) old, but only when the table actually set
+the cost of debt. Where the base period's interest is zero beside debt or not reported at all, the
+latest of the last three fiscal years that disclosed it supplies the coverage.
+
+**Failed market-data fetches are never cached.** Each `st.cache_data` function in
+`app/data/market_data.py` raises `FetchFailed` (Streamlit does not cache exceptions) and an
+uncached wrapper turns it into `Sourced.unavailable`. Returning the failure from the cached
+function cached a transient outage for a day.
 
 **The API key never appears in an exception, log line, or export.** Nasdaq only accepts it as a
 query parameter, so errors raised from `sharadar_client` carry the table, ticker, and status —
