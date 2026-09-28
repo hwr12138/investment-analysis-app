@@ -107,6 +107,7 @@ from app.data.sharadar.statements import (
     fetch_statements,
     filings_frame,
     fiscal_year_end_month,
+    share_factor,
     weighted_shares_frame,
 )
 from app.data.sharadar.transport import (
@@ -127,6 +128,7 @@ from app.data.sharadar.vocabulary import (
     FINANCIAL_SIC_RANGE,
     META_COLUMNS,
     MINORITY_INTEREST_CAPTION,
+    PRICE_CURRENCY,
     SF1_CAPTIONS,
     SF1_LAYOUT,
     SF2_ACQUIRED,
@@ -152,6 +154,7 @@ __all__ = [
     "FINANCIAL_SIC_RANGE",
     "META_COLUMNS",
     "MINORITY_INTEREST_CAPTION",
+    "PRICE_CURRENCY",
     "SF1_CAPTIONS",
     "SF1_LAYOUT",
     "SF2_ACQUIRED",
@@ -191,6 +194,7 @@ __all__ = [
     "fiscal_year_end_month",
     "is_zero_filled",
     "parse_datatable",
+    "share_factor",
     "split_factors",
     "weighted_shares_frame",
 ]

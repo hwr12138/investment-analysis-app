@@ -121,12 +121,21 @@ def _assumption_fingerprint(inputs: dict) -> tuple:
         drivers.effective_tax_rate,
         drivers.capex_pct_revenue,
         drivers.dna_pct_revenue,
-        drivers.dnwc_pct_drevenue,
+        drivers.nwc_pct_revenue,
         round(inputs["wacc"].wacc, 12),
         inputs["terminal_growth"],
         inputs["exit_multiple"],
-        inputs["stub"],
+        inputs["elapsed"],
         inputs["mid_year"],
+        inputs["ronic"],
+        inputs["terminal_tax_rate"],
+        inputs["growth_fade_to"],
+        inputs["growth_hold"],
+        inputs["ebita_proxy"],
+        inputs["spread_table_as_of"],
+        tuple(sorted(inputs["assumed_margins"].items())),
+        inputs["acquisitions_in_capex"],
+        inputs["beta"],
         inputs["shares"],
         inputs["share_basis"],
         inputs["include_sti"],
@@ -134,7 +143,6 @@ def _assumption_fingerprint(inputs: dict) -> tuple:
         inputs["non_operating"],
         inputs["headline_method"],
         inputs["sbc"],
-        inputs["deduct_sbc"],
         inputs["etr"],
     )
 
@@ -223,6 +231,9 @@ def render(ticker: str) -> None:
     except val.UnsupportedSectorError as error:
         common.render_blocking("Unsupported sector", str(error))
         return
+    except val.UnsupportedCurrencyError as error:
+        common.render_blocking("No exchange rate for the reporting currency", str(error))
+        return
     except SchemaResolutionError as error:
         common.render_blocking(
             "Could not resolve a required financial concept",
@@ -273,25 +284,10 @@ def render(ticker: str) -> None:
     output = st.session_state.get("dcf_output")
 
     if _needs_run(output, ticker, fingerprint):
+        model_kwargs = common.model_kwargs(inputs)
         try:
             result = dcf_model.run_model(
-                dataset,
-                inputs["base"],
-                drivers=inputs["drivers"],
-                wacc_result=inputs["wacc"],
-                terminal_growth=inputs["terminal_growth"],
-                exit_multiple=inputs["exit_multiple"],
-                stub=inputs["stub"],
-                mid_year=inputs["mid_year"],
-                shares=inputs["shares"],
-                share_basis=inputs["share_basis"],
-                include_short_term_investments=inputs["include_sti"],
-                operating_cash_floor=inputs["cash_floor"],
-                non_operating_assets=inputs["non_operating"],
-                base_fcff=inputs["base_fcff"],
-                headline_method=inputs["headline_method"],
-                sbc=inputs["sbc"],
-                deduct_sbc=inputs["deduct_sbc"],
+                dataset, inputs["base"], drivers=inputs["drivers"], **model_kwargs
             )
         except dcf.TerminalValueError as error:
             st.error(f"**Terminal value cannot be computed.** {error}")
@@ -304,26 +300,36 @@ def render(ticker: str) -> None:
         # Solved here rather than at render time so it describes the same run as
         # everything else on the page. Reading live widget values instead would
         # let the implied rate invert a valuation that is not the one displayed.
+        # Both methods, whichever is the headline: Gordon reads the price against
+        # fundamentals, the exit multiple mostly against its own trading history.
         # No try/except: every way this can fail is a status on the result.
-        reverse_result = dcf_model.solve_implied_growth(
+        reverse_results = {
+            method: dcf_model.solve_implied_growth(
+                dataset,
+                inputs["base"],
+                target_price=dataset.last_price,
+                drivers=inputs["drivers"],
+                growth_fade_to=inputs["growth_fade_to"],
+                growth_hold=inputs["growth_hold"],
+                **{**model_kwargs, "headline_method": method},
+            )
+            for method in implied.METHOD_ORDER
+        }
+
+        # The range matters more than the point estimate. Every cell is the same
+        # model with the discount rate and the headline's terminal input moved.
+        grid_kwargs = {
+            key: value for key, value in model_kwargs.items()
+            if key not in {"wacc_result", "terminal_growth", "exit_multiple"}
+        }
+        sensitivity = dcf_model.sensitivity_grid(
             dataset,
             inputs["base"],
-            target_price=dataset.last_price,
-            drivers=inputs["drivers"],
             wacc_result=inputs["wacc"],
             terminal_growth=inputs["terminal_growth"],
             exit_multiple=inputs["exit_multiple"],
-            stub=inputs["stub"],
-            mid_year=inputs["mid_year"],
-            shares=inputs["shares"],
-            share_basis=inputs["share_basis"],
-            include_short_term_investments=inputs["include_sti"],
-            operating_cash_floor=inputs["cash_floor"],
-            non_operating_assets=inputs["non_operating"],
-            base_fcff=inputs["base_fcff"],
-            headline_method=inputs["headline_method"],
-            sbc=inputs["sbc"],
-            deduct_sbc=inputs["deduct_sbc"],
+            drivers=inputs["drivers"],
+            **grid_kwargs,
         )
 
         context = dcf_model.build_validation_context(
@@ -339,6 +345,15 @@ def render(ticker: str) -> None:
             risk_free_rate=inputs["risk_free"],
             sbc=inputs["sbc"],
             periods_in_use=inputs["periods_in_use"],
+            drivers=inputs["drivers"],
+            beta_in_use=inputs["beta"],
+            acquisitions_in_capex=inputs["acquisitions_in_capex"],
+            growth_basis=inputs["growth_basis"],
+            assumed_margins=inputs["assumed_margins"],
+            spread_table_as_of=inputs["spread_table_as_of"],
+            implied_growth={
+                method: outcome.growth for method, outcome in reverse_results.items()
+            },
         )
         issues, check_results = val.run_all(context, inputs["tolerances"])
 
@@ -346,7 +361,8 @@ def render(ticker: str) -> None:
             "company": ticker,
             "fingerprint": fingerprint,
             "result": result,
-            "reverse": reverse_result,
+            "reverse": reverse_results,
+            "sensitivity": sensitivity,
             "issues": issues,
             "check_results": check_results,
             # The inputs are snapshotted alongside the results so the export and
@@ -361,8 +377,11 @@ def render(ticker: str) -> None:
     check_results = output["check_results"]
     computed_inputs = output["inputs"]
     # `.get` rather than `[...]`: a session dict snapshotted before this section
-    # existed has no reverse result, and a stale session should not crash.
-    reverse_result = output.get("reverse")
+    # existed has no reverse result, and a stale session should not crash. An
+    # older session holds a single result rather than one per method.
+    reverse_results = output.get("reverse")
+    if not isinstance(reverse_results, dict):
+        reverse_results = None
 
     blocking = [i for i in issues if i.severity is val.Severity.BLOCKING]
     if blocking:
@@ -384,12 +403,14 @@ def render(ticker: str) -> None:
 
     results.render_projection(dataset, result)
     results.render_valuation(dataset, result, computed_inputs, unacknowledged_critical)
-    if reverse_result is not None:
+    if output.get("sensitivity") is not None:
+        results.render_sensitivity(dataset, output["sensitivity"])
+    if reverse_results is not None:
         implied.render(
             dataset,
             result,
             computed_inputs,
-            reverse_result,
+            reverse_results,
             fin.revenue_growth_history(dataset.annual),
         )
     download.render(

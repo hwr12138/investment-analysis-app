@@ -14,6 +14,7 @@ from app.formatting import format_pct
 from app.logic.dcf import financials as fin
 from app.logic.dcf import model as dcf_model
 from app.logic.dcf import reverse
+from app.logic.dcf import valuation as dcf
 from app.provenance import Sourced
 from app.views.research.dcf import common
 
@@ -75,37 +76,76 @@ def _reverse_message(result: reverse.ReverseDcfResult) -> tuple[str, str]:
     raise AssertionError(f"No message written for reverse DCF status {status!r}.")
 
 
-def _implied_revenue_path(base_revenue: float, growth: float, years: int) -> list[float]:
-    return [base_revenue * (1.0 + growth) ** i for i in range(1, years + 1)]
+#: Both methods are solved; Gordon leads because it is the fundamentals
+#: reading — the exit-multiple solve mostly measures today's multiple against
+#: the company's own history.
+METHOD_ORDER = ("gordon", "exit_multiple")
+METHOD_LABELS = {
+    "gordon": "Gordon growth (fundamentals)",
+    "exit_multiple": "Exit multiple",
+}
+_PATH_COLOURS = {"gordon": "#f2a900", "exit_multiple": "#e06666"}
+
+
+def _implied_revenue_path(
+    base_revenue: float,
+    growth: float,
+    years: int,
+    fade_to: float | None = None,
+    hold: int = 1,
+) -> list[float]:
+    """Revenue compounding from the base period along the forecast's growth shape."""
+    path, revenue = [], base_revenue
+    for rate in dcf.growth_path(growth, years, fade_to, hold=hold):
+        revenue *= 1.0 + rate
+        path.append(revenue)
+    return path
+
+
+def _path_shape(inputs: dict) -> str:
+    """How the solved rate is spread across the forecast, in words."""
+    years = inputs["drivers"].years
+    if inputs.get("growth_fade_to") is None:
+        return f"a flat revenue growth rate across all {years} forecast years"
+    hold = inputs.get("growth_hold", 1)
+    return (
+        f"a year-1 revenue growth rate, held for {hold} year(s) and then faded toward "
+        f"the terminal rate over the rest of the {years}-year forecast, exactly as yours is"
+    )
 
 
 def _render_chart(
     dataset: dcf_model.CompanyDataset,
     result: dcf_model.ModelResult,
-    reverse_result: reverse.ReverseDcfResult,
+    reverse_results: dict[str, reverse.ReverseDcfResult],
     history: fin.GrowthHistory,
+    inputs: dict,
 ) -> None:
-    """Reported revenue, then the paths the price, the forecast, and history imply."""
+    """Reported revenue, then the paths the price (both ways), the forecast, and history imply."""
     if "revenue" not in dataset.annual.columns:
         return
 
     projected = [row.revenue for row in result.projection.rows]
     years = len(projected)
     base_revenue = result.projection.base_revenue
+    fade_to, hold = inputs.get("growth_fade_to"), inputs.get("growth_hold", 1)
 
-    # Forecast years are labelled by offset, not by fiscal year: the first is a
-    # stub period, and a fiscal-year label would claim a precision the model
-    # does not have.
+    # Forecast years are labelled by offset, not by fiscal year: each is the
+    # twelve months after the base period, which need not end on a fiscal year.
     history_labels = [str(i) for i in dataset.annual.index]
     forward_labels = [f"+{i}yr" for i in range(1, years + 1)]
     anchor = result.base.label
     axis = history_labels + [anchor] + forward_labels
 
+    # Reported bars stay in the reporting currency; the forecast is in the
+    # valuation currency. Converting the bars back at the same spot rate puts
+    # both on one axis without restating history at historical rates.
+    to_valuation = dataset.fx_rate_value
     figure = go.Figure()
     figure.add_trace(
         go.Bar(
-            x=history_labels, y=dataset.annual["revenue"], name="Reported revenue",
-            marker_color="rgba(130,150,180,0.55)",
+            x=history_labels, y=dataset.annual["revenue"] * to_valuation,
+            name="Reported revenue", marker_color="rgba(130,150,180,0.55)",
         )
     )
 
@@ -118,19 +158,18 @@ def _render_chart(
             )
         )
 
-    if reverse_result.status is reverse.Status.SOLVED:
-        add_path(
-            _implied_revenue_path(base_revenue, reverse_result.growth, years),
-            f"Implied by the market price ({format_pct(reverse_result.growth)})",
-            "dash", 3.5, "#f2a900",
-        )
-    else:
-        # Losing the market's line is the finding; losing the chart hides it.
-        for index, root in enumerate(reverse_result.roots):
+    for method in METHOD_ORDER:
+        outcome = reverse_results.get(method)
+        if outcome is None:
+            continue
+        # Losing the market's line is the finding; losing the chart hides it,
+        # so every root is drawn when there is no single answer.
+        roots = [outcome.growth] if outcome.status is reverse.Status.SOLVED else outcome.roots
+        for root in roots:
             add_path(
-                _implied_revenue_path(base_revenue, root, years),
-                f"Reproduces the price ({format_pct(root)})",
-                "dash", 2.5, ["#f2a900", "#e06666"][index % 2],
+                _implied_revenue_path(base_revenue, root, years, fade_to, hold),
+                f"Price, {METHOD_LABELS[method].lower()} ({format_pct(root)})",
+                "dash", 3.0, _PATH_COLOURS[method],
             )
 
     add_path(projected, "Your forecast", "dot", 2.5, "#4fa3f7")
@@ -145,7 +184,7 @@ def _render_chart(
     figure.update_layout(
         height=420, template="plotly_dark", hovermode="x unified",
         margin=dict(t=30, b=10, l=10, r=10),
-        yaxis_title=f"Revenue ({dataset.currency})" if dataset.currency else "Revenue",
+        yaxis_title=f"Revenue ({dataset.valuation_currency})",
         legend=dict(orientation="h", y=-0.15),
         xaxis=dict(categoryorder="array", categoryarray=axis),
     )
@@ -155,14 +194,18 @@ def _render_chart(
     st.plotly_chart(figure, width="stretch")
 
     note = (
-        f"Forecast years are labelled by offset because the first is a stub period of "
-        f"{result.projection.stub_fraction:.2f} of a year. All three paths start from the "
-        f"base period, **{result.base.label}**."
+        f"Forecast years are labelled by offset: each is the twelve months after the base "
+        f"period, **{result.base.label}**, which is where every path starts."
     )
     if result.base.is_ttm:
         note += (
             " The base period is a trailing twelve months, so the step from the last "
             "fiscal-year bar to the anchor is a real discontinuity, not a plotting artefact."
+        )
+    if dataset.is_converted:
+        note += (
+            f" Reported bars are converted at today's spot rate, like the forecast, so they "
+            f"compare on one axis; the history tables above stay in {dataset.currency}."
         )
     st.caption(note)
 
@@ -171,32 +214,33 @@ def render(
     dataset: dcf_model.CompanyDataset,
     result: dcf_model.ModelResult,
     inputs: dict,
-    reverse_result: reverse.ReverseDcfResult,
+    reverse_results: dict[str, reverse.ReverseDcfResult],
     history: fin.GrowthHistory,
 ) -> None:
     st.divider()
     st.subheader("Reverse DCF — what the market price implies")
 
-    years = inputs["drivers"].years
     st.caption(
         f"Everything above holds the assumptions fixed and solves for value. This holds value "
         f"fixed at the market price and solves for the one assumption that would justify it: "
-        f"a flat revenue growth rate across all {years} forecast years, with the other five "
-        f"drivers exactly as shown above."
+        f"{_path_shape(inputs)}, with the other drivers exactly as shown above. It is solved "
+        f"under both terminal methods, whichever one is the headline."
     )
 
-    solved = reverse_result.status is reverse.Status.SOLVED
     forecast = inputs["drivers"].revenue_growth[0]
-
-    columns = st.columns(4)
-    columns[0].metric(
-        "Implied revenue growth",
-        format_pct(reverse_result.growth) if solved else
-        ("no single rate" if reverse_result.roots else "—"),
-        help="The flat rate that makes this model's value per share equal the market price.",
-    )
-    columns[1].metric("Your forecast", format_pct(forecast))
-    columns[2].metric(
+    columns = st.columns(5)
+    for column, method in zip(columns, METHOD_ORDER):
+        outcome = reverse_results[method]
+        solved = outcome.status is reverse.Status.SOLVED
+        column.metric(
+            f"Implied growth — {METHOD_LABELS[method]}",
+            format_pct(outcome.growth) if solved else
+            ("no single rate" if outcome.roots else "—"),
+            help="The year-1 rate that makes this model's value per share equal the "
+                 "market price under this terminal method.",
+        )
+    columns[2].metric("Your year-1 forecast", format_pct(forecast))
+    columns[3].metric(
         f"Realised CAGR ({history.first_period}–{history.last_period})"
         if history.ok else "Realised CAGR",
         format_pct(history.cagr) if history.ok else "n/a",
@@ -204,91 +248,108 @@ def render(
             f"Compound annual growth over {history.intervals} interval(s) of reported revenue."
         ),
     )
-    columns[3].metric(
+    columns[4].metric(
         "Market price",
         f"{dataset.last_price:,.2f}" if dataset.last_price else "n/a",
         help=f"Last close as of {dataset.price_date}" if dataset.price_date else None,
     )
 
-    if solved:
-        verdict = (
-            f"The market is pricing in **{format_pct(reverse_result.growth)}** a year for {years} "
-            f"years. You are forecasting **{format_pct(forecast)}**."
-        )
-        if history.ok:
-            gap = (reverse_result.growth - history.cagr) * 100
-            verdict += (
-                f" The company delivered **{format_pct(history.cagr)}** over the "
-                f"{history.intervals} years to {history.last_period} — the market's number is "
-                f"**{gap:+.1f} points** {'above' if gap >= 0 else 'below'} what it has "
-                f"actually done."
-            )
-        st.markdown(verdict)
-        common.provenance(
-            Sourced.derived(
-                value=reverse_result.growth,
-                source=(
-                    f"Solved against the last close of {dataset.last_price:,.2f}"
-                    + (f" ({dataset.price_date})" if dataset.price_date else "")
-                ),
-                formula=reverse_result.formula,
-            )
-        )
+    st.caption(
+        "**How to read the two.** The Gordon solve is the fundamentals reading: the growth "
+        "the business must deliver for the price to be right when growth after the forecast "
+        "earns only its cost of capital. The exit-multiple solve holds the terminal multiple "
+        "at the company's own recent median, so it mostly measures how far today's multiple "
+        "sits from that history rather than what the business must do."
+    )
 
-    level, message = _reverse_message(reverse_result)
-    if message:
-        {"warning": st.warning, "error": st.error, "info": st.info}[level](message)
+    for method in METHOD_ORDER:
+        outcome = reverse_results[method]
+        if outcome.status is reverse.Status.SOLVED:
+            verdict = (
+                f"**{METHOD_LABELS[method]}:** the price implies "
+                f"**{format_pct(outcome.growth)}** in year 1"
+                + (", then fading" if inputs.get("growth_fade_to") is not None else " a year")
+                + f", against your **{format_pct(forecast)}**."
+            )
+            if history.ok:
+                gap = (outcome.growth - history.cagr) * 100
+                verdict += (
+                    f" That is **{gap:+.1f} points** {'above' if gap >= 0 else 'below'} the "
+                    f"{format_pct(history.cagr)} the company compounded over the "
+                    f"{history.intervals} years to {history.last_period}."
+                )
+            st.markdown(verdict)
+            common.provenance(
+                Sourced.derived(
+                    value=outcome.growth,
+                    source=(
+                        f"Solved against the last close of {dataset.last_price:,.2f}"
+                        + (f" ({dataset.price_date})" if dataset.price_date else "")
+                        + f", {METHOD_LABELS[method].lower()}"
+                    ),
+                    formula=outcome.formula,
+                )
+            )
+        level, message = _reverse_message(outcome)
+        if message:
+            {"warning": st.warning, "error": st.error, "info": st.info}[level](
+                f"*{METHOD_LABELS[method]}* — {message}"
+            )
 
     if history.ok and history.arithmetic_mean is not None:
         st.caption(
             f"**Two ways to state past growth, and they are not the same number.** The "
-            f"forecast driver above is pre-populated from the *arithmetic average* of yearly "
-            f"growth rates (**{format_pct(history.arithmetic_mean)}**); the benchmark here is the "
-            f"*compound* rate (**{format_pct(history.cagr)}**), which is the one comparable to a "
-            f"flat forecast. They diverge whenever growth was uneven. Yearly rates ranged "
+            f"*arithmetic average* of yearly growth rates is "
+            f"**{format_pct(history.arithmetic_mean)}**; the *compound* rate is "
+            f"**{format_pct(history.cagr)}**, which is the one comparable to a forecast that "
+            f"compounds. They diverge whenever growth was uneven, and the average is always "
+            f"the higher. Yearly rates ranged "
             f"{format_pct(history.minimum)} to {format_pct(history.maximum)}, median "
             f"{format_pct(history.median)}, over {history.observations} year(s)."
             + (f" {history.detail}" if history.detail else "")
         )
 
-    _render_chart(dataset, result, reverse_result, history)
+    _render_chart(dataset, result, reverse_results, history, inputs)
 
-    if reverse_result.samples:
+    samples = {
+        method: dict(reverse_results[method].samples) for method in METHOD_ORDER
+    }
+    if any(samples.values()):
         with st.expander("Value per share across the growth range", expanded=False):
             st.caption(
-                "The scan the solver already ran, so this costs nothing extra. Every crossing "
-                "of the market price in this table is a rate the price is consistent with."
+                "The scans the solvers already ran, so this costs nothing extra. Every "
+                "crossing of the market price in a column is a rate the price is consistent "
+                "with under that method."
             )
             low, high = reverse.PLAUSIBLE_GROWTH
-            rows = [
-                {
-                    "Revenue growth": f"{growth:.2%}",
-                    "Value per share": f"{value:,.2f}",
-                    "vs market price": (
-                        format_pct(value / dataset.last_price - 1) if dataset.last_price else "n/a"
-                    ),
-                }
-                for growth, value in reverse_result.samples
-                if low <= growth <= high
-            ]
+            growths = sorted(
+                g for g in set().union(*(set(v) for v in samples.values())) if low <= g <= high
+            )
+            rows = []
+            for growth in growths:
+                row = {"Year-1 revenue growth": f"{growth:.2%}"}
+                for method in METHOD_ORDER:
+                    value = samples[method].get(growth)
+                    row[METHOD_LABELS[method]] = f"{value:,.2f}" if value is not None else ""
+                rows.append(row)
             st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+            if dataset.last_price:
+                st.caption(f"Market price: **{dataset.last_price:,.2f}**.")
 
-    _render_whatif(dataset, inputs, reverse_result)
+    _render_whatif(dataset, inputs)
 
 
-def _render_whatif(
-    dataset: dcf_model.CompanyDataset, inputs: dict, reverse_result: reverse.ReverseDcfResult
-) -> None:
+def _render_whatif(dataset: dcf_model.CompanyDataset, inputs: dict) -> None:
     """A second target price, solved against the same assumptions as the run above.
 
     The assumptions come from the snapshot the page is showing rather than being
-    re-read from the widgets, so this answer and the implied rate above are
-    always two points on one curve.
+    re-read from the widgets, so these answers and the implied rates above are
+    always points on the same curves.
     """
     with st.expander("Solve for a different price", expanded=False):
         st.caption(
             "Answers *what growth would justify this price?* — using the same assumptions "
-            "as the implied rate above, with only the target price changed."
+            "as the implied rates above, with only the target price changed."
         )
         default = float(dataset.last_price or 0.0)
         price = st.number_input(
@@ -297,40 +358,34 @@ def _render_whatif(
         if price <= 0 or abs(price - default) < 1e-12:
             return
 
-        what_if = dcf_model.solve_implied_growth(
-            dataset,
-            inputs["base"],
-            target_price=price,
-            drivers=inputs["drivers"],
-            wacc_result=inputs["wacc"],
-            terminal_growth=inputs["terminal_growth"],
-            exit_multiple=inputs["exit_multiple"],
-            stub=inputs["stub"],
-            mid_year=inputs["mid_year"],
-            shares=inputs["shares"],
-            share_basis=inputs["share_basis"],
-            include_short_term_investments=inputs["include_sti"],
-            operating_cash_floor=inputs["cash_floor"],
-            non_operating_assets=inputs["non_operating"],
-            base_fcff=inputs["base_fcff"],
-            headline_method=inputs["headline_method"],
-            sbc=inputs["sbc"],
-            deduct_sbc=inputs["deduct_sbc"],
-        )
-        if what_if.status is reverse.Status.SOLVED:
-            st.markdown(
-                f"A price of **{price:,.2f}** implies flat revenue growth of "
-                f"**{format_pct(what_if.growth)}** a year."
+        for method in METHOD_ORDER:
+            what_if = dcf_model.solve_implied_growth(
+                dataset,
+                inputs["base"],
+                target_price=price,
+                drivers=inputs["drivers"],
+                growth_fade_to=inputs.get("growth_fade_to"),
+                growth_hold=inputs.get("growth_hold", 1),
+                **{**common.model_kwargs(inputs), "headline_method": method},
             )
-            common.provenance(
-                Sourced.derived(
-                    value=what_if.growth,
-                    source=f"Solved against a hypothetical price of {price:,.2f}",
-                    formula=what_if.formula,
+            label = METHOD_LABELS[method]
+            if what_if.status is reverse.Status.SOLVED:
+                st.markdown(
+                    f"**{label}:** a price of **{price:,.2f}** implies year-1 revenue growth "
+                    f"of **{format_pct(what_if.growth)}**"
+                    + (", fading from there." if inputs.get("growth_fade_to") is not None
+                       else " a year, held flat.")
                 )
-            )
-        else:
-            level, message = _reverse_message(what_if)
-            {"warning": st.warning, "error": st.error, "info": st.info}[level or "info"](
-                message or what_if.reason
-            )
+                common.provenance(
+                    Sourced.derived(
+                        value=what_if.growth,
+                        source=f"Solved against a hypothetical price of {price:,.2f}, "
+                               f"{label.lower()}",
+                        formula=what_if.formula,
+                    )
+                )
+            else:
+                level, message = _reverse_message(what_if)
+                {"warning": st.warning, "error": st.error, "info": st.info}[level or "info"](
+                    f"*{label}* — {message or what_if.reason}"
+                )

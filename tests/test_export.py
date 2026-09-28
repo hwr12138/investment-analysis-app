@@ -115,15 +115,13 @@ def test_user_override_records_what_it_replaced():
 
 def test_projection_frame_is_arithmetically_checkable(built):
     frame = ex.projection_frame(built["result"])
-    row = frame.iloc[1]  # a full year, not the stub
-    expected = (
-        row["EBIT"] * (1 - row["Tax rate"])
-        + row["D&A"] - row["CapEx"] - row["ΔNWC"] - row["SBC deducted"]
-    )
-    assert row["FCFF (full year)"] == pytest.approx(expected)
-    assert row["PV of FCFF"] == pytest.approx(
-        row["FCFF (this period)"] * row["Discount factor"]
-    )
+    for _, row in frame.iterrows():
+        expected = (
+            row["EBIT"] * (1 - row["Tax rate"])
+            + row["D&A"] - row["CapEx"] - row["ΔNWC"]
+        )
+        assert row["FCFF"] == pytest.approx(expected)
+        assert row["PV of FCFF"] == pytest.approx(row["FCFF"] * row["Discount factor"])
 
 
 def test_bridge_frame_covers_both_terminal_methods(built):
@@ -140,8 +138,17 @@ def test_terminal_value_frame_carries_cross_implied_figures(built):
     gordon = frame[frame["Method"] == "Gordon growth"].iloc[0]
     exit_row = frame[frame["Method"] == "Exit multiple"].iloc[0]
     assert gordon["Implied exit multiple"] is not None
-    assert exit_row["Implied perpetuity growth"] is not None
+    assert exit_row["Growth required (no reinvestment)"] is not None
+    assert gordon["RONIC (input or implied)"] == pytest.approx(built["result"].wacc.wacc)
     assert set(frame["Headline"]) == {"yes", "no"}
+
+
+def test_terminal_year_frame_reconciles(built):
+    """NOPAT less g ÷ RONIC of it is the FCFF the Gordon value capitalises."""
+    frame = ex.terminal_year_frame(built["result"]).set_index("Item")["Value"]
+    assert frame["FCFF (N + 1)"] == pytest.approx(
+        frame["NOPAT"] * (1 - frame["Terminal growth"] / frame["Return on new invested capital"])
+    )
 
 
 def test_workbook_has_every_sheet_and_opens(built, issues):
@@ -159,7 +166,8 @@ def test_workbook_has_every_sheet_and_opens(built, issues):
     )
     book = openpyxl.load_workbook(io.BytesIO(workbook_bytes))
     assert {
-        "Summary", "Assumptions", "Projection", "Terminal Values", "Equity Bridge",
+        "Summary", "Assumptions", "Projection", "Terminal Values", "Terminal Year",
+        "Equity Bridge",
         "Historical Financials", "Historical Ratios", "Validation Results", "Issues",
         "Schema Map", "Tolerances",
     } <= set(book.sheetnames)

@@ -25,10 +25,15 @@ def render(dataset: dcf_model.CompanyDataset) -> None:
         f"{len(dataset.annual)} fiscal years retrieved. Years used per driver: "
         + " · ".join(f"{k}: {v}" for k, v in usable.items())
         + ". Years missing a component are excluded, never zero-filled."
+        + (
+            f" Figures here are in the reporting currency, {dataset.currency}."
+            if dataset.is_converted
+            else ""
+        )
     )
 
     display = ratios.copy()
-    display.columns = [fin.DRIVER_LABELS.get(c, c) for c in display.columns]
+    display.columns = [fin.RATIO_LABELS.get(c, c) for c in display.columns]
     st.dataframe(
         display.style.format("{:.2%}", na_rep="—"), width="stretch"
     )

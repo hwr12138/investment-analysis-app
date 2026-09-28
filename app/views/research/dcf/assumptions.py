@@ -7,6 +7,7 @@ function, in the order it draws; they share only the list of export records.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date
 from typing import NamedTuple
 
@@ -20,7 +21,7 @@ from app.logic.dcf import model as dcf_model
 from app.logic.dcf import validation as val
 from app.logic.dcf import valuation as dcf
 from app.logic.dcf import wacc as wacc_lib
-from app.provenance import Sourced
+from app.provenance import Origin, Sourced
 from app.views.research.dcf import common
 
 FINRA_FIXED_INCOME_URL = "https://www.finra.org/finra-data/fixed-income"
@@ -46,8 +47,9 @@ match its weighted-average maturity and use the same-tenor Treasury.
 **Use yield to maturity, not the coupon.** The coupon is what the company agreed to pay at
 issuance; YTM is what the market charges today. A DCF wants today's cost.
 
-**No public bonds?** Fall back to the synthetic rating approach — map EBIT ÷ interest expense to
-a rating band, then add the corresponding spread to the risk-free rate.
+**No public bonds?** The field already starts from the synthetic rating approach — EBIT ÷ interest
+expense mapped to a rating band, plus that band's spread over the risk-free rate — which is an
+estimate. A traded bond's yield is better evidence where one exists.
 """
 
 
@@ -55,9 +57,21 @@ a rating band, then add the corresponding spread to the risk-free rate.
 #: the radio selects by default, and it is ordered to match
 #: ``dcf_model.DEFAULT_HEADLINE_METHOD`` so the UI and the engine agree.
 _HEADLINE_METHODS = {
-    "Exit multiple": "exit_multiple",
     "Gordon growth": "gordon",
+    "Exit multiple": "exit_multiple",
 }
+
+#: Share count bases, label to what they divide by. The first is the default.
+_SHARE_BASES = (
+    "Point-in-time + dilution",
+    "Diluted weighted-average (TTM)",
+    "Point-in-time shares outstanding",
+)
+
+#: Pre-populated defaults that are conventions rather than measurements. Each is
+#: labelled an estimate while untouched, never "user" — the user did not set it.
+DEFAULT_TERMINAL_GROWTH = 0.025
+DEFAULT_MARGINAL_TAX = 0.25
 
 
 def _untouched(widget_value: float, default_value: float, decimals: int) -> bool:
@@ -70,26 +84,77 @@ def _untouched(widget_value: float, default_value: float, decimals: int) -> bool
     return abs(round(widget_value, decimals) - round(default_value, decimals)) < 10**-decimals / 2
 
 
+def _seed_driver_value(
+    state, widget_key: str, seed_key: str, basis: str, default_pct: float
+) -> None:
+    """Puts the basis's default into the value widget whenever the basis changes.
+
+    The value is otherwise left alone, so a figure typed by hand survives every
+    rerun that does not move the basis. Seeding only once — the old behaviour —
+    left the first basis's value in place after the selector changed, and
+    :func:`_untouched` then read the stale number as a user override of the new
+    default. ``seed_key`` carries the ``dcf_input_`` prefix so a change of
+    company clears it with everything else.
+    """
+    if widget_key not in state or state.get(seed_key) != basis:
+        state[widget_key] = default_pct
+        state[seed_key] = basis
+
+
 def _driver_input(
     label: str,
     key: str,
     ratios: pd.DataFrame,
     driver_key: str,
     *,
+    bases: tuple[str, ...] = fin.BASES,
     default_basis: str = "5-year average",
-) -> tuple[float | None, Sourced, tuple[str, ...]]:
+    trailing: fin.DriverDefault | None = None,
+    trailing_is_default: bool = True,
+    also: tuple[fin.DriverDefault, ...] = (),
+) -> tuple[float | None, Sourced, tuple[str, ...], str]:
     """One driver: a basis selector, an editable value, and its provenance.
 
+    ``trailing`` is the driver's leading precomputed basis — the trailing-twelve-
+    month ratio, or for growth the lower of TTM and the five-year CAGR. When it
+    can be computed and ``trailing_is_default``, it leads the basis list and is
+    the default; otherwise it is offered after the history bases. ``also`` are
+    further precomputed bases offered right after it; when the leading one is
+    unavailable, the first of these that is available becomes the default. When
+    a basis cannot be computed it is left out, and a caption says why the
+    default fell back — never silently.
+
     Also returns the period labels the default was averaged over, so the
-    validation layer can tell which fiscal years actually reach the model.
+    validation layer can tell which fiscal years actually reach the model, and
+    the basis in use.
     """
+    precomputed = {d.basis: d for d in (trailing, *also) if d is not None and d.ok}
+    offered_extra = tuple(d.basis for d in also if d.ok)
+    if trailing is not None and trailing.ok:
+        if trailing_is_default:
+            bases = (trailing.basis,) + offered_extra + bases
+            default_basis = trailing.basis
+        else:
+            bases = bases + (trailing.basis,) + offered_extra
+    else:
+        bases = offered_extra + bases
+        if trailing_is_default and offered_extra:
+            default_basis = offered_extra[0]
     basis = st.selectbox(
         f"{label} — basis",
-        fin.BASES,
-        index=fin.BASES.index(default_basis),
+        bases,
+        index=bases.index(default_basis),
         key=f"dcf_input_{key}_basis",
     )
-    default = fin.driver_default(ratios, driver_key, basis)
+    if trailing is not None and not trailing.ok and trailing_is_default:
+        st.caption(
+            f"{trailing.basis} is unavailable — {trailing.detail} Defaulting to "
+            f"{default_basis} instead."
+        )
+    if basis in precomputed:
+        default = precomputed[basis]
+    else:
+        default = fin.driver_default(ratios, driver_key, basis)
 
     if not default.ok:
         common.provenance(
@@ -106,17 +171,19 @@ def _driver_input(
             manual / 100.0,
             Sourced.user(manual / 100.0, "No historical basis available."),
             (),
+            basis,
         )
 
     widget_key = f"dcf_input_{key}_value"
     default_pct = round(default.value * 100, 4)
-    if widget_key not in st.session_state:
-        st.session_state[widget_key] = default_pct
+    _seed_driver_value(
+        st.session_state, widget_key, f"dcf_input_{key}_seeded_from", basis, default_pct
+    )
 
     value = st.number_input(f"{label} (%)", step=0.25, key=widget_key, format="%.4f")
     derived = Sourced.derived(
         value=default.value,
-        source=f"{basis} of reported history",
+        source=f"{basis} of reported figures",
         formula=f"{fin.DRIVER_LABELS[driver_key]} over {default.years_used} period(s): "
         f"{', '.join(str(p) for p in default.periods[-6:])}",
     )
@@ -129,7 +196,7 @@ def _driver_input(
     common.provenance(sourced)
     if default.detail:
         st.caption(f"⚠️ {default.detail}")
-    return user_value, sourced, default.periods
+    return user_value, sourced, default.periods, basis
 
 
 class _Discount(NamedTuple):
@@ -141,6 +208,29 @@ class _Discount(NamedTuple):
     beta_outcome: dcf_model.BetaOutcome
     cost_of_debt: float
     marginal_tax: float
+    #: The spread table's date when the synthetic rating set the cost of debt,
+    #: ``None`` when a yield was typed or no rating could be formed — the
+    #: staleness check only applies when the table is actually in use.
+    spread_table_as_of: date | None
+
+
+class _Drivers(NamedTuple):
+    """The six driver values as entered, before the growth and margin paths are shaped."""
+
+    years: int
+    values: dict[str, float]
+    periods_in_use: set[str]
+    fade: bool
+    hold: int
+    #: Year-N targets by driver key — margin, capex %, D&A % — or ``None``
+    #: where the path is flat.
+    targets: dict[str, float | None]
+    growth_basis: str
+    #: The margins the user assumed rather than read off the TTM, by name.
+    assumed_margins: dict[str, float]
+    acquisitions_in_capex: bool
+    #: Acquisition spend ÷ revenue added to every year's capex when folded in.
+    acquisitions_share: float
 
 
 class _Terminal(NamedTuple):
@@ -148,14 +238,19 @@ class _Terminal(NamedTuple):
     exit_multiple: float
     headline_method: str
     mid_year: bool
-    stub: float
+    elapsed: float
+    ronic: float | None
+    terminal_tax_rate: float | None
+    ebita_proxy: bool
+    #: Beside the RONIC input, filled once the forecast exists — the explicit
+    #: forecast's own incremental return, for comparison.
+    incremental_return_slot: object
 
 
 class _Bridge(NamedTuple):
     include_sti: bool
     cash_floor: float
     sbc: float | None
-    deduct_sbc: bool
     non_operating: float
 
 
@@ -186,12 +281,13 @@ def collect(dataset: dcf_model.CompanyDataset, valuation_date: date) -> dict | N
     base = dcf_model.base_period(dataset)
     records: list[dcf_export.AssumptionRecord] = []
 
-    drivers, driver_values, periods_in_use = _forecast_drivers(dataset, base, records)
+    entered = _forecast_drivers(dataset, base, records)
+    driver_values, periods_in_use = entered.values, entered.periods_in_use
 
     st.markdown("#### Discount rate")
     discount = st.container(border=True)
     with discount:
-        rates = _discount_inputs(dataset, records)
+        rates = _discount_inputs(dataset, base, records)
 
     counted = _share_count(dataset, records)
     if counted is None:
@@ -202,8 +298,34 @@ def collect(dataset: dcf_model.CompanyDataset, valuation_date: date) -> dict | N
     if wacc_result is None:
         return None
 
-    terminal = _terminal_and_conventions(dataset, valuation_date, records)
+    terminal = _terminal_and_conventions(
+        dataset, base, valuation_date, wacc_result, rates.marginal_tax, records
+    )
     bridge = _cash_sbc_and_bridge(dataset, base, records)
+
+    # The growth path needs the terminal rate to fade toward, so it is shaped
+    # only once both are known. The margin, capex and D&A move to their targets
+    # where one is set — capex has one by default, its five-year average; the
+    # tax rate and working capital stay flat.
+    fade_to = terminal.terminal_growth if entered.fade else None
+
+    def path(key: str) -> tuple[float, ...]:
+        start = driver_values[key]
+        target = entered.targets.get(key)
+        return dcf.linear_path(start, start if target is None else target, entered.years)
+
+    drivers = dcf.DriverPath(
+        revenue_growth=dcf.growth_path(
+            driver_values["revenue_growth"], entered.years, fade_to, hold=entered.hold
+        ),
+        operating_margin=path("operating_margin"),
+        # Acquisition spend, when folded in, rides on top of every year's capex.
+        capex_pct_revenue=tuple(c + entered.acquisitions_share for c in path("capex_pct_revenue")),
+        dna_pct_revenue=path("dna_pct_revenue"),
+        effective_tax_rate=(driver_values["effective_tax_rate"],) * entered.years,
+        nwc_pct_revenue=(driver_values["nwc_pct_revenue"],) * entered.years,
+    )
+    _show_incremental_return(terminal, base, drivers, wacc_result)
 
     # --- Effective tax rate for FCFF -------------------------------------
     etr_series = fin.effective_tax_rate(dataset.annual).dropna()
@@ -231,8 +353,17 @@ def collect(dataset: dcf_model.CompanyDataset, valuation_date: date) -> dict | N
         "wacc": wacc_result,
         "terminal_growth": terminal.terminal_growth,
         "exit_multiple": terminal.exit_multiple,
-        "stub": terminal.stub,
+        "elapsed": terminal.elapsed,
         "mid_year": terminal.mid_year,
+        "ronic": terminal.ronic,
+        "terminal_tax_rate": terminal.terminal_tax_rate,
+        "ebita_proxy": terminal.ebita_proxy,
+        "spread_table_as_of": rates.spread_table_as_of,
+        "growth_fade_to": fade_to,
+        "growth_hold": entered.hold,
+        "growth_basis": entered.growth_basis,
+        "assumed_margins": entered.assumed_margins,
+        "acquisitions_in_capex": entered.acquisitions_in_capex,
         "shares": shares,
         "share_basis": share_basis,
         "include_sti": bridge.include_sti,
@@ -241,9 +372,9 @@ def collect(dataset: dcf_model.CompanyDataset, valuation_date: date) -> dict | N
         "base_fcff": base_fcff,
         "headline_method": terminal.headline_method,
         "sbc": bridge.sbc,
-        "deduct_sbc": bridge.deduct_sbc,
         "etr": etr,
         "erp": rates.erp,
+        "beta": rates.beta,
         "risk_free": rates.risk_free,
         "beta_outcome": rates.beta_outcome,
         "records": records,
@@ -256,21 +387,45 @@ def _forecast_drivers(
     dataset: dcf_model.CompanyDataset,
     base: dcf_model.BasePeriod,
     records: list[dcf_export.AssumptionRecord],
-) -> tuple[dcf.DriverPath, dict[str, float], set[str]]:
-    """The six drivers, plus every fiscal year any of them averaged over."""
+) -> _Drivers:
+    """The six drivers, the shape of the growth and margin paths, and the periods used."""
     st.markdown("#### Forecast drivers")
     with st.container(border=True):
         st.caption(
             f"Base period: **{base.label}** — {base.detail} "
             f"Balance sheet as of **{base.stocks_as_of}**."
         )
-        years = st.slider("Forecast years", 5, 10, 5, key="dcf_input_years")
+        years = st.slider(
+            "Forecast years", 5, 15, 10, key="dcf_input_years",
+            help="Ten years by default, so a company still growing well above the "
+                 "terminal rate has room to compound before it fades. The excess return "
+                 "lives in the explicit forecast; the terminal year earns only its RONIC.",
+        )
 
         driver_values: dict[str, float] = {}
         # Every fiscal year any driver averaged over. Reconciliation failures
         # outside this set cannot reach the valuation, and the validation layer
         # scopes their severity accordingly.
         periods_in_use: set[str] = set()
+        ttm_growth = fin.ttm_revenue_growth(dataset.ttm_history, dataset.ttm_history_meta)
+        lower_growth = fin.lower_of_growth(
+            ttm_growth, fin.driver_default(dataset.ratios, "revenue_growth", "5-year CAGR")
+        )
+        trailing = {
+            # Year-1 growth defaults to the lower of the trailing rate and the
+            # five-year CAGR; the trailing rate on its own stays selectable.
+            "revenue_growth": lower_growth,
+            **{
+                key: fin.base_period_driver(
+                    key, base.flows, base.stocks, is_ttm=base.is_ttm, label=base.label
+                )
+                for key in (
+                    "operating_margin", "capex_pct_revenue", "dna_pct_revenue", "nwc_pct_revenue"
+                )
+            },
+        }
+        growth_basis = ""
+        assumed_margins: dict[str, float] = {}
         grid = st.columns(3)
         specs = [
             ("Revenue growth", "growth", "revenue_growth"),
@@ -278,18 +433,108 @@ def _forecast_drivers(
             ("Effective tax rate", "etr", "effective_tax_rate"),
             ("CapEx % of revenue", "capex", "capex_pct_revenue"),
             ("D&A % of revenue", "dna", "dna_pct_revenue"),
-            ("ΔNWC % of Δrevenue", "nwc", "dnwc_pct_drevenue"),
+            ("NWC % of revenue", "nwc", "nwc_pct_revenue"),
         ]
+        starting = {
+            "revenue_growth": "Year-1 revenue growth",
+            "operating_margin": "Starting operating margin",
+            "capex_pct_revenue": "Starting CapEx % of revenue",
+            "dna_pct_revenue": "Starting D&A % of revenue",
+        }
         for index, (label, key, driver_key) in enumerate(specs):
             with grid[index % 3]:
-                value, sourced, periods = _driver_input(
-                    label, key, dataset.ratios, driver_key
+                growth = driver_key == "revenue_growth"
+                value, sourced, periods, basis = _driver_input(
+                    starting.get(driver_key, label),
+                    key,
+                    dataset.ratios,
+                    driver_key,
+                    bases=fin.GROWTH_BASES if growth else fin.BASES,
+                    default_basis="5-year CAGR" if growth else "5-year average",
+                    trailing=trailing.get(driver_key),
+                    # Working capital is a level that swings with timing, so a
+                    # single balance sheet is offered but the average leads.
+                    trailing_is_default=driver_key != "nwc_pct_revenue",
+                    also=(ttm_growth,) if growth else (),
                 )
+                if growth:
+                    growth_basis = _effective_growth_basis(basis, lower_growth, ttm_growth)
+                if driver_key == "operating_margin" and value is not None and (
+                    basis != fin.TTM_BASIS or sourced.origin is Origin.USER
+                ):
+                    assumed_margins["Starting margin"] = value
+                if driver_key == "capex_pct_revenue":
+                    st.caption(
+                        "Cash capex only. Assets obtained under finance leases — material "
+                        "at some hyperscalers — are excluded, and their principal "
+                        "repayments sit in financing cash flow, which FCFF does not see."
+                    )
+                if driver_key == "nwc_pct_revenue":
+                    st.caption(
+                        "Working capital is held at this share of revenue, so it moves "
+                        "with each year's change in revenue. A negative share — customers "
+                        "funding the business — releases cash as revenue grows."
+                    )
                 driver_values[driver_key] = value if value is not None else 0.0
                 periods_in_use.update(periods)
                 records.append(
                     dcf_export.AssumptionRecord("Forecast drivers", label, value, sourced)
                 )
+
+        path_left, path_right = st.columns(2)
+        with path_left:
+            fade = st.toggle(
+                "Fade revenue growth toward terminal growth",
+                value=True,
+                key="dcf_input_fade",
+                help="Year-1 growth is held for the years below, then steps linearly toward "
+                     "the perpetuity rate, landing on it in the terminal year — no cliff "
+                     "between year N and the terminal value. Off holds the rate flat for "
+                     "every forecast year.",
+            )
+            hold = st.number_input(
+                "Years to hold year-1 growth",
+                min_value=1,
+                max_value=years - 1,
+                value=min(3, years - 1),
+                step=1,
+                key="dcf_input_hold",
+                disabled=not fade,
+            )
+            hold = int(min(hold, years - 1))
+        records.append(
+            dcf_export.AssumptionRecord(
+                "Forecast drivers",
+                "Growth path",
+                f"held {hold} years, then faded to terminal growth" if fade else "flat",
+                Sourced.user(float(hold if fade else 0), "Shape of the revenue growth path."),
+            )
+        )
+
+        with path_right:
+            targets = {
+                "operating_margin": _driver_target(
+                    "operating margin", "margin", driver_values["operating_margin"], years,
+                    records,
+                ),
+                "capex_pct_revenue": _driver_target(
+                    "capex % of revenue", "capex", driver_values["capex_pct_revenue"], years,
+                    records,
+                    normal=fin.normal_capex(dataset.ratios),
+                    caption="D&A stays at its starting ratio, as the margin does: the "
+                            "margin already deducts today's D&A, so move the two together "
+                            "or cash flow moves by the whole change in D&A rather than by "
+                            "its tax shield.",
+                ),
+                "dna_pct_revenue": _driver_target(
+                    "D&A % of revenue", "dna", driver_values["dna_pct_revenue"], years, records,
+                ),
+            }
+        target_margin = targets["operating_margin"]
+        if target_margin is not None:
+            assumed_margins["Target margin"] = target_margin
+
+        acquisitions_in_capex, acquisitions_share = _acquisitions_toggle(dataset, records)
 
         if dataset.capex_result.origin == "estimate":
             st.warning(
@@ -297,20 +542,159 @@ def _forecast_drivers(
                 f"Formula in use: `{dataset.capex_result.formula}`"
             )
 
-    drivers = dcf.DriverPath.flat(
-        years,
-        revenue_growth=driver_values["revenue_growth"],
-        operating_margin=driver_values["operating_margin"],
-        effective_tax_rate=driver_values["effective_tax_rate"],
-        capex_pct_revenue=driver_values["capex_pct_revenue"],
-        dna_pct_revenue=driver_values["dna_pct_revenue"],
-        dnwc_pct_drevenue=driver_values["dnwc_pct_drevenue"],
+    return _Drivers(
+        years, driver_values, periods_in_use, fade, hold, targets, growth_basis,
+        assumed_margins, acquisitions_in_capex, acquisitions_share,
     )
-    return drivers, driver_values, periods_in_use
+
+
+#: Session keys for each target toggle. The margin's predate the other two and
+#: keep their names so an open session is not reset.
+_TARGET_KEYS = {
+    "margin": ("dcf_input_target_margin_on", "dcf_input_target_margin"),
+    "capex": ("dcf_input_target_capex_on", "dcf_input_target_capex"),
+    "dna": ("dcf_input_target_dna_on", "dcf_input_target_dna"),
+}
+
+
+def _effective_growth_basis(
+    basis: str, lower: fin.DriverDefault, trailing: fin.DriverDefault
+) -> str:
+    """The basis year-1 growth actually came from.
+
+    "Lower of TTM and 5-year CAGR" resolves to one of the two, and the checks
+    need to know which: the TTM-window acquisitions warning and the
+    growth-acceleration wording apply only when the trailing rate is in use.
+    """
+    if basis != fin.LOWER_GROWTH_BASIS or not lower.ok:
+        return basis
+    if trailing.ok and lower.value == trailing.value:
+        return fin.TTM_GROWTH_BASIS
+    return "5-year CAGR"
+
+
+def _driver_target(
+    label: str,
+    key: str,
+    start: float,
+    years: int,
+    records: list[dcf_export.AssumptionRecord],
+    *,
+    normal: fin.DriverDefault | None = None,
+    caption: str = "",
+) -> float | None:
+    """An optional year-N target the driver moves to, linearly from year 1.
+
+    ``normal`` is the level history says the driver returns to — only capex
+    has one (:func:`fin.normal_capex`). Where it can be computed the target is
+    on by default and starts there, derived rather than typed; where it cannot,
+    the toggle starts off and says why. The margin and D&A have none: whether a
+    margin expands is a claim about the business, not something history
+    supplies, so their paths stay flat unless someone chooses a target.
+    Returns ``None`` when no target is set.
+    """
+    toggle_key, value_key = _TARGET_KEYS[key]
+    normalises = normal is not None and normal.ok
+    use_target = st.toggle(
+        f"Move the {label} to a target",
+        value=normalises,
+        key=toggle_key,
+        help=f"The {label} moves linearly from its starting value in year 1 to the "
+             "target in year N; the terminal year keeps the final year's value.",
+    )
+    if normalises:
+        st.caption(
+            f"On by default: the {label} reaches its own {normal.basis.lower()} by year "
+            f"{years}, so neither today's build-out nor a trough is held forever."
+        )
+    elif normal is not None:
+        st.caption(
+            f"No {normal.basis.lower()} to normalise to — {normal.detail} The starting "
+            "value is held unless you set a target."
+        )
+    if caption:
+        st.caption(caption)
+    if not use_target:
+        records.append(
+            dcf_export.AssumptionRecord(
+                "Forecast drivers", f"Target {label}", "none — flat",
+                Sourced.user(start, "No target: the starting value is held."),
+            )
+        )
+        return None
+    seed = normal.value if normalises else start
+    if value_key not in st.session_state:
+        st.session_state[value_key] = round(seed * 100, 4)
+    target_pct = st.number_input(
+        f"Target {label} in year {years} (%)",
+        step=0.5,
+        key=value_key,
+        format="%.4f",
+    )
+    target = target_pct / 100.0
+    reached = f"Reached in year {years}, linearly from year 1."
+    if normalises:
+        sourced = Sourced.derived(
+            value=normal.value,
+            source=f"{normal.basis} of reported figures",
+            formula=f"{fin.DRIVER_LABELS[normal.key]} over {normal.years_used} period(s): "
+            f"{', '.join(str(p) for p in normal.periods)}. {reached}",
+        )
+        if not _untouched(target_pct, round(normal.value * 100, 4), 4):
+            sourced = sourced.with_user_value(target)
+        common.provenance(sourced)
+        if normal.detail:
+            st.caption(f"⚠️ {normal.detail}")
+    else:
+        sourced = Sourced.user(target, reached)
+    records.append(
+        dcf_export.AssumptionRecord("Forecast drivers", f"Target {label}", target, sourced)
+    )
+    return target
+
+
+def _acquisitions_toggle(
+    dataset: dcf_model.CompanyDataset,
+    records: list[dcf_export.AssumptionRecord],
+) -> tuple[bool, float]:
+    """Folds acquisition spend into reinvestment, for a company that buys growth.
+
+    Reported revenue growth includes what acquisitions bought; capex excludes
+    what they cost. Adding the historical acquisition rate to every year's
+    capex makes the forecast pay for the growth it projects. Returns whether it
+    is on and the share of revenue added.
+    """
+    spend = fin.driver_default(dataset.ratios, fin.ACQUISITIONS_KEY, "5-year average")
+    if not spend.ok or spend.value <= 0:
+        return False, 0.0
+    include = st.toggle(
+        "Include acquisitions in reinvestment",
+        value=False,
+        key="dcf_input_acquisitions",
+        help="Adds the 5-year average of acquisition spend ÷ revenue to the capex "
+             "driver in every forecast year.",
+    )
+    st.caption(
+        f"Acquisitions averaged **{spend.value:.2%}** of revenue over "
+        f"{spend.years_used} year(s)"
+        + (" — added to capex." if include else ", not in capex.")
+    )
+    records.append(
+        dcf_export.AssumptionRecord(
+            "Forecast drivers",
+            "Acquisitions added to capex",
+            spend.value if include else 0.0,
+            Sourced.derived(spend.value, "5-year average of reported history",
+                            "Business acquisitions ÷ revenue"),
+        )
+    )
+    return include, spend.value if include else 0.0
 
 
 def _discount_inputs(
-    dataset: dcf_model.CompanyDataset, records: list[dcf_export.AssumptionRecord]
+    dataset: dcf_model.CompanyDataset,
+    base: dcf_model.BasePeriod,
+    records: list[dcf_export.AssumptionRecord],
 ) -> _Discount:
     """The three columns of the discount-rate panel, and the cost-of-debt guidance.
 
@@ -382,7 +766,10 @@ def _discount_inputs(
             help="5 years of monthly returns by default; 2 years of weekly as the alternative.",
         )
         blume = st.checkbox(
-            "Blume adjustment (0.67 × β + 0.33)", value=False, key="dcf_input_blume"
+            "Blume adjustment (0.67 × β + 0.33)", value=True, key="dcf_input_blume",
+            help="A single stock's regressed beta carries a standard error of 0.2–0.3 "
+                 "over five years; pulling it toward the market's 1.0 is the usual "
+                 "correction for that noise.",
         )
         beta_outcome = dcf_model.regress_company_beta(
             dataset,
@@ -425,9 +812,16 @@ def _discount_inputs(
                     st.rerun()
             with col_stats:
                 st.metric("Regressed β", f"{regressed.beta:.4f}", f"R² {regressed.r_squared:.3f}")
+            interval = regressed.confidence_interval
             st.caption(
                 f"Raw β {regressed.raw_beta:.4f} · {regressed.observations} {frequency} "
                 f"observations vs {regressed.index_ticker}"
+                + (
+                    f" · standard error {regressed.standard_error:.3f}, 95% interval "
+                    f"{interval[0]:.2f}–{interval[1]:.2f}"
+                    if interval is not None
+                    else ""
+                )
             )
             if beta_outcome.price_source_note:
                 st.caption(f"⚠️ {beta_outcome.price_source_note}")
@@ -449,17 +843,62 @@ def _discount_inputs(
 
     with right:
         st.markdown("**Cost of debt**")
+        synthetic, cause = _synthetic_cost_of_debt(dataset, base, risk_free)
+        if synthetic is not None:
+            default_kd = synthetic.cost_of_debt * 100
+        else:
+            default_kd = risk_free * 100
+            lookback = wacc_lib.DISCLOSED_INTEREST_LOOKBACK_YEARS
+            reason = {
+                "undisclosed": "interest expense reads 0 beside material debt, which is how "
+                "Sharadar records interest a filing does not break out — it looks "
+                f"undisclosed, and none of the last {lookback} fiscal years disclosed it either",
+                "missing": "the base period reports no interest expense line, and none of "
+                f"the last {lookback} fiscal years disclosed one either",
+                "negative": "the base period's interest line is negative — net interest "
+                "income, a net finance result rather than the cost of debt — so there is no "
+                "coverage ratio to rate",
+            }.get(cause, "EBIT or interest expense is not reported for the base period")
+            st.warning(
+                f"No synthetic rating could be formed — {reason}. The field starts at the "
+                "risk-free rate, which is a placeholder rather than an estimate; enter a "
+                "yield to maturity."
+            )
+        # Unrounded, so the risk-free placeholder is exactly the risk-free rate —
+        # rounding it to the display precision could land a hair below and trip
+        # the "cost of debt below risk-free" check on a figure nobody typed.
+        if "dcf_input_kd" not in st.session_state:
+            st.session_state["dcf_input_kd"] = default_kd
         cost_of_debt_pct = st.number_input(
             "Cost of debt — yield to maturity (%)",
-            value=5.0,
             step=0.05,
             key="dcf_input_kd",
-            help="Manual input. See the sourcing guidance below.",
+            format="%.4f",
+            help="Starts from a synthetic rating; a traded bond's yield is better. See the "
+                 "sourcing guidance below.",
         )
         cost_of_debt = cost_of_debt_pct / 100.0
-        kd_sourced = Sourced.user(
-            cost_of_debt, "Manual yield-to-maturity input — Sharadar carries no bond data."
-        )
+        from_table = synthetic is not None and _untouched(cost_of_debt_pct, default_kd, 4)
+        if from_table:
+            kd_sourced = Sourced.estimate(
+                cost_of_debt,
+                f"Synthetic rating from interest coverage — Damodaran spreads as of "
+                f"{wacc_lib.SYNTHETIC_RATINGS_AS_OF}",
+                (
+                    f"Base-period interest is {'not reported' if cause == 'missing' else 'undisclosed'}, "
+                    f"so coverage is taken from {synthetic.coverage_period}, the latest year "
+                    f"that disclosed it, and its spread applied to today's risk-free rate. "
+                    if synthetic.coverage_period
+                    else ""
+                )
+                + "The spread table drifts year to year and is an estimate; a traded "
+                "bond's yield to maturity is better evidence.",
+                formula=synthetic.formula,
+            )
+        else:
+            kd_sourced = Sourced.user(
+                cost_of_debt, "Manual yield-to-maturity input — Sharadar carries no bond data."
+            )
         common.provenance(kd_sourced)
         records.append(
             dcf_export.AssumptionRecord(
@@ -495,23 +934,37 @@ def _discount_inputs(
             )
 
         marginal_tax_pct = st.number_input(
-            "Marginal tax rate for the WACC shield (%)",
-            value=21.0,
+            "Marginal tax rate (%)",
+            value=DEFAULT_MARGINAL_TAX * 100,
             step=0.5,
             key="dcf_input_marginal_tax",
             help=(
                 "The interest tax shield is worth the *marginal* rate — what the next "
                 "dollar of interest saves — not the historical effective rate that feeds "
-                "FCFF. They are separate inputs on purpose."
+                "FCFF. They are separate inputs on purpose. The default is the 21% US "
+                "federal rate plus a typical state rate."
             ),
         )
         marginal_tax = marginal_tax_pct / 100.0
+        if dataset.is_converted or dataset.foreign_filer:
+            st.caption(
+                "⚠️ 25% is a US federal-plus-state rate. For a company taxed at home "
+                "outside the US, set this to its home country's statutory rate."
+            )
+        marginal_sourced = (
+            Sourced.estimate(
+                marginal_tax,
+                "Convention: US federal 21% plus state",
+                "A combined US statutory rate; a company taxed mostly abroad has a "
+                "different one.",
+            )
+            if _untouched(marginal_tax_pct, DEFAULT_MARGINAL_TAX * 100, 4)
+            else Sourced.user(marginal_tax, "Statutory marginal rate for the tax shield.")
+        )
+        common.provenance(marginal_sourced)
         records.append(
             dcf_export.AssumptionRecord(
-                "Discount rate",
-                "Marginal tax rate",
-                marginal_tax,
-                Sourced.user(marginal_tax, "Statutory marginal rate for the tax shield."),
+                "Discount rate", "Marginal tax rate", marginal_tax, marginal_sourced
             )
         )
 
@@ -521,29 +974,95 @@ def _discount_inputs(
             "Open FINRA's fixed income data", FINRA_FIXED_INCOME_URL, width="stretch"
         )
 
-    return _Discount(risk_free, erp, beta_value, beta_outcome, cost_of_debt, marginal_tax)
+    return _Discount(
+        risk_free, erp, beta_value, beta_outcome, cost_of_debt, marginal_tax,
+        wacc_lib.SYNTHETIC_RATINGS_AS_OF_DATE if from_table else None,
+    )
+
+
+def _synthetic_cost_of_debt(
+    dataset: dcf_model.CompanyDataset, base: dcf_model.BasePeriod, risk_free: float
+) -> tuple[wacc_lib.SyntheticCostOfDebt | None, str]:
+    """The synthetic-rating cost of debt — see :func:`wacc.resolve_synthetic_cost_of_debt`.
+
+    Coverage is a ratio, so the reporting currency does not matter.
+    """
+    flows = base.flows
+    ebit = flows.get("ebit")
+    interest = fin.interest_expense(pd.DataFrame([flows]))
+    interest_value = (
+        float(interest.iloc[0]) if not interest.empty and not pd.isna(interest.iloc[0]) else None
+    )
+    debt = fin.total_debt(pd.DataFrame([base.stocks]))
+    debt_value = float(debt.iloc[0]) if not debt.empty and not pd.isna(debt.iloc[0]) else None
+    annual = dataset.annual
+    history: list[tuple[str, float | None, float | None]] = []
+    if not annual.empty and "ebit" in annual.columns:
+        annual_interest = fin.interest_expense(annual)
+        history = [
+            (
+                f"FY{label}",
+                None if pd.isna(annual.loc[label, "ebit"]) else float(annual.loc[label, "ebit"]),
+                None if pd.isna(annual_interest.loc[label]) else float(annual_interest.loc[label]),
+            )
+            for label in annual.index
+        ]
+    return wacc_lib.resolve_synthetic_cost_of_debt(
+        float(ebit) if ebit is not None and not pd.isna(ebit) else None,
+        interest_value,
+        risk_free,
+        debt_value,
+        history,
+    )
 
 
 def _share_count(
     dataset: dcf_model.CompanyDataset, records: list[dcf_export.AssumptionRecord]
 ) -> tuple[float, str] | None:
-    """The share count value per share divides by, and a label saying which one."""
+    """The share count value per share divides by, and a label saying which one.
+
+    The default is today's count plus the dilution the diluted count carries
+    over the basic one. The weighted-average count lags a company buying back
+    stock by the buyback, and understates value per share by as much; the bare
+    point-in-time count ignores options and RSUs altogether.
+    """
     share_basis_choice = st.radio(
         "Share count basis for value per share",
-        ["Diluted weighted-average (TTM)", "Point-in-time shares outstanding"],
+        _SHARE_BASES,
         horizontal=True,
         key="dcf_input_share_basis",
         help=(
-            "The spec's default is the diluted weighted-average count. The point-in-time "
-            "count is more current but excludes option and RSU dilution."
+            "Point-in-time + dilution: the latest cover-page count plus weighted diluted "
+            "less weighted basic shares, a proxy for in-the-money options and RSUs. "
+            "Sharadar has no treasury-stock-method table, so the proxy is the best "
+            "dilution figure available."
         ),
     )
-    if share_basis_choice.startswith("Diluted") and dataset.shares_weighted_diluted:
+    point_in_time = dataset.shares_point_in_time
+    dilution = None
+    if dataset.shares_weighted_diluted and dataset.shares_weighted_basic:
+        dilution = max(dataset.shares_weighted_diluted - dataset.shares_weighted_basic, 0.0)
+
+    if share_basis_choice == _SHARE_BASES[0] and point_in_time and dilution is not None:
+        shares = point_in_time + dilution
+        share_basis = (
+            f"Point-in-time outstanding (as of {dataset.shares_point_in_time_date}) + "
+            f"{dilution:,.0f} dilution ({dataset.shares_weighted_label} diluted − basic)"
+        )
+    elif share_basis_choice == _SHARE_BASES[1] and dataset.shares_weighted_diluted:
         shares = dataset.shares_weighted_diluted
         share_basis = f"Diluted weighted-average ({dataset.shares_weighted_label})"
-    elif dataset.shares_point_in_time:
-        shares = dataset.shares_point_in_time
+    elif point_in_time:
+        shares = point_in_time
         share_basis = f"Point-in-time outstanding (as of {dataset.shares_point_in_time_date})"
+        if share_basis_choice == _SHARE_BASES[0]:
+            st.caption(
+                "No weighted basic and diluted pair is reported, so no dilution could be "
+                "added; this is the bare point-in-time count."
+            )
+    elif dataset.shares_weighted_diluted:
+        shares = dataset.shares_weighted_diluted
+        share_basis = f"Diluted weighted-average ({dataset.shares_weighted_label})"
     else:
         common.render_blocking(
             "No share count available",
@@ -555,7 +1074,13 @@ def _share_count(
     st.caption(
         f"Using **{shares:,.0f}** shares — {share_basis}. "
         f"Sharadar provides no treasury-stock-method calculation for outstanding options and "
-        f"RSUs, so even the diluted count is not fully loaded."
+        f"RSUs, and no if-converted treatment of convertibles, so no basis is fully loaded."
+        + (
+            f" Counts are per ADR: Sharadar's share factor of {dataset.share_factor:g} is "
+            "applied to every one."
+            if dataset.share_factor != 1.0
+            else ""
+        )
     )
     records.append(
         dcf_export.AssumptionRecord(
@@ -607,32 +1132,96 @@ def _weighted_cost(
         wacc_columns[4].metric("Debt weight", f"{wacc_result.debt_weight:.1%}")
         st.caption(
             f"`{wacc_result.formula}` · E = last close × point-in-time shares "
-            f"({common.money(equity_value, dataset.currency)}) · D = book value of total debt "
-            f"({common.money(debt_value, dataset.currency)}), as of {base.stocks_as_of}."
+            f"({common.money(equity_value, dataset.valuation_currency)}) · D = book value of total debt "
+            f"({common.money(debt_value, dataset.valuation_currency)}), as of {base.stocks_as_of}."
         )
     return wacc_result
 
 
 def _terminal_and_conventions(
     dataset: dcf_model.CompanyDataset,
+    base: dcf_model.BasePeriod,
     valuation_date: date,
+    wacc_result: wacc_lib.WaccResult,
+    marginal_tax: float,
     records: list[dcf_export.AssumptionRecord],
 ) -> _Terminal:
-    """Both terminal value inputs, the headline choice, and the discounting conventions."""
+    """Both terminal value inputs, the terminal year, the headline choice, and timing."""
     st.markdown("#### Terminal value and conventions")
     with st.container(border=True):
         col_a, col_b, col_c = st.columns(3)
         with col_a:
             terminal_growth_pct = st.number_input(
-                "Perpetuity growth rate (%)", value=2.5, step=0.1, key="dcf_input_g"
+                "Perpetuity growth rate (%)",
+                value=DEFAULT_TERMINAL_GROWTH * 100,
+                step=0.1,
+                key="dcf_input_g",
             )
             terminal_growth = terminal_growth_pct / 100.0
+            growth_sourced = (
+                Sourced.estimate(
+                    terminal_growth,
+                    "Convention: long-run inflation plus modest real growth",
+                    "A default, not a measurement. It should sit at or below the "
+                    "risk-free rate, the market's own long-run nominal growth.",
+                )
+                if _untouched(terminal_growth_pct, DEFAULT_TERMINAL_GROWTH * 100, 4)
+                else Sourced.user(terminal_growth, "Gordon growth rate.")
+            )
+            common.provenance(growth_sourced)
             records.append(
                 dcf_export.AssumptionRecord(
-                    "Terminal value",
-                    "Perpetuity growth",
-                    terminal_growth,
-                    Sourced.user(terminal_growth, "Gordon growth rate."),
+                    "Terminal value", "Perpetuity growth", terminal_growth, growth_sourced
+                )
+            )
+
+            ronic, ronic_sourced = _return_on_new_capital(dataset, wacc_result)
+            common.provenance(ronic_sourced)
+            incremental_return_slot = st.empty()
+            records.append(
+                dcf_export.AssumptionRecord(
+                    "Terminal value", "Return on new invested capital",
+                    wacc_result.wacc if ronic is None else ronic, ronic_sourced,
+                )
+            )
+
+            terminal_at_marginal = st.toggle(
+                "Terminal tax at the marginal rate",
+                value=True,
+                key="dcf_input_terminal_tax",
+                help="Low effective rates from credits, deferrals or a foreign mix rarely "
+                     "last forever. On: the terminal year pays the marginal rate. Off: it "
+                     "keeps the forecast's effective rate in perpetuity.",
+            )
+            terminal_tax_rate = marginal_tax if terminal_at_marginal else None
+
+            ebita_proxy = st.toggle(
+                "Terminal NOPAT before amortisation (EBITA proxy)",
+                value=True,
+                key="dcf_input_ebita_proxy",
+                help="Adds back max(D&A − capex, 0) from the final forecast year, grown at "
+                     "g, before tax in year N + 1 — amortisation of acquired intangibles "
+                     "that capex never replaces and that runs off. Off: the terminal year "
+                     "starts from EBIT, which keeps the charge but loses the add-back the "
+                     "forecast years had.",
+            )
+            st.caption(
+                "Moves the Gordon value, and the exit row's implied RONIC and "
+                "zero-reinvestment growth, which read the same NOPAT; never the exit value."
+            )
+            records.append(
+                dcf_export.AssumptionRecord(
+                    "Terminal value", "EBITA proxy", "on" if ebita_proxy else "off",
+                    Sourced.user(float(ebita_proxy), "Amortisation add-back in year N + 1."),
+                )
+            )
+            records.append(
+                dcf_export.AssumptionRecord(
+                    "Terminal value", "Terminal tax rate",
+                    terminal_tax_rate if terminal_tax_rate is not None else "forecast ETR",
+                    Sourced.user(marginal_tax, "Marginal rate from the discount panel.")
+                    if terminal_at_marginal
+                    else Sourced.user(0.0, "Final forecast year's effective rate."),
                 )
             )
         with col_b:
@@ -657,6 +1246,12 @@ def _terminal_and_conventions(
                 else Sourced.user(exit_multiple, "Manually set exit multiple.")
             )
             common.provenance(exit_sourced)
+            st.caption(
+                "The default is the company's *own* recent multiple, earned while it grew "
+                "at its historical rate. By year N the forecast has slowed it toward "
+                "terminal growth, so a mature multiple — a peer or sector median — is "
+                "often the more consistent choice."
+            )
             records.append(
                 dcf_export.AssumptionRecord(
                     "Terminal value", "Exit EV/EBITDA multiple", exit_multiple, exit_sourced
@@ -673,45 +1268,147 @@ def _terminal_and_conventions(
             headline_method = _HEADLINE_METHODS[headline_label]
             mid_year = st.toggle(
                 "Mid-year discounting", value=True, key="dcf_input_midyear",
-                help="Mid-year: DF = 1 ÷ (1 + WACC)^(t − 0.5). Applied to the terminal value too.",
+                help="Mid-year: each year's cash flow is discounted from the middle of the "
+                     "year. Applies to the Gordon value, a perpetuity of such flows, but "
+                     "not to an exit multiple, which is a sale at the end of year N.",
             )
 
-        fye = fin.fiscal_year_end(
-            dataset.fiscal_year_end_month,
-            valuation_date,
-            pd.Timestamp(dataset.annual_meta["report_date"].iloc[-1]).date()
-            if not dataset.annual_meta.empty
-            and not pd.isna(dataset.annual_meta["report_date"].iloc[-1])
-            else None,
-        )
-        if fye is None:
-            stub = 1.0
+        elapsed = 0.0
+        if base.flows_as_of is None:
             st.warning(
-                "No fiscal year end could be read from the reported periods, so the stub "
-                "computed and the first forecast year is treated as a full year."
+                "The base period's end date was not reported, so the forecast is discounted "
+                "as if it ended today."
             )
+            elapsed_detail = "no base-period end date available"
         else:
-            stub = dcf.stub_fraction(valuation_date, fye)
+            elapsed = dcf.elapsed_years(base.flows_as_of, valuation_date)
+            elapsed_detail = (
+                f"{(valuation_date - base.flows_as_of).days} days from {base.flows_as_of} "
+                f"to {valuation_date} ÷ 365"
+            )
             st.caption(
-                f"**Stub period:** {stub:.4f} of a year — {(fye - valuation_date).days} days "
-                f"from {valuation_date} to the next fiscal year end of {fye} ÷ 365. "
-                f"The first period's cash flow scales by this fraction and its discount "
-                f"exponent is {'half of it' if mid_year else 'the fraction itself'}."
+                f"**Timing:** year 1 is the twelve months after the base period ends on "
+                f"**{base.flows_as_of}**, the same date as the balance sheet the bridge "
+                f"reads. The value is struck there and rolled forward **{elapsed:.4f}** "
+                f"years to {valuation_date} at the WACC, so it moves smoothly with the date "
+                f"and changes step only when a new quarter is filed."
             )
         records.append(
             dcf_export.AssumptionRecord(
                 "Conventions",
-                "Stub fraction",
-                stub,
-                Sourced.derived(
-                    stub,
-                    "Fiscal year end derived from the latest annual report period",
-                    f"days to {fye} ÷ 365" if fye else "no fiscal year end available",
-                ),
+                "Years from base period end to valuation date",
+                elapsed,
+                Sourced.derived(elapsed, "Base period end date", elapsed_detail),
             )
         )
 
-    return _Terminal(terminal_growth, exit_multiple, headline_method, mid_year, stub)
+    return _Terminal(
+        terminal_growth, exit_multiple, headline_method, mid_year, elapsed, ronic,
+        terminal_tax_rate, ebita_proxy, incremental_return_slot,
+    )
+
+
+#: Where the terminal year's return on new capital comes from. The company's
+#: own ROIC leads, and is the default, wherever its history supplies one.
+_OWN_ROIC = "Company's own ROIC"
+_RONIC_AT_WACC = "Equal to the WACC"
+_RONIC_MANUAL = "Manual"
+
+
+def _return_on_new_capital(
+    dataset: dcf_model.CompanyDataset, wacc_result: wacc_lib.WaccResult
+) -> tuple[float | None, Sourced]:
+    """The terminal year's RONIC and its provenance; ``None`` means the WACC.
+
+    ``None`` rather than the WACC's value, so the perpetuity keeps tracking the
+    WACC wherever it moves — the sensitivity grid reruns it at other rates. The
+    company's own return is used only above the WACC: below it, the default
+    would have growth destroy value, which is a claim to make on purpose, so it
+    takes the WACC and says why. Growth that destroys value stays available by
+    hand.
+    """
+    wacc = wacc_result.wacc
+    own = fin.historical_roic(dataset.annual)
+    options = ((_OWN_ROIC,) if own.ok else ()) + (_RONIC_AT_WACC, _RONIC_MANUAL)
+    choice = st.radio(
+        "Return on new invested capital (RONIC)",
+        options,
+        key="dcf_input_ronic_basis",
+        help="The terminal year reinvests g ÷ RONIC of NOPAT to grow at g. Above the "
+             "WACC, growth beyond the forecast creates value; at it, growth neither "
+             "creates nor destroys any — the floor for a company without a durable "
+             "advantage. However high it goes, the Gordon value rises by at most "
+             "WACC ÷ (WACC − g).",
+    )
+    if not own.ok:
+        st.caption(f"No own ROIC to default to — {own.detail}")
+    at_wacc = Sourced.estimate(
+        wacc, "Set equal to the WACC", "No value is created by growth after the forecast."
+    )
+
+    if choice == _OWN_ROIC:
+        formula = (
+            "NOPAT ÷ average invested capital (equity + debt + minority interest − cash − "
+            f"short-term investments), median of {own.years_used} fiscal year(s): "
+            f"{', '.join(own.periods)}"
+        )
+        if own.detail:
+            st.caption(f"⚠️ {own.detail}")
+        if own.value <= wacc:
+            st.caption(
+                f"The company's own ROIC, {own.value:.1%}, does not exceed its WACC, so new "
+                "capital is taken to earn the WACC: growth that destroys value is not "
+                "assumed by default."
+            )
+            return None, Sourced.estimate(
+                wacc, "Set equal to the WACC",
+                f"Own ROIC {own.value:.2%} does not exceed the WACC — {formula}.",
+            )
+        return own.value, Sourced.derived(own.value, f"{own.basis} of reported figures", formula)
+    if choice == _RONIC_AT_WACC:
+        return None, at_wacc
+
+    if "dcf_input_ronic" not in st.session_state:
+        seed = own.value if own.ok and own.value > wacc else wacc
+        st.session_state["dcf_input_ronic"] = round(seed * 100, 2)
+    ronic_pct = st.number_input(
+        "Return on new invested capital (%)", step=0.5, key="dcf_input_ronic", min_value=0.1,
+    )
+    ronic = ronic_pct / 100.0
+    return ronic, Sourced.user(ronic, "Return earned on terminal reinvestment.")
+
+
+def _show_incremental_return(
+    terminal: _Terminal,
+    base: dcf_model.BasePeriod,
+    drivers: dcf.DriverPath,
+    wacc_result: wacc_lib.WaccResult,
+) -> None:
+    """Fills the slot beside the RONIC input with the forecast's own return.
+
+    Information, not a check: it shows how much excess return the explicit
+    forecast carries before the terminal year drops to its RONIC. A projection
+    is only arithmetic, so building one here to measure it costs nothing.
+    """
+    revenue, ebit = base.flows.get("revenue"), base.flows.get("ebit")
+    if revenue is None or ebit is None or pd.isna(revenue) or pd.isna(ebit):
+        terminal.incremental_return_slot.caption(
+            "Forecast incremental return: not available — the base period has no "
+            "revenue or operating income."
+        )
+        return
+    projection = dcf.project(
+        float(revenue), drivers, wacc=wacc_result.wacc, elapsed=terminal.elapsed,
+        mid_year=terminal.mid_year,
+    )
+    base_nopat = float(ebit) * (1.0 - drivers.effective_tax_rate[0])
+    value = dcf.incremental_return_on_capital(projection, base_nopat)
+    text = f"{value:.1%}" if value is not None else "not meaningful (no net reinvestment)"
+    terminal.incremental_return_slot.caption(
+        f"**Forecast incremental return on capital: {text}** — (NOPAT in year "
+        f"{drivers.years} − base NOPAT) ÷ Σ (capex − D&A + ΔNWC). The excess return the "
+        f"explicit forecast carries before the terminal year earns its RONIC."
+    )
 
 
 def _cash_sbc_and_bridge(
@@ -746,8 +1443,8 @@ def _cash_sbc_and_bridge(
             )
             short_term = stocks.get("short_term_investments")
             st.caption(
-                f"Balance-sheet cash {common.money(cash_value, dataset.currency)} · short-term "
-                f"investments {common.money(short_term, dataset.currency)} "
+                f"Balance-sheet cash {common.money(cash_value, dataset.valuation_currency)} · short-term "
+                f"investments {common.money(short_term, dataset.valuation_currency)} "
                 f"(as of {base.stocks_as_of})"
             )
 
@@ -785,68 +1482,58 @@ def _cash_sbc_and_bridge(
                 )
             common.provenance(sbc_sourced)
 
-            deduct_sbc = st.toggle(
-                "Deduct SBC from FCFF (treat as a real cost)",
-                value=False,
-                key="dcf_input_deduct_sbc",
-                disabled=sbc is None,
-                help=(
-                    "Standard FCFF adds SBC back as non-cash, which operating cash flow has "
-                    "already done. Deducting it instead treats it as the economic cost it is. "
-                    "Inert until an SBC figure exists."
-                ),
-            )
             revenue_base = base.flows.get("revenue")
             if sbc and revenue_base:
                 st.caption(f"SBC ÷ revenue: **{sbc / float(revenue_base):.2%}**")
-
-            # The number on its own is inert, and that surprises people. Standard
-            # FCFF already adds SBC back as a non-cash charge inside operating
-            # cash flow, so "add back" is a no-op — the figure only moves the
-            # valuation once it is being deducted.
-            if sbc is not None and not deduct_sbc:
+            if sbc is not None:
                 st.info(
-                    "**This figure is not changing the valuation yet.** Standard FCFF adds "
-                    "SBC back as a non-cash charge, which operating cash flow has already "
-                    "done — so entering it alone is a no-op by construction. Turn on "
-                    "**Deduct SBC from FCFF** above to treat it as a real cost.",
+                    "**SBC is expensed, once.** The operating margin is taken from GAAP "
+                    "operating income, which already deducts it, so this figure is shown "
+                    "for reference and does not move the valuation. Most published FCF "
+                    "figures add it back, so this model's FCFF sits below theirs by about "
+                    "this amount.",
                     icon="ℹ️",
-                )
-            elif sbc is not None and deduct_sbc:
-                st.caption(
-                    f"Deducting {common.money(sbc, dataset.currency)} from FCFF, grown with "
-                    f"revenue across the forecast."
                 )
             records.append(
                 dcf_export.AssumptionRecord(
                     "Cash flow", "Stock-based compensation", sbc, sbc_sourced,
-                    note="Deducted from FCFF" if deduct_sbc else "Added back (standard FCFF)",
+                    note="Expensed inside operating income; not added back",
                 )
             )
 
         with col_c:
             st.markdown("**Non-operating assets**")
             lt_investments = stocks.get("long_term_investments")
-            default_non_operating = (
-                float(lt_investments) if lt_investments is not None and not pd.isna(lt_investments)
-                else 0.0
-            )
+            reported_lt = lt_investments is not None and not pd.isna(lt_investments)
+            if reported_lt:
+                st.caption(
+                    f"Sharadar reports **{common.money(lt_investments, dataset.valuation_currency)}** of "
+                    f"non-current investments (as of {base.stocks_as_of}), at book value. It "
+                    "mixes marketable securities with equity-method stakes and restricted "
+                    "balances, so it is not added unless you choose to."
+                )
+            else:
+                st.caption(
+                    "Sharadar reports no non-current investments line for this company."
+                )
             non_operating = st.number_input(
                 "Non-operating assets to add",
-                value=default_non_operating,
+                value=0.0,
                 step=1e8,
                 format="%.0f",
                 key="dcf_input_nonop",
                 help="Long-term and equity-method investments that the operating forecast "
-                     "does not already capture.",
+                     "does not already capture. Opt-in: the reported figure is at book and "
+                     "mixes operating and non-operating holdings.",
             )
-            if lt_investments is None or pd.isna(lt_investments):
-                st.caption(
-                    "Sharadar reports no non-current investments line for this company, so this "
-                    "starts at zero by absence rather than by measurement."
+            records.append(
+                dcf_export.AssumptionRecord(
+                    "Bridge", "Non-operating assets", non_operating,
+                    Sourced.user(non_operating, "Opt-in addition to the equity bridge."),
                 )
+            )
 
-    return _Bridge(include_sti, cash_floor, sbc, deduct_sbc, non_operating)
+    return _Bridge(include_sti, cash_floor, sbc, non_operating)
 
 
 def _render_fcff_panel(
@@ -863,11 +1550,11 @@ def _render_fcff_panel(
         with left:
             st.markdown("**Method A — cash flow statement build**")
             st.code("FCFF = CFO + Interest Expense × (1 − tax rate) − CapEx")
-            st.metric("FCFF (method A)", common.money(base_fcff.method_a, dataset.currency))
+            st.metric("FCFF (method A)", common.money(base_fcff.method_a, dataset.valuation_currency))
         with right:
             st.markdown("**Method B — income statement build**")
             st.code("NOPAT = EBIT × (1 − tax rate)\nFCFF  = NOPAT + D&A − CapEx − ΔNWC")
-            st.metric("FCFF (method B)", common.money(base_fcff.method_b, dataset.currency))
+            st.metric("FCFF (method B)", common.money(base_fcff.method_b, dataset.valuation_currency))
 
         gap = base_fcff.divergence
         if gap is not None:
@@ -882,7 +1569,7 @@ def _render_fcff_panel(
                     "Input": name,
                     "Value": (
                         f"{value:,.4f}" if name == "Tax rate"
-                        else common.money(value, dataset.currency)
+                        else common.money(value, dataset.valuation_currency)
                     ) if value is not None else "not reported",
                 }
                 for name, value in base_fcff.inputs.items()

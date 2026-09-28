@@ -111,8 +111,8 @@ def _fetch_daily_metrics(ticker: str, start: str | None = None) -> pd.DataFrame:
 def fetch_daily_metrics(ticker: str, start: str | None = None) -> pd.DataFrame:
     """Daily valuation ratios: ``ev evebit evebitda marketcap pb pe ps``.
 
-    ``fetch_prices`` merges only ``marketcap`` and ``evebitda`` into the price
-    frame because that is all the DCF needs; this exposes the whole thing for
+    ``fetch_prices`` merges only ``marketcap``, ``ev`` and ``evebitda`` into the
+    price frame because that is all the DCF needs; this exposes the whole thing for
     callers that want the multiples. Both go through the same private fetcher,
     which is the point — the millions-to-raw conversion for ``marketcap`` and
     ``ev`` happens in exactly one place, and a second call site doing its own
@@ -147,13 +147,17 @@ def _fetch_prices(ticker: str, start: str | None = None) -> pd.DataFrame:
     daily = _between(fetch_daily_metrics(ticker), start, None)
     if not daily.empty:
         merged = out.merge(
-            daily[[c for c in ("date", "marketcap", "evebitda") if c in daily.columns]],
+            daily[[c for c in ("date", "marketcap", "ev", "evebitda") if c in daily.columns]],
             left_on="Date",
             right_on="date",
             how="left",
         ).drop(columns=["date"])
         merged = merged.rename(
-            columns={"marketcap": "Market-Cap", "evebitda": "EV/EBITDA - ttm"}
+            columns={
+                "marketcap": "Market-Cap",
+                "ev": "Enterprise Value",
+                "evebitda": "EV/EBITDA - ttm",
+            }
         )
         # Sharadar's market cap is sharesbas × split-adjusted close × sharefactor,
         # so dividing it back out recovers the share count on the same basis.

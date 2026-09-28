@@ -110,6 +110,15 @@ CONCEPTS: tuple[Concept, ...] = (
             ("Earnings per Basic Share",)),
     Concept("eps_diluted", "Earnings Per Share, Diluted", "PL",
             ("Earnings per Diluted Share",)),
+    Concept("net_income_nci", "Net Income to Non-Controlling Interests", "PL",
+            ("Net Income to Non-Controlling Interests",),
+            note="Cross-checks the derived minority interest: a balance-sheet NCI "
+                 "with no NCI income, or the reverse, points at a residual that is "
+                 "really a data error."),
+    Concept("preferred_dividends", "Preferred Dividends", "PL",
+            ("Preferred Dividends Income Statement Impact",),
+            note="SF1 has no preferred equity balance, so a non-zero dividend is the "
+                 "only sign that the bridge is missing a claim senior to common."),
     Concept("derived_ebit_reported", "EBIT (Sharadar definition)", "PL",
             ("Earning Before Interest & Taxes (EBIT)",),
             note="Net income plus tax and interest. Differs from operating income "
@@ -142,7 +151,9 @@ CONCEPTS: tuple[Concept, ...] = (
                  "as assets less liabilities less equity."),
     Concept("long_term_investments", "Long-Term Investments", "BS",
             ("Investments Non-Current",),
-            note="Non-operating asset; only enters the bridge if the user opts in."),
+            note="Non-operating asset; only enters the bridge if the user opts in. "
+                 "Mixes marketable securities with equity-method stakes and "
+                 "restricted balances, all at book value."),
     Concept("derived_total_debt", "Total Debt (Sharadar aggregate)", "BS",
             ("Total Debt",),
             note="Cross-checked against the sum of the current and non-current "
@@ -158,6 +169,11 @@ CONCEPTS: tuple[Concept, ...] = (
             ("Capital Expenditure",), required=True,
             note="Already signed negative for cash spent, and already net of "
                  "disposals, so there is no gross/net choice to make."),
+    Concept("acquisitions", "Business Acquisitions (net)", "CF",
+            ("Net Cash Flow - Business Acquisitions and Disposals",),
+            note="Signed negative for cash spent. Capex excludes it, while reported "
+                 "revenue growth includes what was bought, so a serial acquirer's "
+                 "history overstates organic growth relative to its capex."),
     Concept("cfi", "Net Cash from Investing Activities", "CF",
             ("Net Cash Flow from Investing",), required=True),
     Concept("cff", "Net Cash from Financing Activities", "CF",
@@ -174,6 +190,12 @@ CONCEPTS: tuple[Concept, ...] = (
             ("Free Cash Flow",),
             note="Operating cash flow less capex, on Sharadar's own definition. "
                  "Reference only — never feeds the model."),
+    Concept("fx_to_usd", "Reporting currency per USD (Sharadar)", "DERIVED",
+            ("Foreign Currency to USD Exchange Rate",),
+            note="Sharadar's `fxusd`, per period. Quoted as units of the reporting "
+                 "currency per US dollar — TSM reads about 31 — the inverse of a "
+                 "USD-per-unit spot quote; confirmed against `revenueusd = revenue ÷ "
+                 "fxusd`. 1 for a USD reporter."),
     Concept("derived_working_capital", "Working Capital (Sharadar derived)", "DERIVED",
             ("Working Capital",),
             note="Current assets less current liabilities, before the cash and "

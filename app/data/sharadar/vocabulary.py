@@ -61,6 +61,13 @@ ZERO_FILLED_INDICATORS = frozenset(
 )
 
 
+#: The currency every SEP and SFP price is quoted in. SF1's un-suffixed
+#: indicators are in the company's *reporting* currency instead (the ``usd``
+#: variants and ``fxusd`` exist for conversion), so a foreign filer's statements
+#: and its price are in different units unless someone converts them.
+PRICE_CURRENCY = "USD"
+
+
 #: SIC codes 6000-6999 are Finance, Insurance and Real Estate. Banks and
 #: insurers do not have a meaningful operating-cash-flow-less-capex FCFF, so
 #: they are rejected before anything is computed.
