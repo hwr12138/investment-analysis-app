@@ -1,4 +1,4 @@
-"""The ⚖️ Valuation tab: two sub-tabs over one peer universe.
+"""The ⚖️ Relative Valuation tab: two sub-tabs over one peer universe.
 
 *Valuation* asks what the market is paying for the company today; *Growth* asks
 how fast the thing being paid for is moving. Both answer per metric in the same

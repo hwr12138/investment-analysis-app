@@ -118,7 +118,7 @@ function per block of the panel), `checks` (banners, validation panel), `history
 avoid `valuation`, `reverse` and `export` on purpose — `app/logic/dcf/` already has modules by
 those names. Functions that cross modules are public inside the package; the rest stay private.
 
-### The ⚖️ Valuation tab and its two sub-tabs
+### The ⚖️ Relative Valuation tab and its two sub-tabs
 
 `Valuation` asks what the market pays for the company; `Growth` asks how fast the thing being
 paid for moves. Both answer per metric in the same three columns — current, the company's own 5Y
@@ -415,7 +415,7 @@ Everything about loading follows from it:
   requests a search used to make. `test_stock_research.py` counts requests per table to keep it
   that way.
 - **The selected tab is a viewing preference**, like the price window: the page's
-  `_session_reset` leaves `research_tab` alone, so a reader on ⚖️ Valuation who searches another
+  `_session_reset` leaves `research_tab` alone, so a reader on ⚖️ Relative Valuation who searches another
   ticker lands on its Valuation.
 
 Measured on the live API: search 27.6s → 3.8s; Financials ~1.2s and Insiders ~1.4s on first
@@ -486,7 +486,7 @@ View-level tests (`test_page_controls.py`, `test_acknowledgements.py`, `test_res
 import the view modules directly and monkeypatch `page.st.session_state` with a dict subclass,
 since there is no Streamlit runtime.
 
-The ⚖️ Valuation tab is tested per-module, which is the layout the rest should move to —
+The ⚖️ Relative Valuation tab is tested per-module, which is the layout the rest should move to —
 `test_research_valuation.py` and `test_research_growth.py` for the logic, and
 `..._controls.py` for each view. All six carry the `research_` prefix because
 `test_valuation.py` was already taken by the **DCF** engine's `logic/dcf/valuation.py`: two

@@ -26,7 +26,7 @@ Three behaviours are deliberate and load-bearing:
   "loading" and fail the same way. It is also why a DCF slider reruns the shell
   and the DCF and nothing else, and why no tab has a load button any more.
 
-  The selection is keyed, so it survives a new search: a reader on ⚖️ Valuation
+  The selection is keyed, so it survives a new search: a reader on ⚖️ Relative Valuation
   who searches another ticker lands on the new company's Valuation.
 """
 
@@ -53,7 +53,7 @@ from app.views.research import (
 #: without touching the rendering, and a name with no body fails a test.
 #: Only built tabs appear: an unbuilt one is not a stub in the strip.
 #:
-#: 💰 DCF sits directly before ⚖️ Valuation because the two answer the same
+#: 💰 DCF sits directly before ⚖️ Relative Valuation because the two answer the same
 #: question from opposite directions — intrinsic value from the cash flows, and
 #: what the market is paying for them — so they read as a pair.
 #:
@@ -71,13 +71,17 @@ from app.views.research import (
 #: reconciliation of everything excluded — so a reader crossing between them
 #: reads one form twice. Holdings comes second because a 13F register is context
 #: for a view, not a substitute for one.
+#:
+#: 📄 Financials closes the strip. The full statements are the reference every
+#: other tab draws on — the DCF's history, the ratios behind the comparisons —
+#: so a reader goes there to check a number, not to form the view.
 _TAB_ORDER = (
     "📊 Summary",
-    "📄 Financials",
     "💰 DCF",
-    "⚖️ Valuation",
+    "⚖️ Relative Valuation",
     "👤 Insiders",
     "🏛️ Holdings",
+    "📄 Financials",
 )
 
 #: Session key the tab strip stores its selection under. Not cleared by
@@ -207,7 +211,7 @@ def _render_tab(name: str, dataset: research.ResearchDataset, loaded: str) -> No
         # `loaded`, not the ticker box: the DCF values the company the rest of
         # this page is showing, not one half-typed into the search field.
         dcf.render(loaded)
-    elif name == "⚖️ Valuation":
+    elif name == "⚖️ Relative Valuation":
         valuation.render(dataset)
     elif name == "👤 Insiders":
         insiders.render(dataset)

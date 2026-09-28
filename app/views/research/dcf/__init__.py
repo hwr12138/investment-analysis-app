@@ -266,13 +266,12 @@ def render(ticker: str) -> None:
     # --- Company header --------------------------------------------------
     results.render_header(dataset, valuation_date)
 
-    # These slots are written to at the end of the run but occupy the position
-    # they were created in, which is how the banners end up directly under the
-    # header and above every number on the page. Page order follows the spec:
-    # banners, validation panel, historicals, assumptions, projection,
-    # valuation, export — the checks come before the answer on purpose.
+    # Written to at the end of the run, but it occupies the position it was
+    # created in, which is how the banners end up directly under the header and
+    # above every number on the page: anything wrong is seen before the answer.
+    # The full pass/fail list is reference, so it sits after the valuation,
+    # above the reverse DCF.
     banner_slot = st.container()
-    validation_slot = st.container()
 
     history.render(dataset)
 
@@ -394,9 +393,6 @@ def render(ticker: str) -> None:
     with banner_slot:
         checks.render_banners(issues, acknowledged)
 
-    with validation_slot:
-        checks.render_validation_panel(dataset, check_results, computed_inputs["tolerances"])
-
     unacknowledged_critical = [
         i for i in issues if i.severity is val.Severity.CRITICAL and i.key not in acknowledged
     ]
@@ -405,6 +401,7 @@ def render(ticker: str) -> None:
     results.render_valuation(dataset, result, computed_inputs, unacknowledged_critical)
     if output.get("sensitivity") is not None:
         results.render_sensitivity(dataset, output["sensitivity"])
+    checks.render_validation_panel(dataset, check_results, computed_inputs["tolerances"])
     if reverse_results is not None:
         implied.render(
             dataset,

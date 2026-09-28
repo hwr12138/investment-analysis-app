@@ -104,7 +104,7 @@ class ResearchDataset:
         answers a weekend or a holiday with zero rows, and a date the company
         already has a row for is a session the market was open on. It also lines
         the peers up with the company's own latest reading, which is the
-        comparison the ⚖️ Valuation tab claims to be making.
+        comparison the ⚖️ Relative Valuation tab claims to be making.
         """
         if self.daily.empty or "date" not in self.daily.columns:
             return None
@@ -247,7 +247,7 @@ def load_insiders(ticker: str, *, today: date | None = None) -> pd.DataFrame:
 def load_peers(session: date | None, *, today: date | None = None) -> pd.DataFrame:
     """Every listed company's multiples and industry on ``session``.
 
-    What the ⚖️ Valuation tab's two sub-tabs take their industry medians over.
+    What the ⚖️ Relative Valuation tab's two sub-tabs take their industry medians over.
     ``session`` is :attr:`ResearchDataset.market_session`; nothing is fetched
     without one. Keyed on dates alone, never a ticker, so one set of cache
     entries serves every company searched that day.

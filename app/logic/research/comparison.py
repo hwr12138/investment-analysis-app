@@ -1,4 +1,4 @@
-"""The machinery both ⚖️ Valuation sub-tabs are built on.
+"""The machinery both ⚖️ Relative Valuation sub-tabs are built on.
 
 Pure — no Streamlit, no network. Shared by :mod:`app.logic.research.valuation`
 and :mod:`app.logic.research.growth`, which ask the same question of different
