@@ -1,4 +1,4 @@
-"""The severity banners and the validation panel — the checks before the answer."""
+"""The severity banners, above the answer, and the validation panel, below it."""
 
 from __future__ import annotations
 

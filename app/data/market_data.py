@@ -18,8 +18,9 @@ outage for the full day.
 """
 
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
+import pandas as pd
 import requests
 import streamlit as st
 import yfinance as yf
@@ -62,6 +63,53 @@ def _yahoo_last_close(symbol: str) -> tuple[float, date | None]:
 
     stamp = closes.index[-1]
     return float(closes.iloc[-1]), (stamp.date() if hasattr(stamp, "date") else None)
+
+
+#: How far before the requested day the last close may lie and still be read as
+#: that day's level: a long weekend plus a holiday, not a gap in the series.
+HISTORY_MAX_STALENESS_DAYS = 7
+
+
+@st.cache_data(show_spinner=False, ttl=3600 * 24)
+def _cached_yahoo_history(symbol: str) -> pd.Series:
+    """Every daily close Yahoo Finance has for ``symbol``, indexed by date.
+
+    One entry per symbol, whatever day is later asked for, so reading a level
+    at each of twenty filing dates costs one request. Raises
+    :class:`FetchFailed`, like the latest-close fetch.
+    """
+    try:
+        history = yf.Ticker(symbol).history(
+            period="max", interval="1d", auto_adjust=False, timeout=10
+        )
+    except Exception:
+        raise FetchFailed(f"Could not reach Yahoo Finance for {symbol}") from None
+    if history is None or history.empty or "Close" not in history:
+        raise FetchFailed(f"Yahoo Finance returned no history for {symbol}")
+    closes = history["Close"].dropna()
+    if closes.empty:
+        raise FetchFailed(f"Yahoo Finance returned no closing levels for {symbol}")
+    closes.index = pd.DatetimeIndex([pd.Timestamp(t).date() for t in closes.index])
+    return closes.sort_index()
+
+
+def _yahoo_close_on(symbol: str, day: date) -> tuple[float, date]:
+    """The close on ``day``, or the last one before it within a week.
+
+    Raises :class:`FetchFailed` when the history cannot be read or has no close
+    near enough — a stale level is not passed off as that day's.
+    """
+    closes = _cached_yahoo_history(symbol)
+    known = closes[closes.index <= pd.Timestamp(day)]
+    if known.empty:
+        raise FetchFailed(f"Yahoo Finance has no {symbol} close on or before {day}")
+    stamp = known.index[-1].date()
+    if (day - stamp) > timedelta(days=HISTORY_MAX_STALENESS_DAYS):
+        raise FetchFailed(
+            f"The last {symbol} close before {day} is from {stamp}, more than "
+            f"{HISTORY_MAX_STALENESS_DAYS} days earlier"
+        )
+    return float(known.iloc[-1]), stamp
 
 
 # --- Treasury Rates (Yahoo Finance yield indices) ---
@@ -154,6 +202,27 @@ def fetch_10y_treasury_rate() -> Sourced:
         source=f"Yahoo Finance {TNX_SYMBOL} — 10-year Treasury constant maturity",
         as_of=as_of,
     )
+
+
+def fetch_10y_treasury_rate_on(day: date) -> Sourced:
+    """The 10-year Treasury rate at the close on ``day`` (or just before it).
+
+    For valuing a company as of a past filing date. Same source, band and
+    contract as :func:`fetch_10y_treasury_rate`: unavailable, never substituted.
+    """
+    source = f"Yahoo Finance {TNX_SYMBOL} — 10-year Treasury constant maturity"
+    try:
+        rate_pct, stamp = _yahoo_close_on(TNX_SYMBOL, day)
+    except FetchFailed as failure:
+        return Sourced.unavailable(source=source, reason=str(failure))
+    low, high = YIELD_PLAUSIBLE_BAND_PCT
+    if not low <= rate_pct <= high:
+        return Sourced.unavailable(
+            source=source,
+            reason=f"{TNX_SYMBOL} quoted {rate_pct:.2f} on {stamp}, outside the plausible "
+            f"{low:g}% to {high:g}% band",
+        )
+    return Sourced.reported(value=rate_pct / 100.0, source=source, as_of=stamp)
 
 
 # --- Equity Risk Premium & Beta ---
@@ -297,3 +366,37 @@ def fetch_fx_rate(currency: str) -> Sourced:
         as_of=as_of,
     )
 
+
+
+def fetch_fx_rate_on(currency: str, day: date) -> Sourced:
+    """US dollars per one unit of ``currency`` at the close on ``day``.
+
+    The as-of counterpart of :func:`fetch_fx_rate`, for converting a past
+    filing's base period at the rate of its own date. Tries the same two pairs,
+    the same way round.
+    """
+    currency = currency.strip().upper()
+    reasons = []
+    for symbol, invert in ((f"{currency}USD=X", False), (f"USD{currency}=X", True)):
+        try:
+            close, stamp = _yahoo_close_on(symbol, day)
+        except FetchFailed as failure:
+            reasons.append(str(failure))
+            continue
+        if close <= 0:
+            reasons.append(f"{symbol} quoted {close} on {stamp}")
+            continue
+        rate = 1.0 / close if invert else close
+        low, high = FX_PLAUSIBLE_BAND
+        if not low <= rate <= high:
+            reasons.append(f"{symbol} implies {rate:g} USD per {currency}, not plausible")
+            continue
+        return Sourced.reported(
+            value=rate,
+            source=f"Yahoo Finance {symbol}" + (" (inverted)" if invert else "")
+            + f" — USD per {currency}",
+            as_of=stamp,
+        )
+    return Sourced.unavailable(
+        source=f"Yahoo Finance ({currency}USD=X / USD{currency}=X)", reason="; ".join(reasons)
+    )

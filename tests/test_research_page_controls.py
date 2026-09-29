@@ -172,11 +172,11 @@ def test_an_empty_session_always_loads():
 #: module. `_TAB_ORDER` holds these and nothing else.
 _BUILT = (
     "📊 Summary",
-    "📄 Financials",
     "💰 DCF",
-    "⚖️ Valuation",
+    "⚖️ Relative Valuation",
     "👤 Insiders",
     "🏛️ Holdings",
+    "📄 Financials",
 )
 
 
@@ -196,7 +196,7 @@ def test_the_insiders_tab_follows_the_valuation_pair():
     """It is the check on what DCF and Valuation concluded, so it reads after
     them rather than among the company's own numbers."""
     order = list(page._TAB_ORDER)
-    assert order[order.index("⚖️ Valuation") + 1] == "👤 Insiders"
+    assert order[order.index("⚖️ Relative Valuation") + 1] == "👤 Insiders"
 
 
 def test_the_holdings_tab_follows_the_insiders_tab():
@@ -208,7 +208,13 @@ def test_the_holdings_tab_follows_the_insiders_tab():
 def test_the_dcf_tab_sits_directly_before_the_valuation_tab():
     """Intrinsic value and what the market pays for it read as a pair."""
     order = list(page._TAB_ORDER)
-    assert order[order.index("💰 DCF") + 1] == "⚖️ Valuation"
+    assert order[order.index("💰 DCF") + 1] == "⚖️ Relative Valuation"
+
+
+def test_financials_closes_the_strip():
+    """The statements are the reference the other tabs draw on, read to check a
+    number rather than to form the view."""
+    assert page._TAB_ORDER[-1] == "📄 Financials"
 
 
 def test_summary_is_the_tab_that_opens():
@@ -271,7 +277,7 @@ def test_each_tab_dispatches_to_its_own_module(rendered):
         "📊 Summary": summary.__name__,
         "📄 Financials": financials.__name__,
         "💰 DCF": "dcf:AAPL",
-        "⚖️ Valuation": valuation.__name__,
+        "⚖️ Relative Valuation": valuation.__name__,
         "👤 Insiders": insiders.__name__,
         "🏛️ Holdings": holdings.__name__,
     }
@@ -283,9 +289,9 @@ def test_each_tab_dispatches_to_its_own_module(rendered):
 
 def test_a_new_search_keeps_the_open_tab(session):
     """Which tab a reader is on is a viewing preference, not a company fact."""
-    session[page._TAB_KEY] = "⚖️ Valuation"
+    session[page._TAB_KEY] = "⚖️ Relative Valuation"
     page._session_reset("MSFT")
-    assert session[page._TAB_KEY] == "⚖️ Valuation"
+    assert session[page._TAB_KEY] == "⚖️ Relative Valuation"
 
 
 def test_every_built_tab_module_exposes_render():

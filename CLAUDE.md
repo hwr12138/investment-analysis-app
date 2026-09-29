@@ -118,7 +118,7 @@ function per block of the panel), `checks` (banners, validation panel), `history
 avoid `valuation`, `reverse` and `export` on purpose — `app/logic/dcf/` already has modules by
 those names. Functions that cross modules are public inside the package; the rest stay private.
 
-### The ⚖️ Valuation tab and its two sub-tabs
+### The ⚖️ Relative Valuation tab and its two sub-tabs
 
 `Valuation` asks what the market pays for the company; `Growth` asks how fast the thing being
 paid for moves. Both answer per metric in the same three columns — current, the company's own 5Y
@@ -403,6 +403,12 @@ Everything about loading follows from it:
   the same blocking notice on failure for every tab. No tab has a load button, and none keeps its
   payload in session state — the cache is keyed on the company, so there is nothing to clear
   when the ticker moves.
+- **📊 Summary's one fetch of its own is the chart's DCF line**, and it never holds up the
+  candles: they draw first and the line joins them once it is valued. Each filing's value is
+  cached on its own (`_dcf_point_cached`), so a window pays only for the filings it adds — 1Y is
+  six runs, 5Y twenty-two — and the line reaches back at most `DCF_LINE_MAX_YEARS` (5). Measured
+  cold on AAPL: candles 2.7s, a 5Y line 8.1s; once a company's as-reported statements are cached,
+  a further filing costs ~0.1s.
 - **The requests inside a loader go out together**, through `app/data/parallel.gather`, which
   carries the Streamlit run context into its worker threads and re-raises the first failure in
   submission order. A tolerated fetch is wrapped in `_tolerant` *before* it is handed over. The
@@ -410,13 +416,14 @@ Everything about loading follows from it:
   the cache and concurrent misses would each pay for it.
 - **One cache entry per underlying request, shared across tabs.** `_fetch_statements` reads the
   *cached* `fetch_ticker_meta`, price routing reads the cached `fetch_price_tables`, and
-  `fetch_ohlcv` and the DCF's `fetch_prices` both slice one cached full-history `_price_rows`. A
+  `fetch_ohlcv`, the DCF's `fetch_prices` and the benchmark's `fetch_index_prices` all slice one
+  cached full-history `_price_rows` — the last so a beta at each of twenty filings is one request. A
   bare `_fetch_*` call inside another fetcher silently re-requests: that was six of the 23
   requests a search used to make. `test_stock_research.py` counts requests per table to keep it
   that way.
 - **The selected tab is a viewing preference**, like the price window: the page's
-  `_session_reset` leaves `research_tab` alone, so a reader on ⚖️ Valuation who searches another
-  ticker lands on its Valuation.
+  `_session_reset` leaves `research_tab` alone, so a reader on ⚖️ Relative Valuation who searches another
+  ticker lands on its Relative Valuation.
 
 Measured on the live API: search 27.6s → 3.8s; Financials ~1.2s and Insiders ~1.4s on first
 open; the DCF makes **no** requests once Financials has been opened; Valuation's peer universe
@@ -462,6 +469,25 @@ via `_session_reset` when it notices the page's ticker has moved; the research p
 Severity banners sit above everything and do not collapse. The governing rule for that tab: it
 must be impossible to look at the output and not notice something is wrong.
 
+**The untouched assumption set lives in the model, not the panel** (`model.default_run`). The
+panel seeds its inputs from the same constants (`DEFAULT_FORECAST_YEARS`, `DEFAULT_TERMINAL_GROWTH`,
+…) and `synthetic_cost_of_debt`, and `test_dcf_history.py` runs the tab headlessly beside
+`default_run` and asserts the two headlines agree: the summary chart's DCF line ends on the tab's
+own number, and a default changed in one place and not the other fails there.
+
+**A past value is struck as the company stood that day** (`model.default_value_on(ticker, as_of)`).
+`load_company(asreported=True, as_of=...)` keeps only the rows filed by then — `AR` only, because
+under `MR` Sharadar's `datekey` is the report period and a restatement moves it — with that day's
+close, 10-year yield (`fetch_10y_treasury_rate_on`), exchange rate (`fetch_fx_rate_on`) and a beta
+regressed to it. Damodaran's ERP and the spread table have no history here, so today's stand in,
+and the chart says so. Sharadar restates **share counts for splits even under `AR`** (NVDA's
+October 2023 filing reads 24.7bn, the post-split count), so a past value per share is already on
+the basis of the split-adjusted candles — but the *traded* close before a split is not, so a past
+dataset quotes the split-adjusted close instead; the traded one overstated NVDA's pre-split market
+cap tenfold. Where the tab would ask the reader for a number (no rate, no beta, a driver with no
+history) or would block, the point is a gap (`DefaultUnavailable`), never a placeholder; a failed
+fetch raises instead (`transient=True`), so the cache in front of it never remembers an outage.
+
 ## Tests
 
 No test touches the network. `tests/conftest.py` builds payloads mirroring the real
@@ -486,7 +512,7 @@ View-level tests (`test_page_controls.py`, `test_acknowledgements.py`, `test_res
 import the view modules directly and monkeypatch `page.st.session_state` with a dict subclass,
 since there is no Streamlit runtime.
 
-The ⚖️ Valuation tab is tested per-module, which is the layout the rest should move to —
+The ⚖️ Relative Valuation tab is tested per-module, which is the layout the rest should move to —
 `test_research_valuation.py` and `test_research_growth.py` for the logic, and
 `..._controls.py` for each view. All six carry the `research_` prefix because
 `test_valuation.py` was already taken by the **DCF** engine's `logic/dcf/valuation.py`: two

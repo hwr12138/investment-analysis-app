@@ -47,6 +47,20 @@ DEFAULT_BENCHMARK = "SPY"
 #: company.
 DEFAULT_HEADLINE_METHOD = "gordon"
 
+#: The DCF tab's untouched assumption set — the view seeds its inputs from
+#: these, and :func:`default_run` builds the same set without the view, for
+#: the summary chart's line of past values. Conventions rather than
+#: measurements: each reads as an estimate on the tab until someone changes it.
+DEFAULT_FORECAST_YEARS = 10
+DEFAULT_GROWTH_HOLD = 3
+DEFAULT_TERMINAL_GROWTH = 0.025
+DEFAULT_MARGINAL_TAX = 0.25
+#: The exit multiple when the company has no EV/EBITDA history of its own — a
+#: placeholder, which never reaches the Gordon headline.
+PLACEHOLDER_EXIT_MULTIPLE = 10.0
+DEFAULT_BETA_FREQUENCY = "monthly"
+DEFAULT_BLUME = True
+
 
 @dataclass
 class BasePeriod:
@@ -220,7 +234,9 @@ def _reject_financial_sector(
         raise val.UnsupportedSectorError(ticker, sector, statements.template)
 
 
-def _spot_rate(ticker: str, statements: StatementSet) -> Sourced | None:
+def _spot_rate(
+    ticker: str, statements: StatementSet, as_of: date | None = None
+) -> Sourced | None:
     """Spot US dollars per unit of the reporting currency, or ``None`` for a USD reporter.
 
     The drivers come from the company's own reporting-currency history, so its
@@ -233,7 +249,11 @@ def _spot_rate(ticker: str, statements: StatementSet) -> Sourced | None:
     currency = (statements.currency or "").strip().upper()
     if not currency or currency == sharadar_client.PRICE_CURRENCY:
         return None
-    rate = market_data.fetch_fx_rate(currency)
+    rate = (
+        market_data.fetch_fx_rate(currency)
+        if as_of is None
+        else market_data.fetch_fx_rate_on(currency, as_of)
+    )
     if not rate.ok:
         raise val.UnsupportedCurrencyError(
             ticker, currency, sharadar_client.PRICE_CURRENCY, rate.detail or ""
@@ -250,7 +270,27 @@ def _series_value(series: pd.Series | None, key: str) -> float | None:
     return float(value)
 
 
-def load_company(ticker: str, *, asreported: bool = False) -> CompanyDataset:
+def _filed_by(statements: StatementSet, as_of: date) -> StatementSet:
+    """The statements as they stood on ``as_of``: every row filed by then.
+
+    Only meaningful for the ``AR`` dimensions, whose ``datekey`` is the SEC
+    filing date; under ``MR`` it is the report period, and a restatement moves
+    it — see :func:`load_company`.
+    """
+    cutoff = pd.Timestamp(as_of)
+    return replace(
+        statements,
+        frames={
+            name: frame[frame["Publish Date"] <= cutoff].reset_index(drop=True)
+            if "Publish Date" in frame.columns else frame
+            for name, frame in statements.frames.items()
+        },
+    )
+
+
+def load_company(
+    ticker: str, *, asreported: bool = False, as_of: date | None = None
+) -> CompanyDataset:
     """Fetches and normalises everything for one ticker.
 
     Raises :class:`~app.logic.dcf.validation.UnsupportedSectorError` for banks
@@ -263,15 +303,33 @@ def load_company(ticker: str, *, asreported: bool = False) -> CompanyDataset:
     restatements and index to the SEC filing date. The default uses ``MR``,
     which includes restatements and gives the consistent time series that ratio
     derivation needs.
+
+    ``as_of`` builds the company as it stood on a past date: only what had been
+    filed by then, prices up to then, and that day's exchange rate. It requires
+    ``asreported``, because ``AR`` is the one dimension dated by filing — under
+    ``MR`` the date is the report period and a restatement moves it, so a
+    cut-off would drop every period later restated. Share counts need no
+    adjustment: Sharadar restates them for splits even under ``AR`` (NVDA's
+    October 2023 filing reads 24.7bn shares, the post-split count), so a past
+    value per share is already on the basis of today's split-adjusted prices.
+    Every fetch is the same cached request whatever the date, so a date costs
+    arithmetic, not a request.
     """
+    if as_of is not None and not asreported:
+        raise ValueError(
+            "A past date needs the as-reported statements: the restated ones are "
+            "dated by report period, not by filing."
+        )
     ticker = ticker.strip().upper()
     listing = sharadar_client.fetch_ticker_meta(ticker)
 
-    annual_statements = sharadar_client.fetch_statements(
-        ticker, annual=True, asreported=asreported
-    )
+    def fetch(**kwargs) -> StatementSet:
+        statements = sharadar_client.fetch_statements(ticker, asreported=asreported, **kwargs)
+        return statements if as_of is None else _filed_by(statements, as_of)
+
+    annual_statements = fetch(annual=True)
     _reject_financial_sector(ticker, annual_statements, listing)
-    fx_rate = _spot_rate(ticker, annual_statements)
+    fx_rate = _spot_rate(ticker, annual_statements, as_of)
 
     schema = resolve_schema(
         annual_statements.frames, ticker, annual_statements.template
@@ -286,9 +344,7 @@ def load_company(ticker: str, *, asreported: bool = False) -> CompanyDataset:
     quarterly_all = pd.DataFrame()
     quarterly_meta_all = pd.DataFrame()
     try:
-        quarterly_statements = sharadar_client.fetch_statements(
-            ticker, annual=False, asreported=asreported
-        )
+        quarterly_statements = fetch(annual=False)
         quarterly_all, quarterly_meta_all = fin.build_concept_table(
             quarterly_statements, schema
         )
@@ -306,9 +362,7 @@ def load_company(ticker: str, *, asreported: bool = False) -> CompanyDataset:
     ttm_statements: StatementSet | None = None
     ttm_frame, ttm_meta = pd.DataFrame(), pd.DataFrame()
     try:
-        ttm_statements = sharadar_client.fetch_statements(
-            ticker, annual=False, ttm=True, asreported=asreported
-        )
+        ttm_statements = fetch(annual=False, ttm=True)
         ttm_frame, ttm_meta = fin.build_concept_table(ttm_statements, schema)
         if not ttm_frame.empty:
             ttm_series = ttm_frame.iloc[-1]
@@ -319,10 +373,15 @@ def load_company(ticker: str, *, asreported: bool = False) -> CompanyDataset:
 
     manual = fin.manual_ttm(quarterly, fin.FLOW_KEYS)
 
+    anchor = as_of or date.today()
     prices = sharadar_client.fetch_prices(
         ticker,
-        start=(date.today() - timedelta(days=365 * BETA_HISTORY_YEARS + 10)).isoformat(),
+        start=(anchor - timedelta(days=365 * BETA_HISTORY_YEARS + 10)).isoformat(),
     )
+    if as_of is not None and not prices.empty:
+        prices = prices[pd.to_datetime(prices["Date"]) <= pd.Timestamp(as_of)].reset_index(
+            drop=True
+        )
 
     # Share counts and the filing index ride along on the SF1 rows rather than
     # coming from dedicated endpoints, so these are projections of frames
@@ -376,24 +435,34 @@ def load_company(ticker: str, *, asreported: bool = False) -> CompanyDataset:
         ratios=fin.driver_ratios(annual),
     )
 
-    _attach_quote_and_shares(dataset)
+    _attach_quote_and_shares(dataset, split_adjusted=as_of is not None)
     return dataset
 
 
-def _attach_quote_and_shares(dataset: CompanyDataset) -> None:
+def _attach_quote_and_shares(dataset: CompanyDataset, *, split_adjusted: bool = False) -> None:
     """Reads the current quote and all three share-count sources onto the dataset.
 
     The point-in-time count arrives with ``sharefactor`` already applied. The
     weighted counts and EPS are per *underlying* share, so they are multiplied
     by the same factor here — otherwise an ADR's default denominator would be
     in a different unit from its price.
+
+    ``split_adjusted`` quotes the split-adjusted close instead of the traded
+    one, for a past date: the share counts are restated for every split since,
+    so the traded price before NVDA's ten-for-one split times them overstated
+    its market cap tenfold. Today the two closes are the same number.
     """
     prices = dataset.prices
     if not prices.empty:
         latest = prices.iloc[-1]
         dataset.price_date = pd.Timestamp(latest["Date"]).date()
+        quote = (
+            "Split-Adjusted Close"
+            if split_adjusted and "Split-Adjusted Close" in prices.columns
+            else "Last Closing Price"
+        )
         for column, target in (
-            ("Last Closing Price", "last_price"),
+            (quote, "last_price"),
             ("Market-Cap", "reported_market_cap"),
             ("Common Shares Outstanding", "shares_from_prices"),
         ):
@@ -645,8 +714,12 @@ def regress_company_beta(
     blume: bool = False,
     index_ticker: str = DEFAULT_BENCHMARK,
     years: int = BETA_HISTORY_YEARS,
+    as_of: date | None = None,
 ) -> BetaOutcome:
     """Regresses the company's returns on the benchmark's.
+
+    The window ends on ``as_of`` — today when it is ``None`` — so a past
+    valuation uses the beta that could have been measured then.
 
     Both sides are Sharadar total-return closes — the company from SEP, the
     benchmark ETF from SFP — so they share one adjustment convention and one
@@ -661,13 +734,16 @@ def regress_company_beta(
     if dataset.prices.empty or "Adjusted Closing Price" not in dataset.prices.columns:
         return BetaOutcome(None, "Sharadar", "No adjusted price series available.")
 
-    start = (date.today() - timedelta(days=365 * years + 10)).isoformat()
-    end = (date.today() + timedelta(days=1)).isoformat()
+    anchor = as_of or date.today()
+    start = (anchor - timedelta(days=365 * years + 10)).isoformat()
+    end = (anchor + timedelta(days=1)).isoformat()
 
     company = (
         dataset.prices.set_index("Date")["Adjusted Closing Price"].dropna().sort_index()
     )
-    company = company[company.index >= pd.Timestamp(start)]
+    company = company[
+        (company.index >= pd.Timestamp(start)) & (company.index <= pd.Timestamp(anchor))
+    ]
     index_prices = sharadar_client.fetch_index_prices(index_ticker, start, end)
 
     source = f"Sharadar adjusted closes (SEP) vs {index_ticker} (SFP)"
@@ -1319,4 +1395,323 @@ def sensitivity_grid(
         column_label=column_label,
         columns=columns,
         values=tuple(rows),
+    )
+
+
+# ---------------------------------------------------------------------------
+# The DCF tab's untouched assumption set, without the page
+# ---------------------------------------------------------------------------
+
+
+def synthetic_cost_of_debt(
+    dataset: CompanyDataset, base: BasePeriod, risk_free: float
+) -> tuple[wacc_lib.SyntheticCostOfDebt | None, str]:
+    """The synthetic-rating cost of debt — see :func:`wacc.resolve_synthetic_cost_of_debt`.
+
+    Coverage is a ratio, so the reporting currency does not matter.
+    """
+    flows = base.flows
+    ebit = flows.get("ebit")
+    interest = fin.interest_expense(pd.DataFrame([flows]))
+    interest_value = (
+        float(interest.iloc[0]) if not interest.empty and not pd.isna(interest.iloc[0]) else None
+    )
+    debt = fin.total_debt(pd.DataFrame([base.stocks]))
+    debt_value = float(debt.iloc[0]) if not debt.empty and not pd.isna(debt.iloc[0]) else None
+    annual = dataset.annual
+    history: list[tuple[str, float | None, float | None]] = []
+    if not annual.empty and "ebit" in annual.columns:
+        annual_interest = fin.interest_expense(annual)
+        history = [
+            (
+                f"FY{label}",
+                None if pd.isna(annual.loc[label, "ebit"]) else float(annual.loc[label, "ebit"]),
+                None if pd.isna(annual_interest.loc[label]) else float(annual_interest.loc[label]),
+            )
+            for label in annual.index
+        ]
+    return wacc_lib.resolve_synthetic_cost_of_debt(
+        float(ebit) if ebit is not None and not pd.isna(ebit) else None,
+        interest_value,
+        risk_free,
+        debt_value,
+        history,
+    )
+
+
+class DefaultUnavailable(Exception):
+    """An input the DCF tab would leave for the reader to type is missing.
+
+    ``transient`` marks a failed fetch — a rate that may arrive on a retry —
+    as opposed to data that is simply not there, so a caller caching results
+    can decline to cache the first.
+    """
+
+    def __init__(self, reason: str, *, transient: bool = False):
+        super().__init__(reason)
+        self.reason = reason
+        self.transient = transient
+
+
+_DRIVER_KEYS = (
+    "revenue_growth", "operating_margin", "effective_tax_rate",
+    "capex_pct_revenue", "dna_pct_revenue", "nwc_pct_revenue",
+)
+
+
+def _default_driver(dataset: CompanyDataset, base: BasePeriod, key: str) -> fin.DriverDefault:
+    """The basis the tab's selector opens on, for one driver.
+
+    Growth: the lower of TTM and the five-year CAGR, else TTM, else the CAGR.
+    Margin, capex and D&A: the base period's own ratio, else the five-year
+    average. Tax and working capital: the five-year average.
+    """
+    ratios = dataset.ratios
+    if key == "revenue_growth":
+        ttm = fin.ttm_revenue_growth(dataset.ttm_history, dataset.ttm_history_meta)
+        lower = fin.lower_of_growth(ttm, fin.driver_default(ratios, key, "5-year CAGR"))
+        for candidate in (lower, ttm):
+            if candidate.ok:
+                return candidate
+        return fin.driver_default(ratios, key, "5-year CAGR")
+    if key in ("operating_margin", "capex_pct_revenue", "dna_pct_revenue"):
+        trailing = fin.base_period_driver(
+            key, base.flows, base.stocks, is_ttm=base.is_ttm, label=base.label
+        )
+        if trailing.ok:
+            return trailing
+    return fin.driver_default(ratios, key, "5-year average")
+
+
+def _growth_basis(chosen: fin.DriverDefault, dataset: CompanyDataset) -> str:
+    """Which rate "lower of TTM and CAGR" resolved to — the checks read it."""
+    if chosen.basis != fin.LOWER_GROWTH_BASIS:
+        return chosen.basis
+    ttm = fin.ttm_revenue_growth(dataset.ttm_history, dataset.ttm_history_meta)
+    return fin.TTM_GROWTH_BASIS if ttm.ok and chosen.value == ttm.value else "5-year CAGR"
+
+
+@dataclass(frozen=True)
+class DefaultRun:
+    """The DCF tab's untouched assumption set: what :func:`run_model` and
+    :func:`build_validation_context` are called with when nobody has touched
+    an input."""
+
+    base: BasePeriod
+    drivers: dcf.DriverPath
+    model_kwargs: dict
+    context_kwargs: dict
+
+
+def default_run(
+    dataset: CompanyDataset,
+    *,
+    valuation_date: date,
+    risk_free: Sourced,
+    erp: Sourced,
+    beta: BetaOutcome,
+) -> DefaultRun:
+    """Builds the assumption set the DCF tab shows before anyone touches it.
+
+    The same defaults the tab seeds its inputs from, assembled without the
+    page, so a value can be struck for any date the dataset describes — the
+    summary chart's line of past values is this, once per filing. A test runs
+    the tab itself against this to keep the two from drifting.
+
+    Where the tab would put a placeholder in front of the reader and ask for a
+    number — no risk-free rate, no ERP, no regressed beta, a driver with no
+    history — this raises :class:`DefaultUnavailable` instead: a line of past
+    values drawn through placeholders would look like a measurement. The two
+    placeholders the tab presents as defaults are kept: a cost of debt at the
+    risk-free rate when no rating can be formed, and a generic exit multiple,
+    which never reaches the Gordon headline.
+    """
+    if not risk_free.ok:
+        raise DefaultUnavailable(f"No risk-free rate — {risk_free.detail}", transient=True)
+    if not erp.ok:
+        raise DefaultUnavailable(f"No equity risk premium — {erp.detail}", transient=True)
+    if beta.result is None:
+        raise DefaultUnavailable(f"No beta — {beta.error}")
+
+    base = base_period(dataset)
+    years = DEFAULT_FORECAST_YEARS
+    chosen = {key: _default_driver(dataset, base, key) for key in _DRIVER_KEYS}
+    missing = [fin.DRIVER_LABELS[key] for key, default in chosen.items() if not default.ok]
+    if missing:
+        raise DefaultUnavailable(f"No usable history for {', '.join(missing)}")
+    values = {key: float(default.value) for key, default in chosen.items()}
+
+    normal = fin.normal_capex(dataset.ratios)
+    capex_target = normal.value if normal.ok else values["capex_pct_revenue"]
+    drivers = dcf.DriverPath(
+        revenue_growth=dcf.growth_path(
+            values["revenue_growth"], years, DEFAULT_TERMINAL_GROWTH, hold=DEFAULT_GROWTH_HOLD
+        ),
+        operating_margin=(values["operating_margin"],) * years,
+        capex_pct_revenue=dcf.linear_path(values["capex_pct_revenue"], capex_target, years),
+        dna_pct_revenue=(values["dna_pct_revenue"],) * years,
+        effective_tax_rate=(values["effective_tax_rate"],) * years,
+        nwc_pct_revenue=(values["nwc_pct_revenue"],) * years,
+    )
+
+    rf = float(risk_free.value)
+    synthetic, _ = synthetic_cost_of_debt(dataset, base, rf)
+    cost_of_debt = synthetic.cost_of_debt if synthetic is not None else rf
+
+    point_in_time = dataset.shares_point_in_time
+    dilution = None
+    if dataset.shares_weighted_diluted and dataset.shares_weighted_basic:
+        dilution = max(dataset.shares_weighted_diluted - dataset.shares_weighted_basic, 0.0)
+    if point_in_time and dilution is not None:
+        shares, share_basis = point_in_time + dilution, "Point-in-time + dilution"
+    elif point_in_time:
+        shares, share_basis = point_in_time, "Point-in-time shares outstanding"
+    elif dataset.shares_weighted_diluted:
+        shares, share_basis = dataset.shares_weighted_diluted, "Diluted weighted-average"
+    else:
+        raise DefaultUnavailable("No share count")
+
+    debt = fin.total_debt(pd.DataFrame([base.stocks]))
+    debt_value = float(debt.iloc[0]) if not debt.empty and not pd.isna(debt.iloc[0]) else 0.0
+    try:
+        wacc_result = wacc_lib.compute_wacc(
+            equity_value=(dataset.last_price or 0.0) * (point_in_time or 0.0),
+            debt_value=debt_value,
+            risk_free_rate=rf,
+            beta=float(beta.result.beta),
+            equity_risk_premium=float(erp.value),
+            cost_of_debt=cost_of_debt,
+            marginal_tax_rate=DEFAULT_MARGINAL_TAX,
+        )
+    except ValueError as error:
+        raise DefaultUnavailable(f"The WACC cannot be weighted — {error}") from None
+
+    own = fin.historical_roic(dataset.annual)
+    ronic = own.value if own.ok and own.value > wacc_result.wacc else None
+    exit_multiple = historical_ev_ebitda(dataset)
+    elapsed = (
+        dcf.elapsed_years(base.flows_as_of, valuation_date) if base.flows_as_of else 0.0
+    )
+
+    etr_series = fin.effective_tax_rate(dataset.annual).dropna()
+    etr_window = etr_series.tail(5)
+    etr = float(etr_window.median()) if not etr_series.empty else None
+    base_fcff = base_period_fcff(
+        dataset, base,
+        tax_rate=etr if etr is not None else values["effective_tax_rate"],
+        interest_basis="gross",
+        delta_nwc=base_period_delta_nwc(dataset, base)[0],
+    )
+    sbc = base.flows.get("sbc")
+    sbc = float(sbc) if sbc is not None and not pd.isna(sbc) and sbc else None
+
+    periods_in_use = {str(p) for default in chosen.values() for p in default.periods}
+    periods_in_use.update(str(p) for p in etr_window.index)
+    if not dataset.annual.empty:
+        periods_in_use.add(str(dataset.annual.index[-1]))
+    margin = chosen["operating_margin"]
+
+    return DefaultRun(
+        base=base,
+        drivers=drivers,
+        model_kwargs=dict(
+            wacc_result=wacc_result,
+            terminal_growth=DEFAULT_TERMINAL_GROWTH,
+            exit_multiple=(
+                round(float(exit_multiple.value), 2)
+                if exit_multiple.ok else PLACEHOLDER_EXIT_MULTIPLE
+            ),
+            elapsed=elapsed,
+            mid_year=True,
+            shares=shares,
+            share_basis=share_basis,
+            include_short_term_investments=True,
+            operating_cash_floor=0.0,
+            non_operating_assets=None,
+            base_fcff=base_fcff,
+            headline_method=DEFAULT_HEADLINE_METHOD,
+            ronic=ronic,
+            terminal_tax_rate=DEFAULT_MARGINAL_TAX,
+            ebita_proxy=True,
+        ),
+        context_kwargs=dict(
+            valuation_date=valuation_date,
+            effective_tax_rate=etr,
+            beta=beta,
+            equity_risk_premium=float(erp.value),
+            terminal_growth=DEFAULT_TERMINAL_GROWTH,
+            risk_free_rate=rf,
+            sbc=sbc,
+            periods_in_use=frozenset(periods_in_use),
+            beta_in_use=float(beta.result.beta),
+            growth_basis=_growth_basis(chosen["revenue_growth"], dataset),
+            assumed_margins=(
+                {} if margin.basis == fin.TTM_BASIS else {"Starting margin": margin.value}
+            ),
+            spread_table_as_of=wacc_lib.SYNTHETIC_RATINGS_AS_OF_DATE if synthetic else None,
+        ),
+    )
+
+
+def default_value(
+    dataset: CompanyDataset,
+    *,
+    valuation_date: date,
+    risk_free: Sourced,
+    erp: Sourced,
+    beta: BetaOutcome,
+) -> ModelResult:
+    """Runs :func:`default_run` and the checks, as the tab would.
+
+    Raises :class:`DefaultUnavailable` wherever the tab would draw a blocking
+    screen instead of a number — a BLOCKING check, or a model that cannot be
+    built — so a caller plotting past values leaves a gap there, never a zero.
+    """
+    run = default_run(
+        dataset, valuation_date=valuation_date, risk_free=risk_free, erp=erp, beta=beta
+    )
+    try:
+        result = run_model(dataset, run.base, drivers=run.drivers, **run.model_kwargs)
+    except (dcf.TerminalValueError, dcf.ProjectionError) as error:
+        raise DefaultUnavailable(str(error)) from None
+    context = build_validation_context(
+        dataset, base=run.base, base_fcff=run.model_kwargs["base_fcff"], result=result,
+        drivers=run.drivers, **run.context_kwargs,
+    )
+    issues, _ = val.run_all(context, val.DEFAULT_TOLERANCES)
+    blocking = [i for i in issues if i.severity is val.Severity.BLOCKING]
+    if blocking:
+        raise DefaultUnavailable(f"{blocking[0].check}: {blocking[0].message}")
+    return result
+
+
+def default_value_on(ticker: str, as_of: date | None = None) -> ModelResult:
+    """The DCF tab's untouched headline, as the company stood on ``as_of``.
+
+    ``None`` is today, and reproduces the tab: the restated statements, today's
+    rates. A past date reads the as-reported statements filed by then, the
+    10-year yield and exchange rate of that day, and a beta regressed to it.
+    Two inputs have no history here and are today's: Damodaran's implied ERP,
+    which is scraped from his home page, and the synthetic-rating spread table,
+    which is hard-coded and refreshed each January.
+
+    Raises what :func:`load_company` raises — a bank, an unconvertible currency,
+    an unresolvable schema — and :class:`DefaultUnavailable`.
+    """
+    if as_of is None:
+        dataset = load_company(ticker)
+        risk_free = market_data.fetch_10y_treasury_rate()
+        valuation_date = date.today()
+    else:
+        dataset = load_company(ticker, asreported=True, as_of=as_of)
+        risk_free = market_data.fetch_10y_treasury_rate_on(as_of)
+        valuation_date = as_of
+    if dataset.annual.empty:
+        raise DefaultUnavailable("Nothing had been filed yet")
+    beta = regress_company_beta(
+        dataset, frequency=DEFAULT_BETA_FREQUENCY, blume=DEFAULT_BLUME, as_of=as_of
+    )
+    return default_value(
+        dataset, valuation_date=valuation_date, risk_free=risk_free,
+        erp=market_data.fetch_erp(), beta=beta,
     )

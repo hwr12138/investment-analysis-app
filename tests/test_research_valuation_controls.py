@@ -1,4 +1,4 @@
-"""The ⚖️ Valuation tab's rendering: the shell, the shared grid, and Valuation.
+"""The ⚖️ Relative Valuation tab's rendering: the shell, the shared grid, and Valuation.
 
 Imports the view modules directly and drives their builders, the same way
 ``test_research_page_controls`` does — there is no Streamlit runtime here, so
