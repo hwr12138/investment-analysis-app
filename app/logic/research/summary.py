@@ -149,6 +149,40 @@ class StatTile:
 # ---------------------------------------------------------------------------
 
 
+#: How far back the chart's DCF line reaches. Each filing is a full model run,
+#: and the ALL window would otherwise ask for thirty years of them.
+DCF_LINE_MAX_YEARS = 5
+
+
+@dataclass(frozen=True)
+class DcfLineDates:
+    """The filings the chart's DCF line needs for one price window.
+
+    ``anchor`` is the last filing before the window opens — its value is the
+    one in force at the left edge, so the line starts there rather than at the
+    first filing inside. ``start`` is where the line begins, the window's own
+    start or :data:`DCF_LINE_MAX_YEARS` back, whichever is later.
+    """
+
+    start: date
+    anchor: date | None
+    inside: tuple[date, ...]
+
+
+def dcf_line_dates(filed: list[date], window_start: date, window_end: date) -> DcfLineDates:
+    """Only the filings this window shows, so a window costs only its own runs.
+
+    Switching from 1Y to 5Y values the extra sixteen quarters then, not on the
+    search; each is cached on its own, so going back to 1Y costs nothing.
+    """
+    earliest = (pd.Timestamp(window_end) - pd.DateOffset(years=DCF_LINE_MAX_YEARS)).date()
+    start = max(window_start, earliest)
+    ordered = sorted(set(filed))
+    before = [d for d in ordered if d <= start]
+    inside = tuple(d for d in ordered if start < d <= window_end)
+    return DcfLineDates(start=start, anchor=before[-1] if before else None, inside=inside)
+
+
 def slice_period(frame: pd.DataFrame, period: str, today: date | None = None) -> pd.DataFrame:
     """Trims a date-indexed price frame to one of :data:`PERIODS`.
 

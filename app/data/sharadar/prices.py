@@ -229,12 +229,15 @@ def fetch_index_prices(index_ticker: str, start_date: str, end_date: str) -> pd.
     carries no index levels. ``SPY`` is the default stand-in for the S&P 500;
     its ``closeadj`` is a total-return series, which matches the convention on
     the company side of the regression.
+
+    A slice of the benchmark's cached full history, like the company's own
+    prices: the DCF line on the summary chart regresses a beta at every filing
+    date, and a range-keyed fetch would have paid one request per date.
     """
-    frame = fetch_price_history((index_ticker,), start_date, end_date)
-    if frame.empty:
+    rows = _between(_price_rows(index_ticker.strip().upper()), start_date, end_date)
+    if rows.empty or "closeadj" not in rows.columns:
         return pd.Series(dtype="float64", name=index_ticker)
-    series = frame[index_ticker] if index_ticker in frame.columns else frame.iloc[:, 0]
-    return series.dropna().rename(index_ticker)
+    return rows.set_index("date")["closeadj"].dropna().rename(index_ticker)
 
 
 def _fetch_ohlcv(ticker: str, start_date: str, end_date: str) -> pd.DataFrame:

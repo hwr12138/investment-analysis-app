@@ -70,8 +70,8 @@ _SHARE_BASES = (
 
 #: Pre-populated defaults that are conventions rather than measurements. Each is
 #: labelled an estimate while untouched, never "user" — the user did not set it.
-DEFAULT_TERMINAL_GROWTH = 0.025
-DEFAULT_MARGINAL_TAX = 0.25
+DEFAULT_TERMINAL_GROWTH = dcf_model.DEFAULT_TERMINAL_GROWTH
+DEFAULT_MARGINAL_TAX = dcf_model.DEFAULT_MARGINAL_TAX
 
 
 def _untouched(widget_value: float, default_value: float, decimals: int) -> bool:
@@ -396,7 +396,7 @@ def _forecast_drivers(
             f"Balance sheet as of **{base.stocks_as_of}**."
         )
         years = st.slider(
-            "Forecast years", 5, 15, 10, key="dcf_input_years",
+            "Forecast years", 5, 15, dcf_model.DEFAULT_FORECAST_YEARS, key="dcf_input_years",
             help="Ten years by default, so a company still growing well above the "
                  "terminal rate has room to compound before it fades. The excess return "
                  "lives in the explicit forecast; the terminal year earns only its RONIC.",
@@ -496,7 +496,7 @@ def _forecast_drivers(
                 "Years to hold year-1 growth",
                 min_value=1,
                 max_value=years - 1,
-                value=min(3, years - 1),
+                value=min(dcf_model.DEFAULT_GROWTH_HOLD, years - 1),
                 step=1,
                 key="dcf_input_hold",
                 disabled=not fade,
@@ -766,7 +766,8 @@ def _discount_inputs(
             help="5 years of monthly returns by default; 2 years of weekly as the alternative.",
         )
         blume = st.checkbox(
-            "Blume adjustment (0.67 × β + 0.33)", value=True, key="dcf_input_blume",
+            "Blume adjustment (0.67 × β + 0.33)", value=dcf_model.DEFAULT_BLUME,
+            key="dcf_input_blume",
             help="A single stock's regressed beta carries a standard error of 0.2–0.3 "
                  "over five years; pulling it toward the market's 1.0 is the usual "
                  "correction for that noise.",
@@ -843,7 +844,7 @@ def _discount_inputs(
 
     with right:
         st.markdown("**Cost of debt**")
-        synthetic, cause = _synthetic_cost_of_debt(dataset, base, risk_free)
+        synthetic, cause = dcf_model.synthetic_cost_of_debt(dataset, base, risk_free)
         if synthetic is not None:
             default_kd = synthetic.cost_of_debt * 100
         else:
@@ -977,42 +978,6 @@ def _discount_inputs(
     return _Discount(
         risk_free, erp, beta_value, beta_outcome, cost_of_debt, marginal_tax,
         wacc_lib.SYNTHETIC_RATINGS_AS_OF_DATE if from_table else None,
-    )
-
-
-def _synthetic_cost_of_debt(
-    dataset: dcf_model.CompanyDataset, base: dcf_model.BasePeriod, risk_free: float
-) -> tuple[wacc_lib.SyntheticCostOfDebt | None, str]:
-    """The synthetic-rating cost of debt — see :func:`wacc.resolve_synthetic_cost_of_debt`.
-
-    Coverage is a ratio, so the reporting currency does not matter.
-    """
-    flows = base.flows
-    ebit = flows.get("ebit")
-    interest = fin.interest_expense(pd.DataFrame([flows]))
-    interest_value = (
-        float(interest.iloc[0]) if not interest.empty and not pd.isna(interest.iloc[0]) else None
-    )
-    debt = fin.total_debt(pd.DataFrame([base.stocks]))
-    debt_value = float(debt.iloc[0]) if not debt.empty and not pd.isna(debt.iloc[0]) else None
-    annual = dataset.annual
-    history: list[tuple[str, float | None, float | None]] = []
-    if not annual.empty and "ebit" in annual.columns:
-        annual_interest = fin.interest_expense(annual)
-        history = [
-            (
-                f"FY{label}",
-                None if pd.isna(annual.loc[label, "ebit"]) else float(annual.loc[label, "ebit"]),
-                None if pd.isna(annual_interest.loc[label]) else float(annual_interest.loc[label]),
-            )
-            for label in annual.index
-        ]
-    return wacc_lib.resolve_synthetic_cost_of_debt(
-        float(ebit) if ebit is not None and not pd.isna(ebit) else None,
-        interest_value,
-        risk_free,
-        debt_value,
-        history,
     )
 
 
@@ -1229,7 +1194,7 @@ def _terminal_and_conventions(
             if ev_ebitda.ok:
                 multiple_default = round(float(ev_ebitda.value), 2)
             else:
-                multiple_default = 10.0
+                multiple_default = dcf_model.PLACEHOLDER_EXIT_MULTIPLE
                 st.warning(
                     f"No historical EV/EBITDA range available — {ev_ebitda.detail} "
                     "The field starts at a generic 10×, which is a placeholder rather than "

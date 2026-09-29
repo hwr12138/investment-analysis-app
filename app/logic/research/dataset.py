@@ -24,9 +24,12 @@ The peer universe costs a fixed amount rather than one request per comparable:
 single page — 5,446 rows in ~1.1s — and all three universe fetches are keyed on a
 date alone, so one cache entry serves every company searched that day.
 
-Nothing here goes through ``dcf.model.load_company``: that rejects SIC 6000–6999
-because banks and insurers have no meaningful FCFF, which is right for a
-valuation and wrong here. A research page must render JPM.
+Nothing the page itself needs goes through ``dcf.model.load_company``: that
+rejects SIC 6000–6999 because banks and insurers have no meaningful FCFF, which
+is right for a valuation and wrong here. A research page must render JPM. The
+one exception is the summary chart's DCF line, :func:`load_dcf_point`, which
+*is* a valuation — for a bank it has no line, and says so, while the chart
+draws as before.
 """
 
 from __future__ import annotations
@@ -37,6 +40,9 @@ from datetime import date
 import pandas as pd
 
 from app.data import parallel, sharadar_client
+from app.logic.dcf import model as dcf_model
+from app.logic.dcf import validation as dcf_validation
+from app.logic.dcf.schema import SchemaResolutionError
 from app.logic.research import comparison, holdings
 from app.logic.research.summary import (
     BENCHMARK,
@@ -192,6 +198,85 @@ def load_research(ticker: str, *, today: date | None = None) -> ResearchDataset:
         currency=str(profile.get("currency") or ""),
         loaded_at=today,
     )
+
+
+# ---------------------------------------------------------------------------
+# The summary chart's DCF line
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class DcfFiling:
+    """One filing the DCF value is re-struck at: its date and its period."""
+
+    filed: date
+    period: str
+
+
+def load_dcf_filings(ticker: str) -> tuple[DcfFiling, ...]:
+    """Every filing date, from the as-reported statements that carry them.
+
+    The trailing-twelve-month dimension where Sharadar has it — each quarter's
+    filing is a new base period — else the fiscal years. Every row since 2020
+    carried a filing date for all eleven companies the model is checked
+    against, foreign filers included (their 6-Ks are in ``ARQ``). A row without
+    one is left out, never dated by guesswork.
+    """
+    for annual, ttm in ((False, True), (True, False)):
+        try:
+            frame = sharadar_client.fetch_statements(
+                ticker, annual=annual, ttm=ttm, asreported=True
+            ).frame("PL")
+        except sharadar_client.TickerNotFoundError:
+            continue
+        if frame.empty or "Publish Date" not in frame.columns:
+            continue
+        rows = frame.dropna(subset=["Publish Date"])
+        return tuple(
+            DcfFiling(
+                filed=pd.Timestamp(row["Publish Date"]).date(),
+                period=f"FY{row['Fiscal Year']} {row['Fiscal Period']}",
+            )
+            for _, row in rows.iterrows()
+        )
+    return ()
+
+
+@dataclass(frozen=True)
+class DcfPoint:
+    """The DCF tab's default headline as of one date — ``None`` is today.
+
+    ``value`` is ``None`` exactly when the tab would have shown no number that
+    day, and ``reason`` says why; the chart leaves a gap there.
+    """
+
+    as_of: date | None
+    value: float | None
+    reason: str = ""
+
+
+def load_dcf_point(ticker: str, as_of: date | None = None) -> DcfPoint:
+    """One point of the line: :func:`dcf_model.default_value_on`, or why not.
+
+    Returns a gap for what will not change on a retry — a bank, a schema that
+    does not resolve, too little filed yet, a blocking check. Raises for what
+    might: a rate that did not arrive, an exchange rate Yahoo did not answer
+    for, a Sharadar request that failed — so a cache in front of this never
+    remembers an outage as a gap.
+    """
+    try:
+        result = dcf_model.default_value_on(ticker, as_of)
+    except dcf_model.DefaultUnavailable as error:
+        if error.transient:
+            raise
+        return DcfPoint(as_of, None, error.reason)
+    except (
+        dcf_validation.UnsupportedSectorError,
+        SchemaResolutionError,
+        sharadar_client.TickerNotFoundError,
+    ) as error:
+        return DcfPoint(as_of, None, str(error))
+    return DcfPoint(as_of, float(result.headline_bridge.value_per_share))
 
 
 # ---------------------------------------------------------------------------

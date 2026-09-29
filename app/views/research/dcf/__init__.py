@@ -264,7 +264,7 @@ def render(ticker: str) -> None:
     valuation_date = date.today()
 
     # --- Company header --------------------------------------------------
-    results.render_header(dataset, valuation_date)
+    headline_slot = results.render_header(dataset, valuation_date)
 
     # Written to at the end of the run, but it occupies the position it was
     # created in, which is how the banners end up directly under the header and
@@ -396,6 +396,7 @@ def render(ticker: str) -> None:
     unacknowledged_critical = [
         i for i in issues if i.severity is val.Severity.CRITICAL and i.key not in acknowledged
     ]
+    results.render_headline_value(headline_slot, dataset, result, unacknowledged_critical)
 
     results.render_projection(dataset, result)
     results.render_valuation(dataset, result, computed_inputs, unacknowledged_critical)

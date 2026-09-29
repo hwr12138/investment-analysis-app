@@ -14,7 +14,13 @@ from app.logic.dcf import validation as val
 from app.logic.dcf import valuation as dcf
 from app.views.research.dcf import common
 
-def render_header(dataset: dcf_model.CompanyDataset, valuation_date: date) -> None:
+def render_header(dataset: dcf_model.CompanyDataset, valuation_date: date):
+    """The company, its quote, and a slot for the headline value per share.
+
+    The header draws before the assumptions exist, so the value cannot be
+    written yet: the slot is returned for :func:`render_headline_value` to fill
+    once the model has run, and says so until then.
+    """
     with st.container(border=True):
         st.subheader(f"{dataset.name} ({dataset.ticker})")
         columns = st.columns(5)
@@ -38,7 +44,10 @@ def render_header(dataset: dcf_model.CompanyDataset, valuation_date: date) -> No
             price_label,
             help=f"As of {dataset.price_date}" if dataset.price_date else None,
         )
-        columns[4].metric("Market cap", common.money(dataset.reported_market_cap, dataset.valuation_currency))
+        value_slot = columns[4].empty()
+        value_slot.metric(
+            "DCF value per share", "—", help="Appears once the model has run."
+        )
 
         st.caption(
             f"Price as of {dataset.price_date} · share count as of "
@@ -59,6 +68,30 @@ def render_header(dataset: dcf_model.CompanyDataset, valuation_date: date) -> No
                 f"are in {dataset.valuation_currency}."
             )
             common.provenance(rate)
+    return value_slot
+
+
+def render_headline_value(
+    slot,
+    dataset: dcf_model.CompanyDataset,
+    result: dcf_model.ModelResult,
+    unacknowledged_critical: list[val.Issue],
+) -> None:
+    """The headline value per share in the header, beside the price it is read against.
+
+    Marked exactly as the valuation section marks it: a number that carries an
+    unacknowledged critical problem must not read as clean anywhere on the tab.
+    """
+    bridge = result.headline_bridge
+    upside = bridge.upside_vs(dataset.last_price) if dataset.last_price else None
+    marker = " ⚠️" if unacknowledged_critical else ""
+    slot.metric(
+        f"DCF value per share{marker}",
+        f"{bridge.value_per_share:,.2f}",
+        delta=f"{format_pct(upside)} vs price" if upside is not None else None,
+        help=f"Headline method: {result.headline_terminal.method}. The same figure as the "
+             "Valuation section below, under the assumptions set on this tab.",
+    )
 
 
 def _cross_implied(terminal: dcf.TerminalValue) -> str:
