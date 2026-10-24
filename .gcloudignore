@@ -1,0 +1,14 @@
+# What `gcloud builds submit` uploads as the build context. Secrets never leave.
+.gcloudignore
+.git
+.gitignore
+.github/
+.streamlit/
+.claude/
+.devcontainer/
+**/__pycache__/
+.pytest_cache/
+tests/
+assets/
+*.md
+sharadar_documentation.txt

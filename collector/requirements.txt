@@ -1,0 +1,9 @@
+# The collector image only. The Streamlit app does not install these.
+thetadata>=1.0.15
+python-dotenv  # thetadata 1.0.15 imports it without declaring it
+google-cloud-storage
+pandas
+numpy
+scipy
+pyarrow
+yfinance  # next earnings dates for the single stocks

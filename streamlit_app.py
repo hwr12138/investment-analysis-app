@@ -1,5 +1,6 @@
 import streamlit as st
 from app.views import momentum_analysis as ma_page
+from app.views import options as op_page
 from app.views import portfolio_optimization as po_page
 from app.views import portfolio_statistics as ps_page
 from app.views import research as sr_page
@@ -36,6 +37,7 @@ st.markdown(f'<a href="{linkedin_url}" target="_blank" style="text-decoration: n
 pg = st.navigation([
     # The DCF model is the 💰 DCF tab on Stock Research, not a page of its own.
     st.Page(sr_page.render_page, title="Stock Research", icon="🔎", url_path="stock_research"),
+    st.Page(op_page.render_page, title="Options", icon="🎯", url_path="options"),
     st.Page(po_page.render_page, title="Portfolio Optimization", icon="📈", url_path="portfolio_optimization"),
     st.Page(ps_page.render_page, title="Portfolio Statistics", icon="📊", url_path="portfolio_statistics"),
     st.Page(ma_page.render_page, title="Momentum Analysis", icon="🚀", url_path="momentum_analysis"),

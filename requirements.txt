@@ -8,3 +8,5 @@ plotly
 requests
 yfinance
 openpyxl
+pyarrow  # Parquet: the options page reads the collector's store
+google-cloud-storage  # the options store's bucket

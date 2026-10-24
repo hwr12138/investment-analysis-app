@@ -15,6 +15,7 @@ from typing import TypeVar
 import streamlit as st
 
 from app.data import market_data
+from app.data.options_store import OptionsStoreError
 from app.data.sharadar_client import SharadarError
 
 T = TypeVar("T")
@@ -32,9 +33,9 @@ def load_tab(what: str, loader: Callable[..., T], *args) -> T | None:
 
     Each tab loads what it needs the first time it is opened, so each one used
     to be free to say "loading" — or fail — in its own words. This is the one
-    way: a spinner naming what is being fetched, and a Sharadar failure drawn as
-    a blocking notice in the tab's body. Returns ``None`` after drawing that
-    notice; the caller returns without rendering anything else.
+    way: a spinner naming what is being fetched, and a Sharadar or options-store
+    failure drawn as a blocking notice in the tab's body. Returns ``None`` after
+    drawing that notice; the caller returns without rendering anything else.
 
     ``loader`` is the tab's cached wrapper, so the spinner shows once per
     company and a reopened tab draws without it.
@@ -42,7 +43,7 @@ def load_tab(what: str, loader: Callable[..., T], *args) -> T | None:
     try:
         with st.spinner(f"Loading {what}…"):
             return loader(*args)
-    except SharadarError as error:
+    except (SharadarError, OptionsStoreError) as error:
         render_blocking(f"Could not load {what}", str(error))
         return None
 

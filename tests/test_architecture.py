@@ -29,8 +29,10 @@ import pytest
 APP = Path(__file__).resolve().parents[1] / "app"
 
 #: Third-party packages the logic layer must never reach: the UI framework and
-#: the two network clients.
-FORBIDDEN_IN_LOGIC = frozenset({"streamlit", "requests", "yfinance"})
+#: the network clients. ``thetadata`` and ``google`` are the options collector's;
+#: the collector imports ``app.logic.options``, so a logic module that reached
+#: either would break the page on a deploy that does not install them.
+FORBIDDEN_IN_LOGIC = frozenset({"streamlit", "requests", "yfinance", "thetadata", "google"})
 
 #: The logic modules that exist to fetch. Each is the single network-touching
 #: entry point of its feature — ``load_research`` and ``load_company`` — and may
@@ -226,7 +228,7 @@ def test_data_never_imports_logic_or_views(module):
     }
 
 
-@pytest.mark.parametrize("module", ("app.provenance", "app.formatting"))
+@pytest.mark.parametrize("module", ("app.provenance", "app.formatting", "app.options_layout"))
 def test_shared_root_modules_import_no_layer(module):
     """Both layers construct these, so they may depend on neither."""
     internal, _ = _imports(module)
@@ -303,3 +305,41 @@ def test_no_module_reaches_into_another_modules_private_names(module):
         for reached in _private_reaches(module)
         if not _same_implementation_package(module, reached)
     ]
+
+
+# ---------------------------------------------------------------------------
+# The options collector
+# ---------------------------------------------------------------------------
+
+COLLECTOR = APP.parent / "collector"
+
+#: What the collector may import of the app: the options arithmetic and the
+#: store layout. Its image installs no Streamlit, and ``app.data`` imports it.
+_COLLECTOR_MAY_REACH = ("app.logic.options", "app.options_layout")
+
+
+def _collector_imports(path: Path) -> tuple[set[str], set[str]]:
+    internal, external = set(), set()
+    for node in ast.walk(ast.parse(path.read_text(), filename=str(path))):
+        names = []
+        if isinstance(node, ast.Import):
+            names = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            # ``from app import options_layout`` imports app.options_layout.
+            names = [f"{node.module}.{alias.name}" for alias in node.names
+                     if f"{node.module}.{alias.name}" in MODULES] or [node.module]
+        for name in names:
+            (internal if name.split(".")[0] == "app" else external).add(name)
+    return internal, external
+
+
+@pytest.mark.parametrize("path", sorted(COLLECTOR.glob("*.py")), ids=lambda p: p.name)
+def test_the_collector_reaches_only_the_options_logic_and_layout(path):
+    internal, external = _collector_imports(path)
+    assert "streamlit" not in {name.split(".")[0] for name in external}
+    reached = set()
+    for name in internal:
+        assert name == "app" or name.startswith(_COLLECTOR_MAY_REACH), name
+        reached |= {module for module in _reach(name) if module in MODULES} if name in MODULES else set()
+    assert not [m for m in reached if m.startswith(("app.data", "app.views"))]
+    assert not [c for m in internal if m in MODULES for c in _forbidden_chains(m, frozenset({"streamlit"}))]

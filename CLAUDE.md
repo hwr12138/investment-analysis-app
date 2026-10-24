@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 pip install -r requirements-dev.txt          # requirements.txt + pytest; deployed app installs only requirements.txt
 streamlit run streamlit_app.py               # run the app
-python -m pytest tests/ -q                   # full suite (~1,135 tests, no network; CI runs it too)
+python -m pytest tests/ -q                   # full suite (~1,300 tests, no network; CI runs it too)
 python -m pytest tests/test_valuation.py -q  # one file
 python -m pytest tests/test_wacc.py::test_market_value_of_equity -q  # one test
 python -m pytest tests/ -k "fcff" -q         # by name
@@ -22,6 +22,11 @@ with that rather than Bash.
 `SHARADAR_API_KEY` (fundamentals, prices) comes from `.streamlit/secrets.toml`, which is
 gitignored. Treasury yields come from Yahoo Finance via `yfinance` (`^IRX` short rate, `^TNX`
 10-year) and need no key. Tests never need either.
+
+The 🎯 Options page reads a store written by a separate job, `collector/` (Python ≥ 3.12, its
+own `requirements.txt`; deploy runbook in `collector/README.md`). Point the page at a store with
+`OPTIONS_STORE_URI` (env or secrets: `gs://bucket` or `file:///abs/path`), or `OPTIONS_BUCKET` plus
+a `[gcp_service_account]` table. `THETADATA_API_KEY` is the collector's, never the page's.
 
 ## Architecture
 
@@ -188,6 +193,67 @@ inside `valuation.py` would create an import cycle with `model.py`.
 
 `model.load_company()` is the only network-touching entry point and is called once per ticker;
 `model.run_model()` runs on every assumption change. Never move a fetch into `run_model`.
+
+### The 🎯 Options page and its collector
+
+The one page that fetches nothing from a vendor. ThetaData's free tier — the source — serves
+**one request at a time** at ~1–2.5 s of server time per session, refuses the current day, and has
+no open interest or greeks, so ~90 names cannot be fetched while a page loads. Instead:
+
+```
+Cloud Scheduler → Cloud Run job  collector/  (thetadata, python 3.12) ─┐ imports only
+                                                                        │ app.logic.options
+                    private GCS bucket  options/v1/…  ◄─────────────────┘ + app.options_layout
+                         ▲
+Streamlit ── app/data/options_store.py → app/logic/options/* → app/views/options/*
+```
+
+- **`app/options_layout.py` names every object** and sits at the `app/` root because the data
+  layer's reader and the collector (which imports logic) both need it. `manifest.json` is written
+  **last** by every run, so a reader can trust whatever a manifest names; `latest/chains.parquet`
+  is the only chain the page reads; `metrics/daily.parquet` (one row per name per session) is all
+  the history panels read. Bump `PREFIX` to change a stored shape.
+- **`app/logic/options/` is pure and shared**: no Streamlit, no `thetadata`, no `google` —
+  `test_architecture.py` forbids both in logic, and checks `collector/*` reaches only
+  `app.logic.options` and `app.options_layout`. The collector's image copies just those.
+- **Never silently stale.** The page always names the close it shows, and warns once the store is
+  more than one session behind (`freshness.sessions_behind`). A name that failed is listed with
+  its reason (from the manifest), never dropped.
+- **The arithmetic was checked against the page it reproduces** (GLD, 2026-10-23: strike 383 at
+  3.23 vs 3.25 shown, every replacement-grid cell within ~0.02 pts, the 398/399 +1 SD spread at
+  5.7× with ask 0.35, 1y 25Δ skew percentile 22 vs ~21). The choices that matched, each a test:
+  Black-76 on the **put–call-parity forward** (no dividend estimate); **mids** of the 17:15 ET
+  NBBO, a zero bid is no market; annualised = cost % × 252 ÷ weekdays; the +k SD target is
+  **lognormal** `S·e^{kσ√t}` (linear picks 396/397); a spread's price is the leg-mid difference
+  with the bid floored at zero.
+- **The "1M" point is the standard monthly**, not the nearest expiry: SPX's 11/23 weekly sat on
+  25-point strikes with a stale 7900 quote (15.0/29.3) and read reward:risk 4.1×; the monthly
+  reads 1.19×. **Spread legs skip wide quotes** (`wide_quote_ratio`) for the same reason.
+- **History is at constant maturity and constant delta**: 30-day by total-variance interpolation
+  between the bracketing expiries, 25Δ read against the call wing's own delta. Off the nearest
+  listed expiry, a year of "1M IV" partly measures the calendar.
+- **Reward:risk** = the +1 SD spread's payout ÷ the payout at a flat smile (ATM IV). It is *not*
+  "call IV below ATM": a one-strike spread is a digital, and a smile falling through its strikes
+  adds to its price — a slope of −0.10 reads 0.99×. **Two readings, on purpose**: the Screen tab
+  prices the two quotes a reader would trade (`screens.sd_spread`); the history and percentiles read
+  it off the smile at constant 30 days (`screens.smile_reward_risk`: the digital
+  `DF·(N(d2) − F·φ(d1)·√t·∂σ/∂K)` from a line through the 7 tight quotes nearest the target). The
+  two-quote version on the drifting 1M monthly ranged GLD 0.33×–4× in a year; the smile version
+  0.95×–1.38×. A sustained high (SPY ~2.5× in March 2026's sell-off) is a regime, not a glitch —
+  every expiry read the same.
+- **A definition change is a recompute, not a refetch**: bump `history.METRICS_VERSION` and run
+  `python -m collector.main recompute`, which rebuilds `metrics/daily.parquet` from the stored
+  chains (~0.1 s a row). **Buy-vol score**
+  = 50 × mean(−z IV, −z(IV − RV21), −z skew) against the name's own year — our definition, shown
+  on the page. Both need `min_history_sessions` (120) or show nothing.
+- **The universe is curated** (`universe.py`, 90 names transcribed from the reference page, with
+  theme labels as reading aids) — a printed judgement like `FILER_FAMILIES`. SPX is two roots,
+  `SPXW` and `SPX`, merged with `SPXW` winning an overlap.
+- **Cboe vol indices are not an input.** Yahoo still has history for only VIX/VXN/VXD/GVZ/OVX, and
+  GVZ sits 0.5–5.3 vol points above GLD's 30d ATM IV with a moving gap (it includes the wings).
+- The repo is public and ThetaData's data is licensed, so **no real chain is committed**:
+  `tests/options_fixtures.py` prices a chain from a known smile, which also makes every recovered
+  forward, IV and 30-day point checkable exactly.
 
 ## Invariants
 
