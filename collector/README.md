@@ -46,10 +46,20 @@ gcloud secrets add-iam-policy-binding thetadata-api-key --member=serviceAccount:
 
 ## 4. Build and deploy the job
 
+The build runs as its own service account, which can only push images and write
+logs:
+
+```bash
+gcloud iam service-accounts create options-builder
+gcloud projects add-iam-policy-binding PROJECT --member=serviceAccount:options-builder@PROJECT.iam.gserviceaccount.com --role=roles/artifactregistry.writer
+gcloud projects add-iam-policy-binding PROJECT --member=serviceAccount:options-builder@PROJECT.iam.gserviceaccount.com --role=roles/logging.logWriter
+```
+
 `.gcloudignore` keeps `.streamlit/` (your secrets) out of the upload.
 
 ```bash
-gcloud builds submit --config collector/cloudbuild.yaml --substitutions=_REGION=REGION .
+gcloud builds submit --config collector/cloudbuild.yaml --substitutions=_REGION=REGION \
+  --service-account=projects/PROJECT/serviceAccounts/options-builder@PROJECT.iam.gserviceaccount.com .
 gcloud run jobs deploy options-collector \
   --image=REGION-docker.pkg.dev/PROJECT/options/collector:latest --region=REGION \
   --service-account=options-collector@PROJECT.iam.gserviceaccount.com \

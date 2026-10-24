@@ -8,3 +8,7 @@ steps:
     args: ["build", "-f", "collector/Dockerfile", "-t", "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_IMAGE}:latest", "."]
 images:
   - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_IMAGE}:latest
+# A trigger run as a chosen service account must say where its logs go; Cloud
+# Logging needs no bucket of its own (the account needs roles/logging.logWriter).
+options:
+  logging: CLOUD_LOGGING_ONLY
