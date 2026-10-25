@@ -140,8 +140,8 @@ def run_daily(source: ThetaSource, store: Store, symbols, today: date, *, log: C
     if rows:
         _merge(store, layout.METRICS, pd.DataFrame(rows, columns=list(history.METRIC_COLUMNS)), ["symbol", "session"])
     store.write_frame(layout.LATEST_CHAINS, pd.concat(newest_chains, ignore_index=True))
-    if today.weekday() == 0 or store.read_bytes(layout.EARNINGS) is None:
-        _refresh_earnings(store, log)
+    if _earnings_stale(store, today):
+        _refresh_earnings(store, log, today)
 
     manifest.update(
         metrics_version=history.METRICS_VERSION,
@@ -234,7 +234,19 @@ def run_recompute(store: Store, symbols, *, log: Callable[[str], None] = print) 
     return manifest
 
 
-def _refresh_earnings(store: Store, log) -> None:
+#: Earnings dates are refreshed once they are this old. By age, not by weekday:
+#: the job runs Tuesday to Saturday, so a "refresh on Mondays" rule never fired.
+EARNINGS_MAX_AGE_DAYS = 6
+
+
+def _earnings_stale(store: Store, today: date) -> bool:
+    frame = store.read_frame(layout.EARNINGS)
+    if frame is None or frame.empty or "fetched" not in frame:
+        return True
+    return (today - max(frame["fetched"])).days >= EARNINGS_MAX_AGE_DAYS
+
+
+def _refresh_earnings(store: Store, log, today: date) -> None:
     """Next earnings date for each single stock, from Yahoo. ETFs have none."""
     try:
         import yfinance as yf
@@ -251,6 +263,6 @@ def _refresh_earnings(store: Store, log) -> None:
         except Exception as error:  # noqa: BLE001 — a scrape; recorded, never fatal
             log(f"  earnings for {symbol} failed: {type(error).__name__}")
             continue
-        rows.append({"symbol": symbol, "next_earnings": upcoming[0].date() if upcoming else None})
+        rows.append({"symbol": symbol, "next_earnings": upcoming[0].date() if upcoming else None, "fetched": today})
     if rows:
         store.write_frame(layout.EARNINGS, pd.DataFrame(rows))

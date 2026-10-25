@@ -211,3 +211,29 @@ def test_chain_paths_round_trip():
     path = layout.chain_path(date(2026, 10, 23), "SPX")
     assert layout.parse_chain_path(path) == (date(2026, 10, 23), "SPX")
     assert layout.parse_chain_path(layout.METRICS) is None
+
+
+def test_a_holiday_run_writes_nothing_and_the_next_run_catches_up(store):
+    # 2026-11-26 is Thanksgiving: SPY has no close, so it is not a session.
+    holiday = date(2026, 11, 26)
+    client = FakeClient(released_through=date(2026, 11, 27))
+    global SESSIONS
+    saved = SESSIONS
+    SESSIONS = [d.date() for d in pd.bdate_range("2026-09-01", "2026-11-27") if d.date() != holiday]
+    try:
+        store.write_json(layout.MANIFEST, {"last_session": "2026-11-25"})
+        manifest = pipeline.run_daily(_source(client), store, ["GLD"], date(2026, 11, 27))
+        assert manifest == {"last_session": "2026-11-25"}
+        assert not [c for c in client.calls if c[0] == "option"]  # no chain was asked for
+        manifest = pipeline.run_daily(_source(client), store, ["GLD"], date(2026, 11, 28))
+        assert manifest["last_session"] == "2026-11-27"
+    finally:
+        SESSIONS = saved
+
+
+def test_earnings_refresh_by_age_not_by_weekday(store):
+    assert pipeline._earnings_stale(store, date(2026, 10, 27))
+    store.write_frame(layout.EARNINGS, pd.DataFrame({"symbol": ["MU"], "next_earnings": [date(2026, 12, 23)],
+                                                     "fetched": [date(2026, 10, 27)]}))
+    assert not pipeline._earnings_stale(store, date(2026, 10, 31))  # Saturday, four days on
+    assert pipeline._earnings_stale(store, date(2026, 11, 3))       # the next Tuesday
