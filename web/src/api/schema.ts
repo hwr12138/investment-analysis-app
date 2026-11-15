@@ -47,6 +47,63 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/portfolio/statistics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Statistics
+         * @description Risk and return over 1, 3, 5 and 10 years and the custom window, and how the holdings move together.
+         */
+        get: operations["statistics_api_portfolio_statistics_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/portfolio/optimization": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Optimization
+         * @description The four optimisers over one price history: max Sharpe, max geometric Sharpe, a volatility cap, fractional Kelly.
+         */
+        get: operations["optimization_api_portfolio_optimization_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/rates/risk-free": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Risk Free Rate */
+        get: operations["risk_free_rate_api_rates_risk_free_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/health": {
         parameters: {
             query?: never;
@@ -159,6 +216,16 @@ export interface components {
             /** Status */
             status: string;
         };
+        /**
+         * Matrix
+         * @description A square table, rows and columns both in ``tickers`` order. A missing cell is ``null``.
+         */
+        Matrix: {
+            /** Tickers */
+            tickers: string[];
+            /** Values */
+            values: (number | null)[][];
+        };
         /** Me */
         Me: {
             /** Auth Enabled */
@@ -167,6 +234,18 @@ export interface components {
             uid: string | null;
             /** Email */
             email: string | null;
+        };
+        /** MetricRow */
+        MetricRow: {
+            /** Name */
+            name: string;
+            /**
+             * Unit
+             * @enum {string}
+             */
+            unit: "percent" | "ratio";
+            /** Values */
+            values: (number | null)[];
         };
         /** MomentumWindow */
         MomentumWindow: {
@@ -186,12 +265,70 @@ export interface components {
             scanners: components["schemas"]["Scanners"];
             default_anchors: components["schemas"]["AnchorDates"];
         };
+        /** PortfolioOptimization */
+        PortfolioOptimization: {
+            /** Tickers */
+            tickers: string[];
+            /** Missing */
+            missing: string[];
+            /**
+             * First Session
+             * Format: date
+             */
+            first_session: string;
+            /**
+             * Last Session
+             * Format: date
+             */
+            last_session: string;
+            /** Strategies */
+            strategies: components["schemas"]["StrategyResult"][];
+        };
+        /** PortfolioStatistics */
+        PortfolioStatistics: {
+            /** Holdings */
+            holdings: components["schemas"]["Weight"][];
+            /** Rescaled */
+            rescaled: boolean;
+            /** Entered Total */
+            entered_total: number;
+            /** Missing */
+            missing: string[];
+            /** Benchmark */
+            benchmark: string;
+            /** Benchmark Priced */
+            benchmark_priced: boolean;
+            relationships: components["schemas"]["Relationships"] | null;
+            /** Windows */
+            windows: string[];
+            /** Metrics */
+            metrics: components["schemas"]["MetricRow"][];
+        };
         /** Reading */
         Reading: {
             /** State */
             state: string;
             /** Bias */
             bias: string;
+        };
+        /** Relationships */
+        Relationships: {
+            correlation: components["schemas"]["Matrix"];
+            covariance: components["schemas"]["Matrix"];
+        };
+        /**
+         * RiskFreeRate
+         * @description The 13-week Treasury bill yield, as a decimal, and where it came from.
+         */
+        RiskFreeRate: {
+            /** Value */
+            value: number | null;
+            /** Source */
+            source: string;
+            /** As Of */
+            as_of: string | null;
+            /** Detail */
+            detail: string;
         };
         /** Scanners */
         Scanners: {
@@ -203,6 +340,26 @@ export interface components {
             rsi_trend: string;
             /** Rsi Failure Swings */
             rsi_failure_swings: string;
+        };
+        /** StrategyResult */
+        StrategyResult: {
+            /**
+             * Strategy
+             * @enum {string}
+             */
+            strategy: "sharpe" | "geometric_sharpe" | "volatility_target" | "kelly";
+            /** Reason */
+            reason: string | null;
+            /** Expected Return */
+            expected_return: number | null;
+            /** Volatility */
+            volatility: number | null;
+            /** Ratio */
+            ratio: number | null;
+            /** Allocation */
+            allocation: components["schemas"]["Weight"][];
+            /** Yearly Returns */
+            yearly_returns: components["schemas"]["YearReturn"][];
         };
         /** ValidationError */
         ValidationError: {
@@ -216,6 +373,20 @@ export interface components {
             input?: unknown;
             /** Context */
             ctx?: Record<string, never>;
+        };
+        /** Weight */
+        Weight: {
+            /** Ticker */
+            ticker: string;
+            /** Weight */
+            weight: number;
+        };
+        /** YearReturn */
+        YearReturn: {
+            /** Year */
+            year: number;
+            /** Value */
+            value: number | null;
         };
     };
     responses: never;
@@ -291,6 +462,100 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    statistics_api_portfolio_statistics_get: {
+        parameters: {
+            query: {
+                tickers: string[];
+                weights: number[];
+                start: string;
+                end: string;
+                /** @description Annual, as a decimal: 0.04 is 4%. */
+                risk_free: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PortfolioStatistics"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    optimization_api_portfolio_optimization_get: {
+        parameters: {
+            query: {
+                tickers: string[];
+                start: string;
+                end: string;
+                /** @description Annual, as a decimal: 0.04 is 4%. */
+                risk_free: number;
+                /** @description The volatility cap, as a decimal: 0.25 is 25%. */
+                vol_target?: number;
+                kelly_fraction?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PortfolioOptimization"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    risk_free_rate_api_rates_risk_free_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RiskFreeRate"];
                 };
             };
         };

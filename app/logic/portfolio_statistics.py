@@ -12,7 +12,9 @@ are ``None`` rather than computed against a market return of zero.
 
 from __future__ import annotations
 
-from datetime import datetime
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from datetime import date, datetime
 
 import numpy as np
 import pandas as pd
@@ -33,6 +35,10 @@ METRICS = (
 
 #: The ones quoted as a percentage rather than a ratio.
 PERCENT_METRICS = frozenset({"Mean Annual Return", "CAGR", "Standard Deviation"})
+
+#: The fixed windows, in years back from the end date, each reported beside
+#: the custom one. The longest decides how far back the prices are fetched.
+WINDOW_YEARS = (1, 3, 5, 10)
 
 #: A fixed window is reported only if it holds at least this share of the
 #: sessions it should — a "10 Year" figure over four years of history is not one.
@@ -123,12 +129,7 @@ def get_comprehensive_metrics(
     except ValueError:
         return pd.DataFrame()
 
-    periods = {
-        "1 Year": end - relativedelta(years=1),
-        "3 Year": end - relativedelta(years=3),
-        "5 Year": end - relativedelta(years=5),
-        "10 Year": end - relativedelta(years=10),
-    }
+    periods = {f"{years} Year": end - relativedelta(years=years) for years in WINDOW_YEARS}
 
     try:
         c_start = datetime.strptime(custom_start, '%Y-%m-%d')
@@ -143,10 +144,8 @@ def get_comprehensive_metrics(
         return pd.DataFrame()
 
     daily_returns = data[valid_tickers].pct_change().dropna()
-    valid_weights = np.array([allocations[t] for t in valid_tickers])
-
-    if not np.isclose(valid_weights.sum(), 1.0) and valid_weights.sum() > 0:
-        valid_weights = valid_weights / valid_weights.sum()
+    weights = normalised_weights({t: allocations[t] for t in valid_tickers})
+    valid_weights = np.array([weights[t] for t in valid_tickers])
 
     portfolio_returns = daily_returns.dot(valid_weights)
     market_returns = (
@@ -166,3 +165,79 @@ def get_comprehensive_metrics(
             results[label] = calculate_all_metrics(period_p_ret, period_m_ret, risk_free_rate)
 
     return pd.DataFrame(results)
+
+
+# --- The page's inputs, and how the holdings move together ---
+
+
+def parse_allocations(text: str) -> dict[str, float]:
+    """``"QQQ:55, GLD:30"`` as ``{"QQQ": 55.0, "GLD": 30.0}``: the Streamlit page's format.
+
+    Raises ``ValueError`` for an entry that is not one ticker and one number
+    joined by a colon. Blank entries, as a trailing comma leaves, are skipped.
+    """
+    allocations: dict[str, float] = {}
+    for part in text.split(","):
+        if not part.strip():
+            continue
+        ticker, weight = part.split(":")
+        ticker = ticker.strip().upper()
+        if not ticker:
+            raise ValueError(f"No ticker in {part.strip()!r}")
+        allocations[ticker] = float(weight.strip())
+    return allocations
+
+
+def needs_rescaling(total: float) -> bool:
+    """Whether weights summing to ``total`` are neither percentages (100) nor fractions (1).
+
+    Such weights are still used, scaled to sum to one, and the page says so.
+    """
+    return abs(total - 100.0) > 0.01 and abs(total - 1.0) > 0.001
+
+
+def normalised_weights(allocations: Mapping[str, float]) -> dict[str, float]:
+    """Each weight as a fraction of their total.
+
+    Weights that already sum to one, or to nothing, come back as given: there
+    is nothing to divide by in the second case, and nothing to change in the first.
+    """
+    total = sum(allocations.values())
+    if total <= 0 or np.isclose(total, 1.0):
+        return dict(allocations)
+    return {ticker: weight / total for ticker, weight in allocations.items()}
+
+
+def history_start(start: date, end: date) -> date:
+    """The first day to fetch: the custom start, or earlier if the longest window needs it."""
+    return min(start, end - relativedelta(years=max(WINDOW_YEARS)))
+
+
+@dataclass(frozen=True)
+class Relationships:
+    """How the holdings moved together over the custom window, on daily returns.
+
+    Square frames over the same tickers in the same order. A pair with no
+    variation has a ``NaN`` correlation, which is missing rather than zero.
+    """
+
+    correlation: pd.DataFrame
+    #: Annualised, as :func:`app.logic.returns.annualised_covariance` scales it.
+    covariance: pd.DataFrame
+
+
+def relationships(
+    prices: pd.DataFrame, tickers: Sequence[str], start: str, end: str
+) -> Relationships | None:
+    """Correlation and annualised covariance of daily returns from ``start`` to ``end``.
+
+    ``None`` when fewer than two of ``tickers`` have prices, or when the window
+    holds no day on which all of them have a return.
+    """
+    held = [t for t in tickers if t in prices.columns]
+    if len(held) < 2:
+        return None
+    daily = prices[held].loc[start:end].pct_change().dropna()
+    if daily.empty:
+        return None
+    return Relationships(daily.corr(), ret.annualised_covariance(daily))

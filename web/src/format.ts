@@ -19,3 +19,7 @@ export const signed = (value: number, digits = 2) => {
 };
 /** "2026-11-13" → "Nov 13, 2026", read as a calendar date with no time zone shift. */
 export const isoDay = (iso: string) => day.format(new Date(`${iso}T00:00:00Z`));
+/** A decimal as a percentage: 0.1234 → "12.34%". */
+export const percent = (value: number, digits = 2) => `${fixed(value * 100, digits)}%`;
+/** Shown where a figure is missing on purpose, never a zero. */
+export const MISSING = "—";

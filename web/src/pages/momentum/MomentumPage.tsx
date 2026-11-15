@@ -29,11 +29,12 @@ import {
   IconSearch,
 } from "@tabler/icons-react";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
-import { useMemo, useState, type ReactNode } from "react";
+import { useMemo, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router";
 
 import { api, unwrap, type Schemas } from "../../api/client";
 import { PlotlyChart } from "../../components/PlotlyChart";
+import { Stat } from "../../components/Stat";
 import { fixed, isoDay, money, signed } from "../../format";
 import { TONE_COLOR, type Tone } from "../../theme";
 import { momentumLayout, momentumTraces, palette } from "./chart";
@@ -259,26 +260,6 @@ function LatestReadings({ bars }: { bars: Schemas["Bars"] }) {
         hint="MACD less signal"
       />
     </SimpleGrid>
-  );
-}
-
-function Stat({ label, value, hint, color }: { label: string; value: string; hint: ReactNode; color?: string }) {
-  return (
-    <Card padding="md">
-      <Text size="xs" fw={700} c="dimmed" tt="uppercase" lts={0.4}>
-        {label}
-      </Text>
-      <Text fz={26} fw={700} lh={1.3} className="num" c={color}>
-        {value}
-      </Text>
-      {typeof hint === "string" ? (
-        <Text size="xs" c="dimmed">
-          {hint}
-        </Text>
-      ) : (
-        hint
-      )}
-    </Card>
   );
 }
 

@@ -12,6 +12,7 @@ import pandas as pd
 import pytest
 
 from app.logic import portfolio_statistics as ps
+from app.logic import returns as ret
 
 MARKET_ONLY = ("Alpha", "Beta", "Treynor Ratio")
 
@@ -95,3 +96,57 @@ def test_weights_are_renormalised_over_the_tickers_with_prices():
         data, {"AAA": 60, "GONE": 40}, "2025-01-01", "2026-06-30", 0.0
     )
     pd.testing.assert_frame_equal(whole, missing)
+
+
+# ---------------------------------------------------------------------------
+# The inputs and the relationships, shared by both front ends
+# ---------------------------------------------------------------------------
+
+
+def test_allocations_are_read_in_the_pages_format():
+    assert ps.parse_allocations(" qqq:55, GLD : 30 ,xle:15, ") == {
+        "QQQ": 55.0, "GLD": 30.0, "XLE": 15.0
+    }
+
+
+@pytest.mark.parametrize("text", ["QQQ 55", "QQQ:55:1", "QQQ:lots", ":55"])
+def test_an_entry_that_is_not_ticker_colon_number_is_refused(text):
+    with pytest.raises(ValueError):
+        ps.parse_allocations(text)
+
+
+@pytest.mark.parametrize(
+    ("total", "rescaled"), [(100, False), (100.005, False), (1, False), (90, True), (0.5, True)]
+)
+def test_only_weights_off_both_wholes_are_rescaled(total, rescaled):
+    assert ps.needs_rescaling(total) is rescaled
+
+
+def test_weights_become_fractions_of_their_total():
+    assert ps.normalised_weights({"A": 60, "B": 30}) == pytest.approx({"A": 2 / 3, "B": 1 / 3})
+    assert ps.normalised_weights({"A": 0.4, "B": 0.6}) == {"A": 0.4, "B": 0.6}
+    assert ps.normalised_weights({"A": 0.0}) == {"A": 0.0}
+
+
+def test_the_fetch_reaches_back_to_the_longest_window():
+    from datetime import date
+
+    assert ps.history_start(date(2024, 1, 1), date(2026, 6, 30)) == date(2016, 6, 30)
+    assert ps.history_start(date(2010, 1, 1), date(2026, 6, 30)) == date(2010, 1, 1)
+    # A leap day has no counterpart ten years back, so it lands on the 28th.
+    assert ps.history_start(date(2024, 1, 1), date(2024, 2, 29)) == date(2014, 2, 28)
+
+
+def test_relationships_cover_only_the_custom_window():
+    data = _history(2)
+    related = ps.relationships(data, ["AAA", ps.MARKET_TICKER], "2026-01-01", "2026-06-30")
+    window = data.loc["2026-01-01":"2026-06-30"].pct_change().dropna()
+    assert list(related.correlation.index) == ["AAA", ps.MARKET_TICKER]
+    assert related.correlation.loc["AAA", "AAA"] == pytest.approx(1.0)
+    assert related.covariance.loc["AAA", "AAA"] == pytest.approx(window["AAA"].var() * ret.TRADING_DAYS)
+
+
+def test_relationships_need_two_priced_assets_and_a_shared_day():
+    data = _history(2)
+    assert ps.relationships(data, ["AAA", "GONE"], "2025-01-01", "2026-06-30") is None
+    assert ps.relationships(data, ["AAA", ps.MARKET_TICKER], "2030-01-01", "2030-06-30") is None

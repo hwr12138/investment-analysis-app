@@ -6,6 +6,7 @@ import {
   Button,
   Center,
   Group,
+  Loader,
   Menu,
   NavLink,
   Paper,
@@ -19,9 +20,17 @@ import {
   useMantineColorScheme,
 } from "@mantine/core";
 import { useDisclosure } from "@mantine/hooks";
-import { IconLockAccess, IconLogout, IconMoonStars, IconSun, IconTrendingUp } from "@tabler/icons-react";
+import {
+  IconChartPie,
+  IconLockAccess,
+  IconLogout,
+  IconMoonStars,
+  IconReportAnalytics,
+  IconSun,
+  IconTrendingUp,
+} from "@tabler/icons-react";
 import { useQuery } from "@tanstack/react-query";
-import type { ReactNode } from "react";
+import { lazy, Suspense, type ReactNode } from "react";
 import { Link, Navigate, Route, Routes, useLocation } from "react-router";
 
 import { ApiError, api, unwrap } from "./api/client";
@@ -29,8 +38,25 @@ import { authEnabled, signOutUser, useUser } from "./auth";
 import { Brand } from "./components/Brand";
 import { MomentumPage } from "./pages/momentum/MomentumPage";
 
+// The portfolio pages bring the chart library with them, so each loads on first visit.
+const StatisticsPage = lazy(() =>
+  import("./pages/portfolio/StatisticsPage").then((m) => ({ default: m.StatisticsPage })),
+);
+const OptimizationPage = lazy(() =>
+  import("./pages/portfolio/OptimizationPage").then((m) => ({ default: m.OptimizationPage })),
+);
+
 // Only built pages go in the navigation; the rest arrive as they are ported.
-const PAGES = [{ path: "/momentum", label: "Momentum", icon: IconTrendingUp }];
+const SECTIONS = [
+  { label: "Analysis", pages: [{ path: "/momentum", label: "Momentum", icon: IconTrendingUp }] },
+  {
+    label: "Portfolio",
+    pages: [
+      { path: "/portfolio/statistics", label: "Statistics", icon: IconReportAnalytics },
+      { path: "/portfolio/optimization", label: "Optimization", icon: IconChartPie },
+    ],
+  },
+];
 
 export function App() {
   const [opened, { toggle, close }] = useDisclosure();
@@ -56,31 +82,47 @@ export function App() {
       </AppShell.Header>
 
       <AppShell.Navbar p="md">
-        <Text size="xs" fw={700} c="dimmed" tt="uppercase" px="sm" mb="xs">
-          Analysis
-        </Text>
-        {PAGES.map(({ path, label, icon: Icon }) => (
-          <NavLink
-            key={path}
-            className="nav-link"
-            component={Link}
-            to={path}
-            label={label}
-            leftSection={<Icon size={18} stroke={1.6} />}
-            active={pathname.startsWith(path)}
-            variant="light"
-            onClick={close}
-          />
-        ))}
+        <Stack gap="lg">
+          {SECTIONS.map((section) => (
+            <div key={section.label}>
+              <Text size="xs" fw={700} c="dimmed" tt="uppercase" px="sm" mb="xs">
+                {section.label}
+              </Text>
+              {section.pages.map(({ path, label, icon: Icon }) => (
+                <NavLink
+                  key={path}
+                  className="nav-link"
+                  component={Link}
+                  to={path}
+                  label={label}
+                  leftSection={<Icon size={18} stroke={1.6} />}
+                  active={pathname.startsWith(path)}
+                  variant="light"
+                  onClick={close}
+                />
+              ))}
+            </div>
+          ))}
+        </Stack>
       </AppShell.Navbar>
 
       <AppShell.Main className="app-main">
         <AccessCheck>
-          <Routes>
-            <Route path="/" element={<Navigate to="/momentum" replace />} />
-            <Route path="/momentum/:ticker?" element={<MomentumPage />} />
-            <Route path="*" element={<Text c="dimmed">No such page.</Text>} />
-          </Routes>
+          <Suspense
+            fallback={
+              <Center mih="40vh">
+                <Loader />
+              </Center>
+            }
+          >
+            <Routes>
+              <Route path="/" element={<Navigate to="/momentum" replace />} />
+              <Route path="/momentum/:ticker?" element={<MomentumPage />} />
+              <Route path="/portfolio/statistics" element={<StatisticsPage />} />
+              <Route path="/portfolio/optimization" element={<OptimizationPage />} />
+              <Route path="*" element={<Text c="dimmed">No such page.</Text>} />
+            </Routes>
+          </Suspense>
         </AccessCheck>
       </AppShell.Main>
     </AppShell>

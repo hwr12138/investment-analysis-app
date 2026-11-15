@@ -5,7 +5,6 @@ from datetime import date
 from app.data import sharadar_client
 from app.formatting import format_pct, format_ratio
 from app.logic import portfolio_statistics as ps_logic
-from app.logic import returns
 from app.views.components import risk_free_rate_input
 
 def render_page():
@@ -33,15 +32,9 @@ def render_page():
             st.error("Please ensure your Start Date is before your End Date.")
             return
 
-        # Parse allocations
-        allocations = {}
         try:
-            parts = [p.strip() for p in allocations_input.split(',')]
-            for part in parts:
-                if not part: continue
-                ticker, alloc = part.split(':')
-                allocations[ticker.strip().upper()] = float(alloc.strip())
-        except Exception:
+            allocations = ps_logic.parse_allocations(allocations_input)
+        except ValueError:
             st.error("Invalid format for allocations. Please use TICKER:PERCENTAGE (e.g. QQQ:55, GLD:30).")
             return
 
@@ -51,19 +44,14 @@ def render_page():
             return
 
         total_alloc = sum(allocations.values())
-        if abs(total_alloc - 100.0) > 0.01 and abs(total_alloc - 1.0) > 0.001:
+        if ps_logic.needs_rescaling(total_alloc):
             st.warning(f"Allocations sum to {total_alloc}, not 100. They have been automatically normalized.")
 
         start_str = start_date.strftime('%Y-%m-%d')
         end_str = end_date.strftime('%Y-%m-%d')
 
-        # We need historical data stretching back 10 years for the 10-year metrics.
-        try:
-            earliest_start = min(start_date, end_date.replace(year=end_date.year - 10))
-        except ValueError: # handle leap years
-            earliest_start = min(start_date, end_date.replace(year=end_date.year - 10, day=28))
-
-        earliest_start_str = earliest_start.strftime('%Y-%m-%d')
+        # The fetch reaches back far enough for the longest fixed window.
+        earliest_start_str = ps_logic.history_start(start_date, end_date).strftime('%Y-%m-%d')
 
         # The benchmark rides along in the same request; alpha, beta and Treynor
         # are measured against it.
@@ -89,10 +77,9 @@ def render_page():
         st.divider()
         st.subheader("Asset Relationships (Custom Period)")
 
-        custom_data = data[valid_tickers].loc[start_str:end_str].pct_change().dropna()
-        if not custom_data.empty and len(valid_tickers) > 1:
-            corr_matrix = custom_data.corr()
-            cov_matrix = returns.annualised_covariance(custom_data)
+        related = ps_logic.relationships(data, valid_tickers, start_str, end_str)
+        if related is not None:
+            corr_matrix, cov_matrix = related.correlation, related.covariance
 
             col_corr, col_cov = st.columns(2)
             with col_corr:

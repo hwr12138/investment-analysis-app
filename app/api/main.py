@@ -14,7 +14,7 @@ from __future__ import annotations
 from fastapi import Depends, FastAPI, Request, status
 from fastapi.responses import JSONResponse
 
-from app.api import momentum
+from app.api import momentum, portfolio, rates
 from app.api.auth import User, require_user
 from app.api.contract import Contract
 from app.data import sharadar_client
@@ -28,7 +28,8 @@ app = FastAPI(
 )
 
 _signed_in = [Depends(require_user)]
-app.include_router(momentum.router, prefix="/api", dependencies=_signed_in)
+for _router in (momentum.router, portfolio.router, rates.router):
+    app.include_router(_router, prefix="/api", dependencies=_signed_in)
 
 
 class Health(Contract):
