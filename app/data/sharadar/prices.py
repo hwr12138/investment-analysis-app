@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from functools import partial
+
 import pandas as pd
 import streamlit as st
 
+from app.data import parallel
 from app.data.sharadar import reference, transport
 from app.data.sharadar.transport import TickerNotFoundError
 
@@ -193,12 +196,23 @@ def _fetch_price_history(
     if not wanted:
         return pd.DataFrame()
 
+    # One request per ticker, sent together: Sharadar's answer time varies by
+    # several seconds, and in sequence four tickers took 28s against 15s for the
+    # slowest alone.
     routes = reference.fetch_price_tables(wanted)
+    fetched = parallel.gather({
+        ticker: partial(
+            _fetch_price_rows,
+            ticker,
+            table=routes.get(ticker, "SEP"),
+            start=start_date,
+            end=end_date,
+        )
+        for ticker in wanted
+    })
     columns: dict[str, pd.Series] = {}
     for ticker in wanted:
-        rows = _fetch_price_rows(
-            ticker, table=routes.get(ticker, "SEP"), start=start_date, end=end_date
-        )
+        rows = fetched[ticker]
         if rows.empty or "closeadj" not in rows.columns:
             continue
         columns[ticker] = rows.set_index("date")["closeadj"].dropna()

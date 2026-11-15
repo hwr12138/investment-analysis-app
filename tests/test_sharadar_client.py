@@ -698,3 +698,24 @@ def _stub_tables(monkeypatch, *, sf1: dict, tickers: dict) -> None:
         raise AssertionError(f"unexpected table {table}")
 
     monkeypatch.setattr(sh_transport, "_get", _get)
+
+
+def test_a_price_history_sends_its_tickers_requests_together(monkeypatch):
+    """Each stubbed request waits until every one has started. In sequence the
+    first would wait alone and the barrier would time out."""
+    import threading
+
+    tickers = ("QQQ", "GLD", "XLE", "SPY")
+    started = threading.Barrier(len(tickers), timeout=5)
+
+    def fetch(ticker, *, table, start=None, end=None):
+        started.wait()
+        dates = pd.bdate_range("2026-01-05", periods=3)
+        return pd.DataFrame({"date": dates, "closeadj": [1.0, 2.0, 3.0]})
+
+    monkeypatch.setattr(
+        sh_reference, "fetch_price_tables", lambda wanted: dict.fromkeys(wanted, "SFP")
+    )
+    monkeypatch.setattr(sh_prices, "_fetch_price_rows", fetch)
+    frame = sc.fetch_price_history(tickers, "2026-01-01", "2026-01-31")
+    assert list(frame.columns) == list(tickers)

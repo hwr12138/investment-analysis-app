@@ -34,14 +34,15 @@ a `[gcp_service_account]` table. `THETADATA_API_KEY` is the collector's, never t
 
 **A migration is under way** from Streamlit to a web app: React + Mantine in `web/` on Firebase
 Hosting, over a FastAPI layer in `app/api/` on Cloud Run. Both front ends sit on the same logic and
-data layers and run side by side until every page is ported; only 🚀 Momentum Analysis is so far.
+data layers and run side by side until every page is ported. 🚀 Momentum Analysis, 📊 Portfolio
+Statistics and 📈 Portfolio Optimization are; 🎯 Options and 🔎 Stock Research are not yet.
 `web/README.md` covers running, regenerating the TypeScript types, and deploying. The rules that
 matter:
 
 - `app/api/` plays the part a view does: it fetches through `app/data/` and hands frames to
   `app/logic/`, and it does no arithmetic of its own. Logic a page needs that lived in its
   Streamlit view moves into the logic module, so both front ends share it (as
-  `momentum_analysis.indicator_frame` did). `test_architecture.py` forbids anything below the API
+  `momentum_analysis.indicator_frame` and `portfolio_statistics.relationships` did). `test_architecture.py` forbids anything below the API
   from importing it, and the API from importing `app.views`.
 - Every response model derives from `app.api.contract.Contract`, which **rejects NaN**. Pydantic
   would otherwise serialise a NaN as `null` even into a `float` field. A number that can be
