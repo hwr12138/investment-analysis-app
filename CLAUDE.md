@@ -18,6 +18,13 @@ There is no linter, formatter, or pytest config file in this repo. The web front
 `.claude/launch.json` defines `api` (uvicorn on 8600, sign-in off) and `web` (Vite on 5173,
 proxying `/api` to 8600); start both to preview the app, rather than through Bash.
 
+**Merging to `main` deploys.** `.github/workflows/deploy.yml` runs the tests (`tests.yml`, which
+pull requests also run), then deploys only what the merge changed: the API to Cloud Run, the
+collector's image to its Cloud Run job, the web app to Firebase Hosting, in that order. It signs
+in through Workload Identity Federation as a deployer account that trusts only that workflow on
+`main`; `deploy/README.md` has the setup. A deploy is a merge, so there is no separate release
+step to remember — and a change that should not ship yet should not be merged.
+
 `SHARADAR_API_KEY` (fundamentals, prices) comes from the environment or
 `.streamlit/secrets.toml` (gitignored; the data layer reads it through `st.secrets`), and on
 Cloud Run from Secret Manager. Treasury yields come from Yahoo Finance via `yfinance` (`^IRX` short rate, `^TNX`

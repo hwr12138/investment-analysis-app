@@ -1,9 +1,13 @@
 name: tests
 
+# Pull requests run this directly. A push to main runs it from deploy.yml, which
+# deploys only once it passes, so main's tests run once rather than twice.
 on:
-  push:
-    branches: [main]
   pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
 
 jobs:
   pytest:
@@ -13,8 +17,8 @@ jobs:
         # 3.13 is what the API image runs; 3.11 is the oldest the code supports.
         python-version: ["3.11", "3.13"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
@@ -22,3 +26,17 @@ jobs:
       - run: pip install -r requirements-dev.txt
       # No secrets: no test touches the network, and none needs SHARADAR_API_KEY.
       - run: python -m pytest tests/ -q
+
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - working-directory: web
+        run: |
+          npm ci
+          npm run typecheck

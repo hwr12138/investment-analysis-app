@@ -1,0 +1,184 @@
+name: deploy
+
+# Every push to main deploys what it changed, once the tests pass:
+#
+#   api        app/, requirements.txt, deploy/api/   → Cloud Run service equiti-api
+#   collector  collector/ and the app modules its    → Cloud Run job options-collector
+#              image copies (see collector/Dockerfile)
+#   web        web/, firebase.json                   → Firebase Hosting
+#
+# The web app goes last, so a page never reaches readers before the API it calls.
+# Credentials come from Workload Identity Federation: no key is stored anywhere,
+# and the provider honours only this workflow on main. The project's names live
+# in secrets so the public logs mask them. One-time setup: deploy/README.md.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      targets:
+        description: "What to deploy: any of api, collector, web, separated by spaces"
+        default: "api collector web"
+
+# One deploy at a time, in order; a second merge waits rather than racing the first.
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  REGION: us-central1
+  REPOSITORY: options
+
+jobs:
+  tests:
+    uses: ./.github/workflows/tests.yml
+
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      api: ${{ steps.diff.outputs.api }}
+      collector: ${{ steps.diff.outputs.collector }}
+      web: ${{ steps.diff.outputs.web }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+      - id: diff
+        env:
+          BEFORE: ${{ github.event.before }}
+          TARGETS: ${{ inputs.targets }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            for target in api collector web; do
+              case " $TARGETS " in
+                *" $target "*) echo "$target=true" ;;
+                *) echo "$target=false" ;;
+              esac
+            done | tee -a "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # A push whose "before" is missing (a force push, the branch's first
+          # push) has nothing to diff against, so everything deploys. Markdown
+          # ships in no image and no bundle, so a README edit deploys nothing.
+          if git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+            changed=$(git diff --name-only "$BEFORE" "$GITHUB_SHA" | grep -v '\.md$' || true)
+          else
+            changed=ALL
+          fi
+          echo "Changed files:"; printf '%s\n' "$changed"
+          touches() { [ "$changed" = ALL ] || printf '%s\n' "$changed" | grep -qE "$1"; }
+          {
+            touches '^(app/|requirements\.txt$|deploy/api/)' && echo api=true || echo api=false
+            touches '^(collector/|app/__init__\.py$|app/options_layout\.py$|app/logic/__init__\.py$|app/logic/options/)' \
+              && echo collector=true || echo collector=false
+            touches '^(web/|firebase\.json$)' && echo web=true || echo web=false
+          } | tee -a "$GITHUB_OUTPUT"
+
+  api:
+    needs: [tests, changes]
+    if: needs.changes.outputs.api == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      PROJECT: ${{ secrets.GCP_PROJECT_ID }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOYER }}
+      - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2.2.1
+      - name: Build and push the image
+        run: |
+          gcloud auth configure-docker "$REGION-docker.pkg.dev" --quiet
+          image="$REGION-docker.pkg.dev/$PROJECT/$REPOSITORY/api"
+          docker build -f deploy/api/Dockerfile -t "$image:$GITHUB_SHA" -t "$image:latest" .
+          docker push --all-tags "$image"
+      # Only the image changes: the service keeps its account, secrets, env and limits.
+      - name: Deploy the revision
+        run: >-
+          gcloud run deploy equiti-api --project "$PROJECT" --region "$REGION"
+          --image "$REGION-docker.pkg.dev/$PROJECT/$REPOSITORY/api:$GITHUB_SHA" --quiet
+      - name: Check it answers, and still refuses a caller who is not signed in
+        run: |
+          url=$(gcloud run services describe equiti-api --project "$PROJECT" --region "$REGION" --format='value(status.url)')
+          curl -fsS --retry 3 --retry-delay 5 "$url/api/health"; echo
+          status=$(curl -s -o /dev/null -w '%{http_code}' "$url/api/research/AAPL")
+          echo "Unauthenticated data route answered $status"
+          test "$status" = 401
+
+  collector:
+    needs: [tests, changes]
+    if: needs.changes.outputs.collector == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      PROJECT: ${{ secrets.GCP_PROJECT_ID }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOYER }}
+      - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2.2.1
+      - name: Build and push the image
+        run: |
+          gcloud auth configure-docker "$REGION-docker.pkg.dev" --quiet
+          image="$REGION-docker.pkg.dev/$PROJECT/$REPOSITORY/collector"
+          docker build -f collector/Dockerfile -t "$image:$GITHUB_SHA" -t "$image:latest" .
+          docker push --all-tags "$image"
+      # The next scheduled run picks the image up; nothing is executed here,
+      # because a run spends ThetaData's one-request-at-a-time allowance.
+      - name: Point the job at the new image
+        run: >-
+          gcloud run jobs update options-collector --project "$PROJECT" --region "$REGION"
+          --image "$REGION-docker.pkg.dev/$PROJECT/$REPOSITORY/collector:$GITHUB_SHA" --quiet
+
+  web:
+    needs: [tests, changes, api]
+    # After the API when both changed; on its own when only the web did.
+    if: >-
+      always() && needs.tests.result == 'success' && needs.changes.outputs.web == 'true'
+      && (needs.api.result == 'success' || needs.api.result == 'skipped')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      PROJECT: ${{ secrets.GCP_PROJECT_ID }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Build
+        working-directory: web
+        env:
+          VITE_FIREBASE_API_KEY: ${{ secrets.VITE_FIREBASE_API_KEY }}
+          VITE_FIREBASE_AUTH_DOMAIN: ${{ secrets.VITE_FIREBASE_AUTH_DOMAIN }}
+          VITE_FIREBASE_PROJECT_ID: ${{ secrets.VITE_FIREBASE_PROJECT_ID }}
+          VITE_FIREBASE_APP_ID: ${{ secrets.VITE_FIREBASE_APP_ID }}
+        run: |
+          npm ci
+          npm run build
+      - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOYER }}
+      # The CLI reads the federated credentials from GOOGLE_APPLICATION_CREDENTIALS,
+      # which the auth step exported.
+      - name: Deploy to Hosting
+        run: npx --yes firebase-tools@15.9.1 deploy --only hosting --project "$PROJECT" --non-interactive
+      - name: Check the site and its API rewrite answer
+        run: |
+          curl -fsS --retry 3 --retry-delay 5 -o /dev/null https://equiti-app.web.app/
+          curl -fsS --retry 3 --retry-delay 5 https://equiti-app.web.app/api/health; echo
