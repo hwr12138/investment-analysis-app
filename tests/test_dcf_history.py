@@ -12,6 +12,7 @@ from streamlit.testing.v1 import AppTest
 from app.data import market_data
 from app.data import sharadar_client as sc
 from app.data.sharadar import prices as sh_prices
+from app.logic.dcf import inputs as dcf_inputs
 from app.logic.dcf import model as dcf_model
 from app.logic.dcf import validation as val
 from app.logic.dcf import wacc as wacc_lib
@@ -196,13 +197,12 @@ def test_the_default_run_is_the_dcf_tabs_untouched_value(
     shown = app.session_state["dcf_output"]["result"]
 
     dataset = built["dataset"]
-    run = dcf_model.default_run(
+    line = dcf_inputs.default_value(
         dataset, valuation_date=date.today(), risk_free=_RF, erp=_ERP, beta=_BETA
     )
-    line = dcf_model.run_model(dataset, run.base, drivers=run.drivers, **run.model_kwargs)
-    # The tab rounds each seeded percentage to four decimals; nothing else differs.
+    # An untouched input is no override at all, so the two are one run exactly.
     assert line.headline_bridge.value_per_share == pytest.approx(
-        shown.headline_bridge.value_per_share, rel=1e-4
+        shown.headline_bridge.value_per_share, rel=1e-12
     )
     assert line.headline_method == shown.headline_method == "gordon"
 
@@ -225,8 +225,9 @@ def test_an_input_the_tab_would_ask_for_is_a_gap_not_a_placeholder(
 ):
     built = build_model(statements_payload, tickers_response, monkeypatch)
     with pytest.raises(dcf_model.DefaultUnavailable) as raised:
-        dcf_model.default_run(
-            built["dataset"], valuation_date=date.today(), risk_free=rf, erp=erp, beta=beta
+        dcf_inputs.resolve(
+            built["dataset"], valuation_date=date.today(), risk_free=rf, erp=erp, beta=beta,
+            strict=True,
         )
     assert raised.value.transient is transient
 
@@ -276,7 +277,7 @@ def _valued(value):
 
 
 def test_a_point_is_the_default_headline(monkeypatch):
-    monkeypatch.setattr(dcf_model, "default_value_on", lambda t, d=None: _valued(123.0))
+    monkeypatch.setattr(dcf_inputs, "default_value_on", lambda t, d=None: _valued(123.0))
     point = research_dataset.load_dcf_point("T", date(2026, 5, 20))
     assert point.value == pytest.approx(123.0)
 
@@ -285,7 +286,7 @@ def test_missing_data_is_a_gap_with_its_reason(monkeypatch):
     def unavailable(t, d=None):
         raise dcf_model.DefaultUnavailable("No beta — too few months")
 
-    monkeypatch.setattr(dcf_model, "default_value_on", unavailable)
+    monkeypatch.setattr(dcf_inputs, "default_value_on", unavailable)
     point = research_dataset.load_dcf_point("T", date(2026, 5, 20))
     assert point.value is None and "No beta" in point.reason
 
@@ -294,7 +295,7 @@ def test_a_bank_is_a_gap_not_an_error(monkeypatch):
     def bank(t, d=None):
         raise val.UnsupportedSectorError("JPM", "Financial Services", "Financial Services")
 
-    monkeypatch.setattr(dcf_model, "default_value_on", bank)
+    monkeypatch.setattr(dcf_inputs, "default_value_on", bank)
     assert research_dataset.load_dcf_point("JPM").value is None
 
 
@@ -302,7 +303,7 @@ def test_a_failed_fetch_is_raised_so_no_cache_remembers_it(monkeypatch):
     def outage(t, d=None):
         raise dcf_model.DefaultUnavailable("No risk-free rate", transient=True)
 
-    monkeypatch.setattr(dcf_model, "default_value_on", outage)
+    monkeypatch.setattr(dcf_inputs, "default_value_on", outage)
     with pytest.raises(dcf_model.DefaultUnavailable):
         research_dataset.load_dcf_point("T")
 

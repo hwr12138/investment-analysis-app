@@ -12,94 +12,25 @@ import streamlit as st
 
 from app.formatting import format_pct
 from app.logic.dcf import financials as fin
+from app.logic.dcf import inputs as dcf_inputs
 from app.logic.dcf import model as dcf_model
 from app.logic.dcf import reverse
-from app.logic.dcf import valuation as dcf
 from app.provenance import Sourced
 from app.views.research.dcf import common
 
-def _reverse_message(result: reverse.ReverseDcfResult) -> tuple[str, str]:
-    """The banner for a solve outcome, as ``(level, markdown)``.
-
-    Pure and separate from the rendering so every status can be checked without
-    a Streamlit runtime — and so adding a status without a message fails a test
-    rather than rendering blank.
-    """
-    status = result.status
-
-    if status is reverse.Status.SOLVED:
-        if result.growth_creates_value is False:
-            return "warning", (
-                f"**Growth destroys value in this model.** At the implied rate, one more "
-                f"percentage point of revenue growth *lowers* value per share by "
-                f"**{abs(result.value_per_growth_point):,.2f}**. A *higher* market price "
-                f"therefore implies a *lower* growth rate — the usual reading of this number "
-                f"is inverted. This happens when each incremental dollar of revenue consumes "
-                f"more working capital and capital expenditure than the margin it earns."
-            )
-        if result.plausible is False:
-            return "warning", (
-                f"**{format_pct(result.growth)} a year is outside anything a company sustains for "
-                f"long.** Read this as *the price is not explained by revenue growth* rather "
-                f"than as a forecast — the difference is more likely to sit in the margin, "
-                f"the reinvestment rates, or the discount rate."
-            )
-        return "", ""
-
-    if status is reverse.Status.MULTIPLE_SOLUTIONS:
-        return "warning", f"**No single implied rate.** {result.reason}"
-
-    if status is reverse.Status.NOT_EVALUABLE:
-        return "error", (
-            f"{result.reason}\n\nThis is not a failed search. The terminal growth rate and "
-            f"the discount rate are held fixed while revenue growth is solved for, so this "
-            f"fails identically at every growth rate — on the first evaluation or not at all. "
-            f"Both terminal value methods are always computed, so a Gordon growth input can "
-            f"stop an exit-multiple model."
-        )
-
-    if status is reverse.Status.NO_TARGET:
-        return "info", f"**No market price to invert.** {result.reason}"
-
-    if status in {reverse.Status.TARGET_ABOVE_RANGE, reverse.Status.TARGET_BELOW_RANGE}:
-        return "info", f"**No growth rate reproduces this price.** {result.reason}"
-
-    if status is reverse.Status.DEGENERATE:
-        return "info", f"**Nothing to solve for.** {result.reason}"
-
-    if status is reverse.Status.RESIDUAL_TOO_LARGE:
-        return "error", f"**The solved rate did not check out.** {result.reason}"
-
-    if status is reverse.Status.SEARCH_BROKEN:
-        return "error", f"**The search could not complete.** {result.reason}"
-
-    raise AssertionError(f"No message written for reverse DCF status {status!r}.")
-
+#: The banner for a solve outcome, as ``(level, markdown)`` — shared with the
+#: web app, so a status without a message fails a test on both.
+_reverse_message = dcf_inputs.reverse_verdict
 
 #: Both methods are solved; Gordon leads because it is the fundamentals
 #: reading — the exit-multiple solve mostly measures today's multiple against
 #: the company's own history.
-METHOD_ORDER = ("gordon", "exit_multiple")
-METHOD_LABELS = {
-    "gordon": "Gordon growth (fundamentals)",
-    "exit_multiple": "Exit multiple",
-}
+METHOD_ORDER = dcf_inputs.REVERSE_METHODS
+METHOD_LABELS = dcf_inputs.REVERSE_LABELS
 _PATH_COLOURS = {"gordon": "#f2a900", "exit_multiple": "#e06666"}
 
 
-def _implied_revenue_path(
-    base_revenue: float,
-    growth: float,
-    years: int,
-    fade_to: float | None = None,
-    hold: int = 1,
-) -> list[float]:
-    """Revenue compounding from the base period along the forecast's growth shape."""
-    path, revenue = [], base_revenue
-    for rate in dcf.growth_path(growth, years, fade_to, hold=hold):
-        revenue *= 1.0 + rate
-        path.append(revenue)
-    return path
+_implied_revenue_path = dcf_inputs.implied_revenue_path
 
 
 def _path_shape(inputs: dict) -> str:
@@ -122,63 +53,33 @@ def _render_chart(
     inputs: dict,
 ) -> None:
     """Reported revenue, then the paths the price (both ways), the forecast, and history imply."""
-    if "revenue" not in dataset.annual.columns:
+    chart = dcf_inputs.revenue_chart(dataset, result, reverse_results, history, inputs)
+    if chart is None:
         return
+    axis = [*chart.history_labels, chart.anchor, *chart.forward_labels]
 
-    projected = [row.revenue for row in result.projection.rows]
-    years = len(projected)
-    base_revenue = result.projection.base_revenue
-    fade_to, hold = inputs.get("growth_fade_to"), inputs.get("growth_hold", 1)
-
-    # Forecast years are labelled by offset, not by fiscal year: each is the
-    # twelve months after the base period, which need not end on a fiscal year.
-    history_labels = [str(i) for i in dataset.annual.index]
-    forward_labels = [f"+{i}yr" for i in range(1, years + 1)]
-    anchor = result.base.label
-    axis = history_labels + [anchor] + forward_labels
-
-    # Reported bars stay in the reporting currency; the forecast is in the
-    # valuation currency. Converting the bars back at the same spot rate puts
-    # both on one axis without restating history at historical rates.
-    to_valuation = dataset.fx_rate_value
     figure = go.Figure()
     figure.add_trace(
         go.Bar(
-            x=history_labels, y=dataset.annual["revenue"] * to_valuation,
+            x=list(chart.history_labels), y=list(chart.reported),
             name="Reported revenue", marker_color="rgba(130,150,180,0.55)",
         )
     )
-
-    def add_path(values: list[float], name: str, dash: str, width: float, color: str) -> None:
+    styles = {"price": ("dash", 3.0), "forecast": ("dot", 2.5), "history": ("longdash", 1.5)}
+    colours = {"forecast": "#4fa3f7", "history": "#8fd18f"}
+    for path in chart.paths:
+        dash, width = styles[path.kind]
         # Anchored at the base period so every path fans out from one point.
         figure.add_trace(
             go.Scatter(
-                x=[anchor] + forward_labels, y=[base_revenue] + values, name=name,
-                mode="lines+markers", line=dict(dash=dash, width=width, color=color),
+                x=[chart.anchor, *chart.forward_labels],
+                y=[chart.base_revenue, *path.values],
+                name=path.name, mode="lines+markers",
+                line=dict(
+                    dash=dash, width=width,
+                    color=_PATH_COLOURS[path.method] if path.method else colours[path.kind],
+                ),
             )
-        )
-
-    for method in METHOD_ORDER:
-        outcome = reverse_results.get(method)
-        if outcome is None:
-            continue
-        # Losing the market's line is the finding; losing the chart hides it,
-        # so every root is drawn when there is no single answer.
-        roots = [outcome.growth] if outcome.status is reverse.Status.SOLVED else outcome.roots
-        for root in roots:
-            add_path(
-                _implied_revenue_path(base_revenue, root, years, fade_to, hold),
-                f"Price, {METHOD_LABELS[method].lower()} ({format_pct(root)})",
-                "dash", 3.0, _PATH_COLOURS[method],
-            )
-
-    add_path(projected, "Your forecast", "dot", 2.5, "#4fa3f7")
-
-    if history.ok:
-        add_path(
-            _implied_revenue_path(base_revenue, history.cagr, years),
-            f"History repeating ({format_pct(history.cagr)} realised)",
-            "longdash", 1.5, "#8fd18f",
         )
 
     figure.update_layout(
@@ -311,25 +212,19 @@ def render(
 
     _render_chart(dataset, result, reverse_results, history, inputs)
 
-    samples = {
-        method: dict(reverse_results[method].samples) for method in METHOD_ORDER
-    }
-    if any(samples.values()):
+    scanned = dcf_inputs.scan_rows(reverse_results)
+    if scanned:
         with st.expander("Value per share across the growth range", expanded=False):
             st.caption(
                 "The scans the solvers already ran, so this costs nothing extra. Every "
                 "crossing of the market price in a column is a rate the price is consistent "
                 "with under that method."
             )
-            low, high = reverse.PLAUSIBLE_GROWTH
-            growths = sorted(
-                g for g in set().union(*(set(v) for v in samples.values())) if low <= g <= high
-            )
             rows = []
-            for growth in growths:
+            for growth, values in scanned:
                 row = {"Year-1 revenue growth": f"{growth:.2%}"}
                 for method in METHOD_ORDER:
-                    value = samples[method].get(growth)
+                    value = values[method]
                     row[METHOD_LABELS[method]] = f"{value:,.2f}" if value is not None else ""
                 rows.append(row)
             st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
@@ -359,15 +254,7 @@ def _render_whatif(dataset: dcf_model.CompanyDataset, inputs: dict) -> None:
             return
 
         for method in METHOD_ORDER:
-            what_if = dcf_model.solve_implied_growth(
-                dataset,
-                inputs["base"],
-                target_price=price,
-                drivers=inputs["drivers"],
-                growth_fade_to=inputs.get("growth_fade_to"),
-                growth_hold=inputs.get("growth_hold", 1),
-                **{**common.model_kwargs(inputs), "headline_method": method},
-            )
+            what_if = dcf_inputs.solve_price(dataset, inputs, price, method)
             label = METHOD_LABELS[method]
             if what_if.status is reverse.Status.SOLVED:
                 st.markdown(

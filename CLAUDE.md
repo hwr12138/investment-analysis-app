@@ -35,9 +35,7 @@ a `[gcp_service_account]` table. `THETADATA_API_KEY` is the collector's, never t
 **A migration is under way** from Streamlit to a web app: React + Mantine in `web/` on Firebase
 Hosting, over a FastAPI layer in `app/api/` on Cloud Run. Both front ends sit on the same logic and
 data layers and run side by side until every page is ported. 🚀 Momentum Analysis, 📊 Portfolio
-Statistics, 📈 Portfolio Optimization and 🎯 Options are, and so is 🔎 Stock Research except its 💰 DCF
-tab: that tab's assumption panel (`views/research/dcf/assumptions.py`) builds the run inside the view,
-and has to become a logic function both front ends call before the API can serve it.
+Statistics, 📈 Portfolio Optimization, 🎯 Options and 🔎 Stock Research — all six tabs — are.
 `web/README.md` covers running, regenerating the TypeScript types, and deploying. The rules that
 matter:
 
@@ -45,8 +43,8 @@ matter:
   `app/logic/`, and it does no arithmetic of its own. Logic a page needs that lived in its
   Streamlit view moves into the logic module, so both front ends share it (as
   `momentum_analysis.indicator_frame`, `portfolio_statistics.relationships`, the options
-  filters in `options/coverage.py`, and Stock Research's `verdict`s, `summary.dcf_line_steps` and
-  `insiders.open_market_trades` did). `test_architecture.py` forbids anything below the API
+  filters in `options/coverage.py`, Stock Research's `verdict`s, `summary.dcf_line_steps` and
+  `insiders.open_market_trades`, and the whole 💰 DCF assumption panel, `dcf/inputs.py`, did). `test_architecture.py` forbids anything below the API
   from importing it, and the API from importing `app.views`.
 - The API caches nothing of its own: the data layer's caches make a warm loader cost ~0.01 s. The
   one exception is `research.py`'s DCF-line points (`functools.lru_cache`, one entry per filing, so
@@ -80,8 +78,8 @@ the logic layer builds display strings with it (`StatTile`) and every view forma
 
 **The layering is enforced, not just described.** `tests/test_architecture.py` parses `app/` into
 an import graph and fails if a logic module reaches Streamlit, `requests` or `yfinance` — even
-transitively, which is how it actually breaks — other than the two orchestrators
-(`logic/research/dataset.py`, `logic/dcf/model.py`); if data imports logic or views; if logic
+transitively, which is how it actually breaks — other than the three orchestrators
+(`logic/research/dataset.py`, `logic/dcf/model.py`, `logic/dcf/inputs.py`); if data imports logic or views; if logic
 imports views; if the DCF arithmetic reaches `app.data` at all; or if any module uses another's
 `_private` name. A logic module that needs a Sharadar constant imports
 `app.data.sharadar.vocabulary`, never `sharadar_client`.
@@ -148,9 +146,11 @@ margins into `0.00`, and `logic/statements.py` carries a `Unit` enum precisely s
 cannot repeat that.
 
 `views/research/dcf/` is a package: `__init__` is the shell (the load, the two caches, the
-fingerprint, the session lifecycle and the draw order), beside `assumptions` (every input, one
+fingerprint, the session lifecycle and the draw order), beside `assumptions` (the widgets, one
 function per block of the panel), `checks` (banners, validation panel), `history`, `results`
-(header, projection, valuation), `implied` (the reverse DCF), `download` and `common`. The names
+(header, projection, valuation), `implied` (the reverse DCF), `download` and `common`. None of
+them decides a number: what the panel *means* is `app/logic/dcf/inputs.py` (below), which the
+web tab reaches through `app/api/dcf.py`. The names
 avoid `valuation`, `reverse` and `export` on purpose — `app/logic/dcf/` already has modules by
 those names. Functions that cross modules are public inside the package; the rest stay private.
 
@@ -214,7 +214,8 @@ normalisation, validation, and arithmetic are each independently testable. The p
 | `valuation.py` | FCFF, projection, terminal value, equity bridge — **pure** |
 | `reverse.py` | Backsolving a driver from a target price — **pure**, DCF-agnostic |
 | `validation.py` | Checks, severity model, issue types, tolerances |
-| `model.py` | Orchestration |
+| `model.py` | Orchestration: the load, the run, the sensitivity grid |
+| `inputs.py` | The assumption panel as data — defaults, overrides, provenance, notes — and everything both front ends draw from a run |
 | `export.py` | Multi-sheet `.xlsx` and CSV export |
 
 `wacc.py`, `valuation.py`, and `reverse.py` import no Streamlit, make no network calls, and hold
@@ -224,6 +225,19 @@ inside `valuation.py` would create an import cycle with `model.py`.
 
 `model.load_company()` is the only network-touching entry point and is called once per ticker;
 `model.run_model()` runs on every assumption change. Never move a fetch into `run_model`.
+
+**`inputs.py` is the panel without the widgets.** `resolve(dataset, overrides=...)` takes only what
+the reader changed (`Overrides`, every field `None` by default) and returns `Assumptions`: each
+input's value, its default, its `Sourced` and its notes, plus the `inputs` dict `run_model` takes.
+An input left alone is *no override at all*, so it follows its default when the default moves — an
+untyped cost of debt follows the risk-free rate, a driver value follows its basis — and a value
+typed back to the default at the precision shown (`_changed`) counts as untouched. A choice the
+panel does not offer raises `InvalidOverride` (the API's 422). A run that cannot be built
+(no share count, a WACC that raises) still returns the whole panel with `blocked` set, so the
+reader can undo whatever caused it. `evaluate` runs the model, both reverse solves, the grid and
+the checks; `reverse_verdict`, `revenue_chart`, `scan_rows`, `cross_implied` and `filings` are what
+both front ends draw from the result. It is an orchestrator only because `default_value_on`
+fetches the company and that day's rates; `resolve` and `evaluate` take what they are handed.
 
 ### The 🎯 Options page and its collector
 
@@ -556,6 +570,11 @@ one. The only collapse it still does is the **restatement**: two filings for the
 
 ### The DCF tab
 
+On the web the tab is one `POST /api/research/{ticker}/dcf` carrying only the reader's
+overrides, answered with the resolved panel and the valued run together (warm, ~0.2 s), plus
+`/dcf/what-if` and `/dcf/export`; the export filters the reader's acknowledgements to the run's own
+issues. The rest of this section describes the Streamlit tab.
+
 The DCF tab has **no Compute gate**. It loads and values whatever ticker the page has searched,
 as soon as the tab is opened, and an assumption change is applied on the spot. Nothing on that tab
 is ever drawn from a run that does not match the controls on screen — which is why the staleness
@@ -577,13 +596,13 @@ via `_session_reset` when it notices the page's ticker has moved; the research p
 Severity banners sit above everything and do not collapse. The governing rule for that tab: it
 must be impossible to look at the output and not notice something is wrong.
 
-**The untouched assumption set lives in the model, not the panel** (`model.default_run`). The
-panel seeds its inputs from the same constants (`DEFAULT_FORECAST_YEARS`, `DEFAULT_TERMINAL_GROWTH`,
-…) and `synthetic_cost_of_debt`, and `test_dcf_history.py` runs the tab headlessly beside
-`default_run` and asserts the two headlines agree: the summary chart's DCF line ends on the tab's
-own number, and a default changed in one place and not the other fails there.
+**The untouched assumption set is `inputs.resolve` with no overrides** — the panel, the API and
+the summary chart's DCF line (`inputs.default_value`, which resolves with `strict=True`) all call
+it, so there is one set of defaults. `test_dcf_history.py` runs the tab headlessly beside
+`default_value` and asserts the two headlines agree to 1e-12, and `test_api_dcf.py` asserts an
+untouched request returns the same number.
 
-**A past value is struck as the company stood that day** (`model.default_value_on(ticker, as_of)`).
+**A past value is struck as the company stood that day** (`inputs.default_value_on(ticker, as_of)`).
 `load_company(asreported=True, as_of=...)` keeps only the rows filed by then — `AR` only, because
 under `MR` Sharadar's `datekey` is the report period and a restatement moves it — with that day's
 close, 10-year yield (`fetch_10y_treasury_rate_on`), exchange rate (`fetch_fx_rate_on`) and a beta

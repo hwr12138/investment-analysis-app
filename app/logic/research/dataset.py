@@ -40,6 +40,7 @@ from datetime import date
 import pandas as pd
 
 from app.data import parallel, sharadar_client
+from app.logic.dcf import inputs as dcf_inputs
 from app.logic.dcf import model as dcf_model
 from app.logic.dcf import validation as dcf_validation
 from app.logic.dcf.schema import SchemaResolutionError
@@ -256,7 +257,7 @@ class DcfPoint:
 
 
 def load_dcf_point(ticker: str, as_of: date | None = None) -> DcfPoint:
-    """One point of the line: :func:`dcf_model.default_value_on`, or why not.
+    """One point of the line: :func:`dcf_inputs.default_value_on`, or why not.
 
     Returns a gap for what will not change on a retry — a bank, a schema that
     does not resolve, too little filed yet, a blocking check. Raises for what
@@ -265,7 +266,7 @@ def load_dcf_point(ticker: str, as_of: date | None = None) -> DcfPoint:
     remembers an outage as a gap.
     """
     try:
-        result = dcf_model.default_value_on(ticker, as_of)
+        result = dcf_inputs.default_value_on(ticker, as_of)
     except dcf_model.DefaultUnavailable as error:
         if error.transient:
             raise

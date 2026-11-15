@@ -9,6 +9,7 @@ from plotly.subplots import make_subplots
 
 from app.formatting import format_date
 from app.logic.dcf import financials as fin
+from app.logic.dcf import inputs as dcf_inputs
 from app.logic.dcf import model as dcf_model
 
 def render(dataset: dcf_model.CompanyDataset) -> None:
@@ -81,30 +82,23 @@ def _render_filing_provenance(dataset: dcf_model.CompanyDataset) -> None:
     but not the filings themselves: this is the only path from a valuation back
     to the documents behind it.
 
-    Read off the income statement, though any frame would do — the client
-    partitions one SF1 row per period into ``PL``/``BS``/``CF``, so all three
-    carry identical metadata.
+    The rows are :func:`app.logic.dcf.inputs.filings`, which the web app reads too.
     """
-    frame = dataset.statements_annual.frame("PL")
-    if frame.empty or "Fiscal Year" not in frame.columns:
+    rows = [
+        {
+            "Fiscal year": filing.fiscal_year,
+            "Period": filing.period,
+            "Report date": format_date(filing.report_date, missing="—"),
+            "Publish date": format_date(filing.publish_date, missing="—"),
+            "Restated": "yes" if filing.restated else "no",
+            "Source filing": filing.link,
+        }
+        for filing in dcf_inputs.filings(dataset)
+    ]
+    if not rows:
         return
 
     with st.expander("The filing behind each year", expanded=False):
-        rows = []
-        for _, record in frame.iterrows():
-            year = record["Fiscal Year"]
-            if pd.isna(year):
-                continue
-            rows.append(
-                {
-                    "Fiscal year": str(int(year)),
-                    "Period": record.get("Fiscal Period", ""),
-                    "Report date": format_date(record.get("Report Date"), missing="—"),
-                    "Publish date": format_date(record.get("Publish Date"), missing="—"),
-                    "Restated": "yes" if record.get("Restated") else "no",
-                    "Source filing": dataset.filing_link(int(year)),
-                }
-            )
         st.dataframe(
             pd.DataFrame(rows),
             width="stretch",

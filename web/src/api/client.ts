@@ -32,8 +32,15 @@ export class ApiError extends Error {
 function detailOf(body: unknown, status: number): string {
   const detail = (body as { detail?: unknown } | undefined)?.detail;
   if (typeof detail === "string") return detail;
-  // FastAPI's validation errors: a list of { loc, msg }.
-  if (Array.isArray(detail)) return detail.map((d: { msg?: string }) => d.msg).join("; ");
+  // FastAPI's validation errors: a list of { loc, msg }, named by the field
+  // they are about — "body" and the like are where, not what.
+  if (Array.isArray(detail))
+    return detail
+      .map((d: { loc?: (string | number)[]; msg?: string }) => {
+        const field = (d.loc ?? []).filter((part) => !["body", "query", "path"].includes(String(part))).join(".");
+        return field ? `${field}: ${d.msg}` : d.msg;
+      })
+      .join("; ");
   return `The API answered ${status}.`;
 }
 

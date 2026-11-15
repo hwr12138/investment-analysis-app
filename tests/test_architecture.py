@@ -36,9 +36,14 @@ FORBIDDEN_IN_LOGIC = frozenset({"streamlit", "requests", "yfinance", "thetadata"
 
 #: The logic modules that exist to fetch. Each is the single network-touching
 #: entry point of its feature — ``load_research`` and ``load_company`` — and may
-#: reach the data layer's fetchers. They still may not import Streamlit
-#: themselves; see :func:`test_nothing_in_logic_imports_the_ui_or_network_directly`.
-ORCHESTRATORS = frozenset({"app.logic.research.dataset", "app.logic.dcf.model"})
+#: reach the data layer's fetchers. ``dcf.inputs`` sits on ``dcf.model`` to
+#: assemble the DCF's assumption set for both front ends, and reaches the
+#: network only for the summary chart's past values. They still may not import
+#: Streamlit themselves; see
+#: :func:`test_nothing_in_logic_imports_the_ui_or_network_directly`.
+ORCHESTRATORS = frozenset(
+    {"app.logic.research.dataset", "app.logic.dcf.model", "app.logic.dcf.inputs"}
+)
 
 #: The DCF arithmetic. CLAUDE.md: no Streamlit, no network, no global state —
 #: what makes batch screening an extension rather than a rewrite.

@@ -7,7 +7,9 @@ which the research fetch does not do. It loads and values that ticker the first
 time the tab is opened — see :func:`render`.
 
 This module is the tab's shell: the load, the two caches, the session
-lifecycle, and the order the page draws in. Each part of the page lives in its
+lifecycle, and the order the page draws in. The run itself — assembling the
+assumption set and valuing it — is ``app.logic.dcf.inputs``, which the web
+app's API calls too. Each part of the page lives in its
 own module beside it — ``assumptions`` (every input), ``checks`` (banners and
 the validation panel), ``history``, ``results`` (header, projection,
 valuation), ``implied`` (the reverse DCF) and ``download`` — with what several
@@ -28,6 +30,7 @@ import streamlit as st
 
 from app.data import sharadar_client
 from app.logic.dcf import financials as fin
+from app.logic.dcf import inputs as dcf_inputs
 from app.logic.dcf import model as dcf_model
 from app.logic.dcf import validation as val
 from app.logic.dcf import valuation as dcf
@@ -283,11 +286,8 @@ def render(ticker: str) -> None:
     output = st.session_state.get("dcf_output")
 
     if _needs_run(output, ticker, fingerprint):
-        model_kwargs = common.model_kwargs(inputs)
         try:
-            result = dcf_model.run_model(
-                dataset, inputs["base"], drivers=inputs["drivers"], **model_kwargs
-            )
+            evaluation = dcf_inputs.evaluate(dataset, inputs)
         except dcf.TerminalValueError as error:
             st.error(f"**Terminal value cannot be computed.** {error}")
             st.info("Lower the terminal growth rate below the WACC, or raise the WACC.")
@@ -296,74 +296,14 @@ def render(ticker: str) -> None:
             common.render_blocking("The projection cannot be built", str(error))
             return
 
-        # Solved here rather than at render time so it describes the same run as
-        # everything else on the page. Reading live widget values instead would
-        # let the implied rate invert a valuation that is not the one displayed.
-        # Both methods, whichever is the headline: Gordon reads the price against
-        # fundamentals, the exit multiple mostly against its own trading history.
-        # No try/except: every way this can fail is a status on the result.
-        reverse_results = {
-            method: dcf_model.solve_implied_growth(
-                dataset,
-                inputs["base"],
-                target_price=dataset.last_price,
-                drivers=inputs["drivers"],
-                growth_fade_to=inputs["growth_fade_to"],
-                growth_hold=inputs["growth_hold"],
-                **{**model_kwargs, "headline_method": method},
-            )
-            for method in implied.METHOD_ORDER
-        }
-
-        # The range matters more than the point estimate. Every cell is the same
-        # model with the discount rate and the headline's terminal input moved.
-        grid_kwargs = {
-            key: value for key, value in model_kwargs.items()
-            if key not in {"wacc_result", "terminal_growth", "exit_multiple"}
-        }
-        sensitivity = dcf_model.sensitivity_grid(
-            dataset,
-            inputs["base"],
-            wacc_result=inputs["wacc"],
-            terminal_growth=inputs["terminal_growth"],
-            exit_multiple=inputs["exit_multiple"],
-            drivers=inputs["drivers"],
-            **grid_kwargs,
-        )
-
-        context = dcf_model.build_validation_context(
-            dataset,
-            base=inputs["base"],
-            base_fcff=inputs["base_fcff"],
-            valuation_date=valuation_date,
-            effective_tax_rate=inputs["etr"],
-            beta=inputs["beta_outcome"],
-            equity_risk_premium=inputs["erp"],
-            result=result,
-            terminal_growth=inputs["terminal_growth"],
-            risk_free_rate=inputs["risk_free"],
-            sbc=inputs["sbc"],
-            periods_in_use=inputs["periods_in_use"],
-            drivers=inputs["drivers"],
-            beta_in_use=inputs["beta"],
-            acquisitions_in_capex=inputs["acquisitions_in_capex"],
-            growth_basis=inputs["growth_basis"],
-            assumed_margins=inputs["assumed_margins"],
-            spread_table_as_of=inputs["spread_table_as_of"],
-            implied_growth={
-                method: outcome.growth for method, outcome in reverse_results.items()
-            },
-        )
-        issues, check_results = val.run_all(context, inputs["tolerances"])
-
         output = {
             "company": ticker,
             "fingerprint": fingerprint,
-            "result": result,
-            "reverse": reverse_results,
-            "sensitivity": sensitivity,
-            "issues": issues,
-            "check_results": check_results,
+            "result": evaluation.result,
+            "reverse": evaluation.reverse,
+            "sensitivity": evaluation.sensitivity,
+            "issues": evaluation.issues,
+            "check_results": evaluation.check_results,
             # The inputs are snapshotted alongside the results so the export and
             # the provenance shown always describe the numbers on screen, not
             # whatever the assumption widgets have since been changed to.

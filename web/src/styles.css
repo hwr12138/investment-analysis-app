@@ -19,3 +19,15 @@
 .num {
   font-variant-numeric: tabular-nums;
 }
+
+/* A first column that stays put while a wide table scrolls under it, painted
+   in the card's own colour so it reads as part of the table in both schemes. */
+.sticky-col {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background: var(--mantine-color-white);
+}
+:root[data-mantine-color-scheme="dark"] .sticky-col {
+  background: var(--mantine-color-dark-6);
+}
