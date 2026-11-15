@@ -11,12 +11,13 @@ Where the store is comes from the environment, else ``.streamlit/secrets.toml``
 
 * ``OPTIONS_STORE_URI = "gs://bucket"`` or ``"file:///abs/path"`` — the local
   form is for development and tests, and needs no credentials;
-* or ``OPTIONS_BUCKET = "bucket"`` with a ``[gcp_service_account]`` table holding
-  a read-only service account's key.
+* or ``OPTIONS_BUCKET = "bucket"``.
 
-Without a key the GCS client authenticates as whatever the environment
-provides — on Cloud Run, the API service's own account, which needs only
-``roles/storage.objectViewer`` on the bucket.
+A ``gs://`` store is read with the key in a ``[gcp_service_account]`` table if the
+secrets file has one — optional, for a read-only service account. Without it the
+GCS client authenticates as whatever the environment provides: on Cloud Run, the
+API service's own account, which needs only ``roles/storage.objectViewer`` on the
+bucket; locally, your application-default credentials.
 
 **Two cache layers, keyed so a new night is picked up and an old one never
 re-downloaded.** Each object's *generation* (GCS's version stamp, or a local
@@ -58,7 +59,7 @@ def _location() -> str:
         return f"gs://{bucket}"
     raise OptionsStoreError(
         "The options store is not configured. Set OPTIONS_STORE_URI (gs://… or file:///…) "
-        "or OPTIONS_BUCKET with a [gcp_service_account] in .streamlit/secrets.toml."
+        "or OPTIONS_BUCKET, in the environment or .streamlit/secrets.toml."
     )
 
 
