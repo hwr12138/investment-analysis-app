@@ -57,13 +57,26 @@ on the Python side then fails `npm run typecheck` rather than showing up as `und
 
 ## Deploy
 
-One-time setup, in the GCP project the options collector already uses (`PROJECT`, `REGION`
-as in `collector/README.md`):
+It lives in the same Google Cloud project as the options collector (`PROJECT`, `REGION` as in
+`collector/README.md`), served at **<https://equiti-app.web.app>**. That is a second Hosting site
+named in `firebase.json`; the project's default site would carry the permanent project ID instead.
 
-1. **Firebase**: in the Firebase console, add Firebase to the existing Google Cloud project.
-   Under Authentication, enable the Google provider. Register a Web app and copy its config
-   into `web/.env.production.local` (`VITE_FIREBASE_*`).
-2. **Secret and service account**:
+One-time setup:
+
+1. **Firebase**:
+
+   ```bash
+   firebase projects:addfirebase PROJECT
+   firebase hosting:sites:create equiti-app --project PROJECT
+   firebase apps:create WEB Equiti --project PROJECT
+   ```
+
+   Copy `firebase apps:sdkconfig WEB <app id> --project PROJECT` into
+   `web/.env.production.local` as the four `VITE_FIREBASE_*` values (git ignores the file). Then,
+   in the Firebase console under Authentication → Sign-in method, turn on **Google**. The CLI
+   cannot do that step, because it creates the OAuth client.
+2. **Secret and service account** (the build account also needs the staging-bucket binding in
+   `collector/README.md` §4):
 
    ```bash
    printf '%s' 'YOUR_SHARADAR_KEY' | gcloud secrets create sharadar-api-key --data-file=-

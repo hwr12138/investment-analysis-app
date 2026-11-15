@@ -53,7 +53,12 @@ logs:
 gcloud iam service-accounts create options-builder
 gcloud projects add-iam-policy-binding PROJECT --member=serviceAccount:options-builder@PROJECT.iam.gserviceaccount.com --role=roles/artifactregistry.writer
 gcloud projects add-iam-policy-binding PROJECT --member=serviceAccount:options-builder@PROJECT.iam.gserviceaccount.com --role=roles/logging.logWriter
+gcloud storage buckets add-iam-policy-binding gs://PROJECT_cloudbuild --member=serviceAccount:options-builder@PROJECT.iam.gserviceaccount.com --role=roles/storage.objectViewer
 ```
+
+The last binding lets the build read the source that `gcloud builds submit` uploads to
+`PROJECT_cloudbuild`; without it the build fails before its first step. The bucket exists once
+any build has been submitted. The API service (`deploy/api/`) builds the same way.
 
 `.gcloudignore` keeps `.streamlit/` (your secrets) out of the upload.
 

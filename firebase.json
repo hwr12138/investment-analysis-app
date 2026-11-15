@@ -1,5 +1,6 @@
 {
   "hosting": {
+    "site": "equiti-app",
     "public": "web/dist",
     "ignore": ["firebase.json", "**/.*"],
     "rewrites": [
