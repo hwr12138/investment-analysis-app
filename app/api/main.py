@@ -16,7 +16,7 @@ from __future__ import annotations
 from fastapi import Depends, FastAPI, Request, status
 from fastapi.responses import JSONResponse
 
-from app.api import momentum, options, portfolio, rates
+from app.api import momentum, options, portfolio, rates, research
 from app.api.auth import User, require_user
 from app.api.contract import Contract
 from app.data import options_store, sharadar_client
@@ -30,7 +30,7 @@ app = FastAPI(
 )
 
 _signed_in = [Depends(require_user)]
-for _router in (momentum.router, options.router, portfolio.router, rates.router):
+for _router in (momentum.router, options.router, portfolio.router, rates.router, research.router):
     app.include_router(_router, prefix="/api", dependencies=_signed_in)
 
 

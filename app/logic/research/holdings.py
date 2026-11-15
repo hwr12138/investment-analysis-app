@@ -808,12 +808,33 @@ class Holdings:
     def ok(self) -> bool:
         return self.holders.ok
 
-    def days_old(self, today: date) -> int | None:
-        """Days since the filing deadline for the quarter on screen."""
+    @property
+    def deadline(self) -> date | None:
+        """The last day managers may file the quarter on screen."""
         if self.as_of is None:
             return None
-        deadline = self.as_of + pd.Timedelta(days=FILING_LAG_DAYS)
-        return int((pd.Timestamp(today) - deadline).days)
+        return (self.as_of + pd.Timedelta(days=FILING_LAG_DAYS)).date()
+
+    def days_old(self, today: date) -> int | None:
+        """Days since the filing deadline for the quarter on screen.
+
+        Negative before the deadline, when managers are still filing and the
+        register is incomplete rather than merely old.
+        """
+        if self.deadline is None:
+            return None
+        return int((pd.Timestamp(today) - pd.Timestamp(self.deadline)).days)
+
+    @property
+    def latest(self) -> dict[str, float | None]:
+        """The last quarter's ``owned``, ``units`` and ``holders``, ``None`` where absent."""
+        if self.ownership.empty:
+            return {}
+        row = self.ownership.iloc[-1]
+        return {
+            key: None if pd.isna(row.get(key)) else float(row[key])
+            for key in ("owned", "units", "holders")
+        }
 
 
 def build(

@@ -138,18 +138,7 @@ export function themeColors(theme: MantineTheme, themes: string[]): Map<string, 
   );
 }
 
-export type ChartPalette = { grid: string; text: string; muted: string; zero: string; font: string };
-
-export function chartPalette(theme: MantineTheme, dark: boolean): ChartPalette {
-  const c = theme.colors;
-  return {
-    grid: dark ? c.dark[5] : c.gray[2],
-    text: dark ? c.dark[1] : c.gray[7],
-    muted: dark ? c.dark[2] : c.gray[6],
-    zero: dark ? c.dark[3] : c.gray[5],
-    font: theme.fontFamily ?? "sans-serif",
-  };
-}
+export { chartPalette, type ChartPalette } from "../../components/chartPalette";
 
 // ---------------------------------------------------------------------------
 // Formatting

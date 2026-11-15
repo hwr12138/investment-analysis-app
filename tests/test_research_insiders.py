@@ -583,3 +583,30 @@ def test_the_module_makes_no_request_and_reads_no_price_series():
     }
     assert not {name for name in called if name.startswith("fetch")}
     assert "ohlcv" not in called
+
+
+def test_the_plotted_trades_are_priced_open_market_ones_in_the_lookback(insider_frame):
+    """What the events chart draws: P and S only, each with a signed flow, a
+    role and a price on the chart's basis — the same rows the view plotted."""
+    trades = insiders.open_market_trades(insider_frame, pd.DataFrame(), today=TODAY)
+    assert set(trades["transactioncode"]) <= {"P", "S"}
+    assert trades["flow"].notna().all() and trades["when"].notna().all()
+    assert {"role", "plotted"} <= set(trades.columns)
+    cutoff = pd.Timestamp(TODAY) - pd.DateOffset(years=insiders.InsiderTolerances().lookback_years)
+    assert (trades["when"] >= cutoff).all()
+    # No split on file: the plotted price is the filed one.
+    assert (trades["plotted"] == pd.to_numeric(trades["transactionpricepershare"])).all()
+
+
+def test_the_plotted_price_divides_by_the_splits_since(insider_frame):
+    split = _splits([("2026-06-01", 2.0)])
+    trades = insiders.open_market_trades(insider_frame, split, today=TODAY)
+    before = trades["when"] < pd.Timestamp("2026-06-01")
+    filed = pd.to_numeric(trades["transactionpricepershare"])
+    assert before.any()
+    assert (trades.loc[before, "plotted"] == filed[before] / 2.0).all()
+    assert (trades.loc[~before, "plotted"] == filed[~before]).all()
+
+
+def test_no_filings_means_no_trades():
+    assert insiders.open_market_trades(pd.DataFrame(), pd.DataFrame(), today=TODAY).empty

@@ -19,6 +19,7 @@ import pandas as pd
 import streamlit as st
 
 from app.formatting import format_pct
+from app.logic.research import comparison as shared
 from app.logic.research.comparison import Comparison
 from app.logic.research.dataset import ResearchDataset
 
@@ -250,10 +251,8 @@ def render_sources(
 
 
 def universe_date(peer_universe: pd.DataFrame) -> str:
-    if peer_universe.empty or "date" not in peer_universe.columns:
-        return ""
-    stamp = pd.Timestamp(peer_universe["date"].max())
-    return "" if pd.isna(stamp) else stamp.date().isoformat()
+    priced = shared.priced_on(peer_universe)
+    return priced.isoformat() if priced else ""
 
 
 #: The provenance legend both sub-tabs close their sources panel with.

@@ -183,6 +183,45 @@ def dcf_line_dates(filed: list[date], window_start: date, window_end: date) -> D
     return DcfLineDates(start=start, anchor=before[-1] if before else None, inside=inside)
 
 
+@dataclass(frozen=True)
+class DcfStep:
+    """One step of the chart's DCF line, before it is valued.
+
+    ``drawn_at`` is the session the step sits on and ``as_of`` the date it is
+    valued as of — ``None`` for today, the DCF tab's own number. The two differ
+    only for the anchor: it is valued on the filing before the window and drawn
+    at the window's first session, because the chart hides weekends and a point
+    inside a hidden gap would draw nowhere.
+    """
+
+    drawn_at: date
+    as_of: date | None
+    label: str
+
+
+def dcf_line_steps(
+    filings: dict[date, str], sessions: pd.DatetimeIndex
+) -> tuple[DcfLineDates, tuple[DcfStep, ...]]:
+    """The steps a price window's DCF line needs, in order, ending on today.
+
+    ``filings`` maps each filing date to its period ("FY2025 Q3"). Each step is
+    held until the next, so a jump sits on the filing that caused it. Valuing
+    them is the caller's, through its own cache: this decides only *which* dates
+    and where they draw. If no step can be valued there is no line, and the
+    reason to give is today's, else the first step's.
+    """
+    index = pd.DatetimeIndex(sessions)
+    first, last = index.min().date(), index.max().date()
+    dates = dcf_line_dates(list(filings), first, last)
+    steps: list[DcfStep] = []
+    if dates.anchor is not None:
+        opens = index[index >= pd.Timestamp(dates.start)].min().date()
+        steps.append(DcfStep(opens, dates.anchor, f"{filings[dates.anchor]} filed {dates.anchor}"))
+    steps.extend(DcfStep(filed, filed, f"{filings[filed]} filed {filed}") for filed in dates.inside)
+    steps.append(DcfStep(last, None, "today"))
+    return dates, tuple(steps)
+
+
 def slice_period(frame: pd.DataFrame, period: str, today: date | None = None) -> pd.DataFrame:
     """Trims a date-indexed price frame to one of :data:`PERIODS`.
 

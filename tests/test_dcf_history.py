@@ -423,3 +423,26 @@ def test_the_legend_holds_the_dcf_line_alone():
     assert figure.layout.showlegend is True
     shown = [t.name for t in figure.data if t.showlegend is not False]
     assert shown == ["DCF value"]
+
+
+def test_the_line_steps_anchor_on_the_windows_first_session_and_end_on_today():
+    """The anchor is valued on the filing before the window but drawn where the
+    window opens — a weekend start would otherwise draw it nowhere."""
+    periods = {d: f"P{i}" for i, d in enumerate(_FILED)}
+    # 2025-09-27 is a Saturday; the window's first session is the Monday.
+    sessions = pd.bdate_range("2025-09-29", "2026-09-25")
+    dates, steps = research.dcf_line_steps(periods, sessions)
+
+    assert dates.start == date(2025, 9, 29)
+    assert steps[0].as_of == date(2025, 8, 27)
+    assert steps[0].drawn_at == date(2025, 9, 29)
+    assert steps[0].label == "P1 filed 2025-08-27"
+    assert [s.as_of for s in steps[1:-1]] == list(dates.inside)
+    assert all(s.drawn_at == s.as_of for s in steps[1:-1])
+    assert steps[-1].as_of is None and steps[-1].label == "today"
+    assert steps[-1].drawn_at == date(2026, 9, 25)
+
+
+def test_a_window_before_any_filing_is_today_alone():
+    _, steps = research.dcf_line_steps({}, pd.bdate_range("2026-09-01", "2026-09-25"))
+    assert [(s.as_of, s.label) for s in steps] == [(None, "today")]

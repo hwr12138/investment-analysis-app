@@ -27,11 +27,6 @@ from app.logic.research.comparison import Comparison
 from app.logic.research.dataset import ResearchDataset
 from app.views.research.valuation import table
 
-#: Percentage points. Below this the two rates are called level with each other
-#: — a peer median built from a few dozen companies moves by more than this
-#: between quarters, and a verdict that flips on that is noise.
-_MATERIAL_GAP = 0.02
-
 
 def render(dataset: ResearchDataset, peer_universe: pd.DataFrame) -> None:
     industry = shared.industry_of(peer_universe, dataset.ticker)
@@ -53,31 +48,18 @@ def render(dataset: ResearchDataset, peer_universe: pd.DataFrame) -> None:
 
 
 def _verdict(comparison: Comparison) -> str:
-    """The company's rate against the industry's, in percentage points.
+    """The gap in percentage points, with ``growth.verdict``'s word for it.
 
-    Green is faster and red is slower throughout, which is the reading a
-    shareholder wants for revenue, earnings and cash flow. It is *not* a
-    judgement for capex or working capital — growing those faster is neither
-    good nor bad on its own — and the legend says so rather than the colour
-    pretending otherwise.
+    Green is faster and red is slower throughout; the legend says why that is
+    not a judgement for capex or working capital.
     """
-    gap = comparison.industry_gap
-    if gap is None:
+    reading = research.verdict(comparison)
+    if reading.gap is None:
         return table.missing()
-
-    points = f"{gap * 100:+,.1f} pp"
-    if abs(gap) < _MATERIAL_GAP:
-        return table.verdict_cell(
-            gap=gap,
-            text=f'{points}<span class="val-sub">in line</span>',
-            favourable=None,
-        )
-
-    word = "faster" if gap > 0 else "slower"
     return table.verdict_cell(
-        gap=gap,
-        text=f'{points}<span class="val-sub">{word} than industry</span>',
-        favourable=gap > 0,
+        gap=reading.gap,
+        text=f'{reading.gap * 100:+,.1f} pp<span class="val-sub">{reading.word}</span>',
+        favourable=reading.favourable,
     )
 
 

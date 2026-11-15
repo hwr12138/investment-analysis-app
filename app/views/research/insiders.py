@@ -261,20 +261,11 @@ def _events_figure(
     A line rather than candles: the subject is the events, and five years of
     candles at this width is a solid block.
 
-    Markers sit at the price the insider actually paid, not at that day's close:
-    for a ``P`` or an ``S`` the two agree inside the day's range, and snapping to
-    the close would quietly redraw the trade.
-
-    That price is put on the chart's **split-adjusted** basis first — see
-    ``insiders.split_adjusted_price``. SEP's close is adjusted for splits and
-    SF2's filed price never is, so at Tesla the November 2021 sales would sit at
-    $981–$1,237 against a line reading $338–$410. The hover keeps the filed
-    price beside it, because that is the number on the form.
-
-    Restricted to ``P`` and ``S`` for a visual reason as well as an arithmetic
-    one: an ``M`` exercise is priced at the strike, often a fraction of the
-    market price, so plotting every code would scatter markers far below the
-    line and imply a crash that never happened.
+    Which trades, and at what price, is ``insiders.open_market_trades``: the
+    price paid, on the chart's **split-adjusted** basis. SEP's close is adjusted
+    for splits and SF2's filed price never is, so at Tesla the November 2021
+    sales would sit at $981–$1,237 against a line reading $338–$410. The hover
+    keeps the filed price beside it, because that is the number on the form.
 
     Sizes use ``sizemode="area"``. Plotly's default scales the *diameter*, which
     exaggerates a large trade by the square of its value.
@@ -298,15 +289,10 @@ def _events_figure(
             )
         )
 
-    market = frame[research.is_open_market(frame)].copy()
-    market["flow"] = research.signed_flow(market)
-    market["when"] = pd.to_datetime(market["transactiondate"], errors="coerce")
-    market = market[market["flow"].notna() & market["when"].notna()]
-    market = market[market["when"] >= cutoff]
-
+    market = research.open_market_trades(
+        frame, dataset.actions, tolerances=tolerances, today=dataset.loaded_at
+    )
     if not market.empty:
-        market["role"] = research.role_of(market)
-        market["plotted"] = research.split_adjusted_price(market, dataset.actions)
         filed = market["transactionpricepershare"]
         # The two differ only across a split, so the "as filed" note is added
         # per row rather than always — on a company that never split it would be

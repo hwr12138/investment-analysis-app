@@ -179,14 +179,14 @@ def _render_banner(built: research.Holdings, today) -> None:
     quarter = built.as_of.date() if built.as_of is not None else None
     if quarter is None:
         return
-    deadline = built.as_of + pd.Timedelta(days=research.FILING_LAG_DAYS)
+    deadline = built.deadline
     age = built.days_old(today) or 0
     if age < 0:
         # Read before the deadline: managers are still filing, so the register is
         # not merely old, it is incomplete — a different caution and a stronger
         # one, since holders are missing rather than merely stale.
         tail = (
-            f"and filers have until {deadline.date()} to report it, so the "
+            f"and filers have until {deadline} to report it, so the "
             f"register is still filling in — holders are missing from it today"
         )
     else:
@@ -202,7 +202,7 @@ def _render_banner(built: research.Holdings, today) -> None:
 
 
 def _render_headline(built: research.Holdings, currency: str) -> None:
-    latest = _latest_ownership(built.ownership)
+    latest = built.latest
     cells = [
         _headline_cell(
             "Reported institutional ownership",
@@ -245,16 +245,6 @@ def _headline_cell(label: str, value: str | None, sub: str) -> str:
     tail = f'<span class="hold-sub">{escape(sub)}</span>' if sub else ""
     return f'<td><span class="hold-k">{escape(label)}</span>{body}{tail}</td>'
 
-
-def _latest_ownership(frame: pd.DataFrame) -> dict:
-    if frame.empty:
-        return {}
-    row = frame.iloc[-1]
-    return {
-        "owned": None if pd.isna(row.get("owned")) else float(row["owned"]),
-        "units": None if pd.isna(row.get("units")) else float(row["units"]),
-        "holders": None if pd.isna(row.get("holders")) else float(row["holders"]),
-    }
 
 
 def _render_legend() -> None:
