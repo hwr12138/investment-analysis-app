@@ -44,7 +44,7 @@ import pandas as pd
 from app.data.sharadar import vocabulary
 from app.formatting import format_pct
 from app.logic.research import comparison as shared
-from app.logic.research.comparison import PRIOR, Comparison
+from app.logic.research.comparison import PRIOR, Comparison, Verdict
 from app.provenance import Origin
 
 
@@ -69,6 +69,12 @@ class GrowthTolerances:
 
     #: Years of the company's own history the median is taken over.
     lookback_years: int = 5
+
+    #: Percentage points, as a rate (0.02 is two points). Below this the two
+    #: rates are called level with each other — a peer median built from a few
+    #: dozen companies moves by more than this between quarters, and a verdict
+    #: that flips on that is noise.
+    material_gap: float = 0.02
 
 
 @dataclass(frozen=True)
@@ -337,6 +343,27 @@ def build_comparison(
         _compare(metric, statements_ttm, peers, industry, cutoff, tolerances)
         for metric in METRICS
     ]
+
+
+def verdict(comparison: Comparison, tolerances: GrowthTolerances | None = None) -> Verdict:
+    """The company's rate against the industry's, in percentage points.
+
+    Faster is favourable throughout, which is the reading a shareholder wants for
+    revenue, earnings and cash flow. It is *not* a judgement for capex or working
+    capital — growing those faster is neither good nor bad on its own — and the
+    tab's legend says so rather than the colour pretending otherwise.
+    """
+    tolerances = tolerances or GrowthTolerances()
+    gap = comparison.industry_gap
+    if gap is None:
+        return Verdict(gap=None)
+    if abs(gap) < tolerances.material_gap:
+        return Verdict(gap=gap, word="in line")
+    return Verdict(
+        gap=gap,
+        word="faster than industry" if gap > 0 else "slower than industry",
+        favourable=gap > 0,
+    )
 
 
 def _compare(

@@ -44,7 +44,7 @@ import pandas as pd
 from app.data.sharadar import vocabulary
 from app.formatting import format_pct, format_ratio
 from app.logic.research import comparison as shared
-from app.logic.research.comparison import Comparison
+from app.logic.research.comparison import Comparison, Verdict
 from app.provenance import Origin
 
 #: Where a term in a derived multiple is read from. ``DAILY`` terms are
@@ -77,6 +77,12 @@ class ValuationTolerances:
 
     #: Years of the company's own history the median is taken over.
     lookback_years: int = 5
+
+    #: Above this premium to the industry median the reading is called rich,
+    #: below its negative, cheap; between, in line. A tenth is wide enough that
+    #: ordinary noise in a peer median does not flip the label from one company
+    #: to the next.
+    material_premium: float = 0.10
 
 
 @dataclass(frozen=True)
@@ -321,6 +327,27 @@ def build_comparison(
         _compare(metric, daily, statements_ttm, peers, industry, cutoff, tolerances)
         for metric in METRICS
     ]
+
+
+def verdict(comparison: Comparison, tolerances: ValuationTolerances | None = None) -> Verdict:
+    """The current reading against the industry median, as a premium.
+
+    The judgement flips for the dividend yield: paying more than the industry is
+    the *cheap* direction there, and calling it rich because the number is high
+    would be exactly backwards.
+    """
+    tolerances = tolerances or ValuationTolerances()
+    premium = comparison.industry_gap
+    if premium is None:
+        return Verdict(gap=None)
+    if abs(premium) < tolerances.material_premium:
+        return Verdict(gap=premium, word="in line")
+    expensive = premium > 0 if not comparison.metric.higher_is_cheaper else premium < 0
+    return Verdict(
+        gap=premium,
+        word="richer than industry" if expensive else "cheaper than industry",
+        favourable=not expensive,
+    )
 
 
 

@@ -419,3 +419,36 @@ def test_the_premium_is_relative_to_the_industry(peer_universe):
 def test_no_premium_without_both_sides(peer_universe):
     comparison = _comparisons(peer_universe, industry="")["P/E (TTM)"]
     assert comparison.industry_gap is None
+
+
+# ---------------------------------------------------------------------------
+# The verdict, as both front ends read it
+# ---------------------------------------------------------------------------
+
+
+def _gap(label: str, gap: float | None) -> comparison_lib.Verdict:
+    metric = {m.label: m for m in valuation.METRICS}[label]
+    return valuation.verdict(comparison_lib.Comparison(metric=metric, industry_gap=gap))
+
+
+def test_a_premium_is_rich_and_a_discount_cheap():
+    assert _gap("P/E (TTM)", 0.5) == comparison_lib.Verdict(0.5, "richer than industry", False)
+    assert _gap("P/E (TTM)", -0.3) == comparison_lib.Verdict(-0.3, "cheaper than industry", True)
+
+
+def test_the_dividend_yield_reads_the_other_way():
+    assert _gap("Dividend Yield (TTM)", 0.5).favourable is True
+
+
+def test_a_gap_inside_the_threshold_is_in_line_and_neutral():
+    reading = _gap("P/E (TTM)", 0.05)
+    assert reading.word == "in line" and reading.favourable is None
+    wide = valuation.ValuationTolerances(material_premium=0.01)
+    metric = valuation.METRICS[0]
+    assert valuation.verdict(
+        comparison_lib.Comparison(metric=metric, industry_gap=0.05), wide
+    ).favourable is False
+
+
+def test_no_median_means_no_verdict():
+    assert _gap("P/E (TTM)", None) == comparison_lib.Verdict(None)

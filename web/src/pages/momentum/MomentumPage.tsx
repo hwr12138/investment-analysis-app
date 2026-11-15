@@ -13,7 +13,6 @@ import {
   Skeleton,
   Stack,
   Text,
-  TextInput,
   ThemeIcon,
   Title,
   useComputedColorScheme,
@@ -26,7 +25,6 @@ import {
   IconArrowUpRight,
   IconCalendar,
   IconMinus,
-  IconSearch,
 } from "@tabler/icons-react";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
@@ -34,6 +32,7 @@ import { useNavigate, useParams, useSearchParams } from "react-router";
 
 import { api, unwrap, type Schemas } from "../../api/client";
 import { PlotlyChart } from "../../components/PlotlyChart";
+import { TickerSearch } from "../../components/TickerSearch";
 import { Stat } from "../../components/Stat";
 import { fixed, isoDay, money, signed } from "../../format";
 import { TONE_COLOR, type Tone } from "../../theme";
@@ -106,29 +105,6 @@ export function MomentumPage() {
       )}
       {window.data && <MomentumBody key={`${ticker}/${period}`} window={window.data} />}
     </Stack>
-  );
-}
-
-function TickerSearch({ initial, onSubmit }: { initial: string; onSubmit: (ticker: string) => void }) {
-  const [draft, setDraft] = useState(initial);
-  return (
-    <form
-      onSubmit={(event) => {
-        event.preventDefault();
-        const next = draft.trim().toUpperCase();
-        if (next) onSubmit(next);
-      }}
-    >
-      <TextInput
-        aria-label="Ticker"
-        placeholder="Ticker"
-        value={draft}
-        onChange={(event) => setDraft(event.currentTarget.value)}
-        leftSection={<IconSearch size={16} />}
-        w={150}
-        styles={{ input: { textTransform: "uppercase" } }}
-      />
-    </form>
   );
 }
 

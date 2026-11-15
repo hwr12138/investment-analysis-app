@@ -389,3 +389,21 @@ def test_growth_reads_no_price_series():
     import inspect
 
     assert "daily" not in inspect.signature(growth.build_comparison).parameters
+
+
+# ---------------------------------------------------------------------------
+# The verdict, as both front ends read it
+# ---------------------------------------------------------------------------
+
+
+def test_faster_is_favourable_and_slower_not():
+    from app.logic.research.comparison import Comparison, Verdict
+
+    def read(gap):
+        return growth.verdict(Comparison(metric=growth.METRICS[0], industry_gap=gap))
+
+    assert read(0.09) == Verdict(0.09, "faster than industry", True)
+    assert read(-0.18) == Verdict(-0.18, "slower than industry", False)
+    assert read(0.001) == Verdict(0.001, "in line", None)
+    assert read(None) == Verdict(None)
+    assert growth.GrowthTolerances().material_gap == 0.02

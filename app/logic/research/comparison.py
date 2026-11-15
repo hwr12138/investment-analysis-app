@@ -26,6 +26,7 @@ of them by a factor of sixty.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
 
 import pandas as pd
 
@@ -82,6 +83,22 @@ class Comparison:
     industry_reason: str = ""
     origin: Origin = Origin.UNAVAILABLE
     industry_gap: float | None = None
+
+
+@dataclass(frozen=True)
+class Verdict:
+    """A comparison's reading against the industry, before it is coloured.
+
+    Shared in shape and nothing else: each sub-tab decides it with its own
+    ``verdict`` — a premium the reader would rather not pay on one, a rate the
+    reader would rather see faster on the other — and its own materiality
+    threshold. ``favourable`` is ``None`` for an in-line gap, which is drawn
+    neutral, and ``gap`` is ``None`` exactly when there is no industry median.
+    """
+
+    gap: float | None
+    word: str = ""
+    favourable: bool | None = None
 
 
 def empty_dated() -> pd.Series:
@@ -254,3 +271,14 @@ def industry_of(peer_universe: pd.DataFrame, ticker: str) -> str:
         return ""
     value = match.iloc[0]["industry"]
     return "" if is_missing(value) else str(value)
+
+
+def priced_on(peer_universe: pd.DataFrame) -> date | None:
+    """The session the universe's multiples were read on, or ``None``.
+
+    Stated beside every median so a reader knows which day "the industry" is.
+    """
+    if peer_universe.empty or "date" not in peer_universe.columns:
+        return None
+    stamp = pd.Timestamp(peer_universe["date"].max())
+    return None if pd.isna(stamp) else stamp.date()

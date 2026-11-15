@@ -294,3 +294,17 @@ def test_the_figure_uses_the_dark_template(built):
 def test_an_empty_history_still_draws_a_frame():
     figure = view._ownership_figure(pd.DataFrame())
     assert figure.layout.height == 420
+
+
+def test_the_register_dates_its_own_deadline(built):
+    """The banner's arithmetic, as both front ends read it."""
+    assert built.deadline == (built.as_of + pd.Timedelta(days=45)).date()
+    assert built.days_old(built.deadline) == 0
+    assert built.days_old(built.deadline - pd.Timedelta(days=3)) == -3
+
+
+def test_the_latest_reading_is_the_last_quarter_with_nothing_filled(built):
+    last = built.ownership.iloc[-1]
+    assert built.latest["units"] == float(last["units"])
+    assert built.latest["holders"] == float(last["holders"])
+    assert logic.Holdings().latest == {}

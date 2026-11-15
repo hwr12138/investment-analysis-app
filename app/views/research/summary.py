@@ -259,33 +259,23 @@ def _dcf_line(dataset: ResearchDataset, window: pd.DataFrame) -> tuple[go.Scatte
     reason, and the notes the chart should carry.
     """
     ticker, today = dataset.ticker, dataset.loaded_at
-    index = pd.DatetimeIndex(window.index)
-    first, last = index.min().date(), index.max().date()
+    first = pd.DatetimeIndex(window.index).min().date()
     try:
         filings = _dcf_filings_cached(ticker)
     except sharadar_client.SharadarError as error:
         return None, [f"No DCF line: the filing dates could not be fetched — {error}"]
-    periods = {f.filed: f.period for f in filings}
-    dates = research.dcf_line_dates(list(periods), first, last)
+    dates, planned = research.dcf_line_steps(
+        {f.filed: f.period for f in filings}, pd.DatetimeIndex(window.index)
+    )
 
     with st.spinner("Valuing the company at each filing in the window…"):
+        # Today first: it is the DCF tab's own number and the likeliest cached.
         current = _dcf_point(ticker, None, today)
-        if current.value is None and not (dates.anchor or dates.inside):
-            return None, [f"No DCF line: {current.reason}"]
-        steps: list[tuple[date, research_dataset.DcfPoint, str]] = []
-        if dates.anchor is not None:
-            # The first session on or after the start: the chart hides weekends,
-            # and a point inside a hidden gap would draw nowhere.
-            opens = index[index >= pd.Timestamp(dates.start)].min().date()
-            steps.append((
-                opens, _dcf_point(ticker, dates.anchor, today),
-                f"{periods[dates.anchor]} filed {dates.anchor}",
-            ))
-        for filed in dates.inside:
-            steps.append((
-                filed, _dcf_point(ticker, filed, today), f"{periods[filed]} filed {filed}"
-            ))
-        steps.append((last, current, "today"))
+        steps = [
+            (step.drawn_at, current if step.as_of is None
+             else _dcf_point(ticker, step.as_of, today), step.label)
+            for step in planned
+        ]
 
     valued = [point.value for _, point, _ in steps if point.value is not None]
     if not valued:

@@ -1,0 +1,130 @@
+/* The statement table on the Financials tab. Scrolls sideways inside its card;
+   the page scrolls vertically, so the header row is deliberately not sticky. */
+.fin-scroll {
+  overflow-x: auto;
+}
+
+/* `separate` is required, not stylistic: with collapsed borders a sticky cell
+   drops its borders while scrolling in WebKit, and the pinned column loses its rule. */
+.fin {
+  /* The card's own ground, so the pinned column reads as part of it: Mantine
+     paints a card in the body colour in light mode and dark-6 in dark. */
+  --fin-bg: var(--mantine-color-body);
+  width: max-content;
+  min-width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: var(--mantine-font-size-sm);
+  font-variant-numeric: tabular-nums;
+}
+.fin th,
+.fin td {
+  padding: 5px 14px;
+  white-space: nowrap;
+}
+.fin td {
+  text-align: right;
+}
+[data-mantine-color-scheme="dark"] .fin {
+  --fin-bg: var(--mantine-color-dark-6);
+}
+
+/* The pinned label column, opaque so the figures scrolling under it do not show through. */
+.fin .fin-label {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  text-align: left;
+  font-weight: inherit;
+  background: var(--fin-bg);
+  border-right: 1px solid var(--mantine-color-default-border);
+}
+.fin thead th {
+  background: var(--fin-bg);
+  border-bottom: 1px solid var(--mantine-color-default-border);
+  text-align: right;
+  vertical-align: bottom;
+  font-weight: 600;
+  font-size: var(--mantine-font-size-xs);
+}
+.fin thead th.fin-label {
+  z-index: 2;
+  text-align: left;
+  color: var(--mantine-color-dimmed);
+}
+.fin .fin-sub {
+  display: block;
+  font-weight: 400;
+  color: var(--mantine-color-dimmed);
+  font-size: 11px;
+}
+/* Separates the latest (TTM or MRQ) column from the fiscal periods. */
+.fin .fin-lead {
+  border-right: 1px solid var(--mantine-color-default-border);
+}
+
+.fin-section th {
+  padding-top: 18px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--mantine-color-dimmed);
+}
+.fin-subtotal {
+  font-weight: 600;
+}
+.fin-subtotal > * {
+  border-top: 1px solid var(--mantine-color-default-border);
+}
+.fin-total {
+  font-weight: 700;
+}
+.fin-total > * {
+  border-top: 2px solid var(--mantine-color-dimmed);
+  border-bottom: 1px solid var(--mantine-color-default-border);
+}
+.fin-row:hover > * {
+  background: var(--mantine-color-default-hover);
+}
+
+/* Indentation by padding, so it survives copying out of the table. */
+.fin-i1 .fin-label {
+  padding-left: 30px;
+}
+.fin-i2 .fin-label {
+  padding-left: 48px;
+}
+
+/* Never reported: visibly distinct from a reported zero, which means something else. */
+.fin-missing {
+  color: var(--mantine-color-dimmed);
+  opacity: 0.6;
+}
+/* Exactly 0 on an indicator Sharadar zero-fills, where 0 may mean "absent from the filing". */
+.fin-zerofill {
+  border-bottom: 1px dotted var(--mantine-color-dimmed);
+  cursor: help;
+}
+.fin-flagged > td {
+  background: color-mix(in srgb, var(--mantine-color-orange-5) 8%, transparent);
+}
+
+/* On a phone the labels wrap inside a capped column, so the figures keep most of the width. */
+@media (max-width: 36em) {
+  .fin .fin-label {
+    white-space: normal;
+    min-width: 140px;
+    max-width: 44vw;
+  }
+  .fin th,
+  .fin td {
+    padding: 5px 10px;
+  }
+  .fin-i1 .fin-label {
+    padding-left: 20px;
+  }
+  .fin-i2 .fin-label {
+    padding-left: 30px;
+  }
+}

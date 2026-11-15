@@ -1,9 +1,9 @@
 # Equiti web (proof of concept)
 
 The Streamlit app's successor: a React + Mantine frontend here, a FastAPI service in
-`app/api/`, both over the same `app/logic/` and `app/data/`. 🚀 Momentum Analysis, the two
-portfolio pages and 🎯 Options are ported so far; the Streamlit app keeps running until every page
-is.
+`app/api/`, both over the same `app/logic/` and `app/data/`. 🚀 Momentum Analysis, 🔎 Stock Research
+(all but its 💰 DCF tab), the two portfolio pages and 🎯 Options are ported so far; the Streamlit app
+keeps running until every page is.
 
 ```
 Firebase Hosting ── web/dist (this app)

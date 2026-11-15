@@ -27,6 +27,7 @@ import {
   IconLogout,
   IconMoonStars,
   IconReportAnalytics,
+  IconReportSearch,
   IconSun,
   IconTrendingUp,
 } from "@tabler/icons-react";
@@ -39,8 +40,9 @@ import { authEnabled, signOutUser, useUser } from "./auth";
 import { Brand } from "./components/Brand";
 import { MomentumPage } from "./pages/momentum/MomentumPage";
 
-// The portfolio and options pages bring the chart library with them, so each loads on first visit.
+// The pages after Momentum bring the chart library with them, so each loads on first visit.
 const OptionsPage = lazy(() => import("./pages/options/OptionsPage").then((m) => ({ default: m.OptionsPage })));
+const ResearchPage = lazy(() => import("./pages/research/ResearchPage").then((m) => ({ default: m.ResearchPage })));
 const StatisticsPage = lazy(() =>
   import("./pages/portfolio/StatisticsPage").then((m) => ({ default: m.StatisticsPage })),
 );
@@ -53,6 +55,7 @@ const SECTIONS = [
   {
     label: "Analysis",
     pages: [
+      { path: "/research", label: "Stock research", icon: IconReportSearch },
       { path: "/momentum", label: "Momentum", icon: IconTrendingUp },
       { path: "/options", label: "Options", icon: IconChartCandle },
     ],
@@ -126,6 +129,7 @@ export function App() {
             <Routes>
               <Route path="/" element={<Navigate to="/momentum" replace />} />
               <Route path="/momentum/:ticker?" element={<MomentumPage />} />
+              <Route path="/research/:ticker?" element={<ResearchPage />} />
               <Route path="/options" element={<OptionsPage />} />
               <Route path="/portfolio/statistics" element={<StatisticsPage />} />
               <Route path="/portfolio/optimization" element={<OptimizationPage />} />

@@ -23,11 +23,6 @@ from app.logic.research.comparison import Comparison
 from app.logic.research.dataset import ResearchDataset
 from app.views.research.valuation import table
 
-#: Above this the reading is called rich, below its reciprocal, cheap. A tenth
-#: is wide enough that ordinary noise in a peer median does not flip the label
-#: from one company to the next.
-_MATERIAL_PREMIUM = 0.10
-
 
 def render(dataset: ResearchDataset, peer_universe: pd.DataFrame) -> None:
     industry = shared.industry_of(peer_universe, dataset.ticker)
@@ -50,33 +45,18 @@ def render(dataset: ResearchDataset, peer_universe: pd.DataFrame) -> None:
 
 
 def _verdict(comparison: Comparison) -> str:
-    """The current reading against the industry median, as a premium.
-
-    The judgement flips for the dividend yield: paying more than the industry is
-    the *cheap* direction there, and colouring it red because the number is high
-    would be exactly backwards.
-    """
-    premium = comparison.industry_gap
-    if premium is None:
+    """The premium to the industry median, with ``valuation.verdict``'s word for it."""
+    reading = research.verdict(comparison)
+    if reading.gap is None:
         return table.missing()
-
-    if abs(premium) < _MATERIAL_PREMIUM:
-        return table.verdict_cell(
-            gap=premium,
-            text=f'{format_pct(premium, digits=0)}<span class="val-sub">in line</span>',
-            favourable=None,
-        )
-
-    expensive = premium > 0 if not comparison.metric.higher_is_cheaper else premium < 0
-    sign = "+" if premium > 0 else ""
-    word = "richer" if expensive else "cheaper"
+    sign = "+" if reading.favourable is not None and reading.gap > 0 else ""
     return table.verdict_cell(
-        gap=premium,
+        gap=reading.gap,
         text=(
-            f"{sign}{format_pct(premium, digits=0)}"
-            f'<span class="val-sub">{word} than industry</span>'
+            f"{sign}{format_pct(reading.gap, digits=0)}"
+            f'<span class="val-sub">{reading.word}</span>'
         ),
-        favourable=not expensive,
+        favourable=reading.favourable,
     )
 
 

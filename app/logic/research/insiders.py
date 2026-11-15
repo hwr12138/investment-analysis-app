@@ -265,6 +265,45 @@ def role_of(frame: pd.DataFrame) -> pd.Series:
     return frame.apply(_describe, axis=1)
 
 
+def open_market_trades(
+    frame: pd.DataFrame,
+    actions: pd.DataFrame,
+    *,
+    tolerances: InsiderTolerances | None = None,
+    today: date | None = None,
+) -> pd.DataFrame:
+    """Every priced ``P`` and ``S`` in the lookback, ready to plot against the price.
+
+    The filed rows plus four columns: ``when`` (the transaction date), ``flow``
+    (signed dollars, :func:`signed_flow`), ``role`` and ``plotted`` — the price
+    the insider paid, moved onto the chart's split-adjusted basis by
+    :func:`split_adjusted_price`. A marker belongs at the price paid rather than
+    that day's close: for a ``P`` or an ``S`` the two agree inside the day's
+    range, and snapping to the close would quietly redraw the trade.
+
+    Restricted to the open-market codes for a visual reason as well as an
+    arithmetic one: an ``M`` exercise is priced at the strike, often a fraction of
+    the market price, so plotting every code would scatter markers far below the
+    line and imply a crash that never happened. A trade with no price or no date
+    is left out, never placed by guesswork.
+    """
+    tolerances = tolerances or InsiderTolerances()
+    today = today or date.today()
+    if not usable(frame):
+        return frame.iloc[0:0]
+    cutoff = pd.Timestamp(today) - pd.DateOffset(years=tolerances.lookback_years)
+    market = frame[is_open_market(frame)].copy()
+    market["flow"] = signed_flow(market)
+    market["when"] = pd.to_datetime(market["transactiondate"], errors="coerce")
+    market = market[market["flow"].notna() & market["when"].notna()]
+    market = market[market["when"] >= cutoff]
+    if market.empty:
+        return market
+    market["role"] = role_of(market)
+    market["plotted"] = split_adjusted_price(market, actions)
+    return market
+
+
 def _when(frame: pd.DataFrame) -> pd.Series:
     """The transaction date, falling back to the filing date.
 
