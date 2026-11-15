@@ -71,7 +71,10 @@ done
 ### 3. Tell the workflow where to deploy
 
 These are repository **secrets** although none is a credential: the repository is public, so
-its Actions logs are too, and a secret is masked wherever it would print. The four
+its Actions logs are too, and a secret is masked wherever it would print. The project number
+is masked as well, though it is no secret of its own: each deploy job takes it out of
+`GCP_WORKLOAD_IDENTITY_PROVIDER` before signing in, because `gcloud run deploy` prints it in
+the service's URL. The four
 `VITE_FIREBASE_*` values are the web app's Firebase config, read from the gitignored
 `web/.env.production.local`.
 
