@@ -88,6 +88,14 @@ jobs:
       PROJECT: ${{ secrets.GCP_PROJECT_ID }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      # The provider secret is masked whole, but the project number inside it is
+      # not, and gcloud prints it in the service's URL: mask it on its own.
+      - name: Mask the project number
+        env:
+          PROVIDER: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+        run: |
+          number=${PROVIDER#projects/}
+          echo "::add-mask::${number%%/*}"
       - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
         with:
           workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
@@ -123,6 +131,14 @@ jobs:
       PROJECT: ${{ secrets.GCP_PROJECT_ID }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      # The provider secret is masked whole, but the project number inside it is
+      # not, and gcloud prints it in the service's URL: mask it on its own.
+      - name: Mask the project number
+        env:
+          PROVIDER: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+        run: |
+          number=${PROVIDER#projects/}
+          echo "::add-mask::${number%%/*}"
       - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
         with:
           workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
@@ -170,6 +186,14 @@ jobs:
         run: |
           npm ci
           npm run build
+      # The provider secret is masked whole, but the project number inside it is
+      # not, and gcloud prints it in the service's URL: mask it on its own.
+      - name: Mask the project number
+        env:
+          PROVIDER: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+        run: |
+          number=${PROVIDER#projects/}
+          echo "::add-mask::${number%%/*}"
       - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
         with:
           workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
