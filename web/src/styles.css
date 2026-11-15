@@ -1,0 +1,21 @@
+/* The page sits on a slightly darker ground than its cards, in both schemes. */
+:root[data-mantine-color-scheme="light"] {
+  --app-bg: var(--mantine-color-gray-0);
+}
+:root[data-mantine-color-scheme="dark"] {
+  --app-bg: var(--mantine-color-dark-8);
+}
+
+.app-main {
+  background: var(--app-bg);
+  min-height: 100vh;
+}
+
+.nav-link {
+  border-radius: var(--mantine-radius-md);
+}
+
+/* Figures line up digit for digit. */
+.num {
+  font-variant-numeric: tabular-nums;
+}

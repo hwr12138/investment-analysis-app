@@ -615,6 +615,9 @@ def test_rate_limit_recovers_on_retry(monkeypatch):
 
 def test_missing_key_raises_before_any_request(monkeypatch):
     monkeypatch.setattr(sh_transport.st, "secrets", {})
+    # Streamlit copies top-level secrets into the environment when it parses
+    # secrets.toml, so an earlier test may have left the real key there.
+    monkeypatch.delenv("SHARADAR_API_KEY", raising=False)
 
     def _fail(*args, **kwargs):
         raise AssertionError("a request was made without an API key")
@@ -622,6 +625,13 @@ def test_missing_key_raises_before_any_request(monkeypatch):
     monkeypatch.setattr(sh_transport.requests, "get", _fail)
     with pytest.raises(sc.SharadarError, match="SHARADAR_API_KEY"):
         sh_transport._get("SF1", {})
+
+
+def test_the_environment_supplies_the_key_where_there_is_no_secrets_file(monkeypatch):
+    """How Cloud Run hands a Secret Manager secret to the API service."""
+    monkeypatch.setattr(sh_transport.st, "secrets", {})
+    monkeypatch.setenv("SHARADAR_API_KEY", "from-env")
+    assert sh_transport._api_key() == "from-env"
 
 
 def test_pagination_follows_the_cursor_until_exhausted(monkeypatch, annual_rows):

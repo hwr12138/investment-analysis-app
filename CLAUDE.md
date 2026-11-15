@@ -5,19 +5,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-pip install -r requirements-dev.txt          # requirements.txt + pytest; deployed app installs only requirements.txt
+pip install -r requirements-dev.txt          # requirements-api.txt + pytest; Streamlit Cloud installs only requirements.txt
 streamlit run streamlit_app.py               # run the app
-python -m pytest tests/ -q                   # full suite (~1,300 tests, no network; CI runs it too)
+python -m pytest tests/ -q                   # full suite (~1,400 tests, no network; CI runs it too)
 python -m pytest tests/test_valuation.py -q  # one file
 python -m pytest tests/test_wacc.py::test_market_value_of_equity -q  # one test
 python -m pytest tests/ -k "fcff" -q         # by name
 ```
 
-There is no linter, formatter, type checker, or pytest config file in this repo.
+There is no linter, formatter, or pytest config file in this repo. The web frontend
+(`web/`) has a TypeScript type check: `cd web && npm run typecheck`.
 
 `.claude/launch.json` defines a `streamlit` configuration on port 8502, with `autoPort` so a
 second session falls back to a free port instead of colliding — start the app for preview
-with that rather than Bash.
+with that rather than Bash. It also defines `api` (uvicorn on 8600, sign-in off) and `web`
+(Vite on 5173, proxying `/api` to 8600); start both to preview the web app.
 
 `SHARADAR_API_KEY` (fundamentals, prices) comes from `.streamlit/secrets.toml`, which is
 gitignored. Treasury yields come from Yahoo Finance via `yfinance` (`^IRX` short rate, `^TNX`
@@ -29,6 +31,26 @@ own `requirements.txt`; deploy runbook in `collector/README.md`). Point the page
 a `[gcp_service_account]` table. `THETADATA_API_KEY` is the collector's, never the page's.
 
 ## Architecture
+
+**A migration is under way** from Streamlit to a web app: React + Mantine in `web/` on Firebase
+Hosting, over a FastAPI layer in `app/api/` on Cloud Run. Both front ends sit on the same logic and
+data layers and run side by side until every page is ported; only 🚀 Momentum Analysis is so far.
+`web/README.md` covers running, regenerating the TypeScript types, and deploying. The rules that
+matter:
+
+- `app/api/` plays the part a view does: it fetches through `app/data/` and hands frames to
+  `app/logic/`, and it does no arithmetic of its own. Logic a page needs that lived in its
+  Streamlit view moves into the logic module, so both front ends share it (as
+  `momentum_analysis.indicator_frame` did). `test_architecture.py` forbids anything below the API
+  from importing it, and the API from importing `app.views`.
+- Every response model derives from `app.api.contract.Contract`, which **rejects NaN**. Pydantic
+  would otherwise serialise a NaN as `null` even into a `float` field. A number that can be
+  missing is typed `float | None` and converted with `finite_or_none`.
+- Every data route carries `auth.require_user` (a test checks the routes). Sign-in is a Firebase
+  ID token plus an email allowlist, and `EQUITI_AUTH=off` is ignored on Cloud Run.
+- The data layer still caches through `st.cache_data`, which works without a Streamlit server
+  but is per process. `app/api/__init__.py` turns Streamlit's logging down for that, and is the
+  API's only Streamlit import.
 
 Streamlit multi-page app. `streamlit_app.py` sets page config, loads `assets/style.css`, and
 registers pages in `st.navigation([...])`. Each feature is three layers:

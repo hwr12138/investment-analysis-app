@@ -1,0 +1,7 @@
+# The API service (app/api/, deployed to Cloud Run). The logic and data layers'
+# needs come from requirements.txt — Streamlit included, until the data layer's
+# caches move off st.cache_data.
+-r requirements.txt
+fastapi
+uvicorn[standard]
+google-auth  # verifies Firebase ID tokens (app/api/auth.py)
