@@ -95,6 +95,23 @@ One-time setup:
    gcloud storage buckets add-iam-policy-binding gs://BUCKET --member=serviceAccount:equiti-api@PROJECT.iam.gserviceaccount.com --role=roles/storage.objectViewer
    ```
 
+4. **A custom domain**, optional, here a subdomain on a Cloud DNS zone (`ZONE`). Register it on
+   the site (the console's Hosting → `equiti-app` → *Add custom domain* does the same); Firebase
+   answers with the one record it wants, a CNAME to `equiti-app.web.app`:
+
+   ```bash
+   curl -X POST -H "Authorization: Bearer $(gcloud auth print-access-token)" -H "x-goog-user-project: PROJECT" -H "Content-Type: application/json" -d '{}' "https://firebasehosting.googleapis.com/v1beta1/projects/PROJECT/sites/equiti-app/customDomains?customDomainId=equiti.DOMAIN"
+   ```
+
+   ```bash
+   gcloud dns record-sets create equiti.DOMAIN. --zone ZONE --type CNAME --ttl 300 --rrdatas equiti-app.web.app.
+   ```
+
+   Then add `equiti.DOMAIN` to Authentication → Settings → Authorized domains, as in step 1, or
+   the Google popup refuses to open from it. The certificate follows on its own once the CNAME
+   resolves. Nothing else changes: the page calls `/api` on whichever domain served it, and the
+   API checks the token's project, not the domain it came from.
+
 Each release:
 
 ```bash
