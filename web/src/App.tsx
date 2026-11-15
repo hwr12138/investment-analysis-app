@@ -22,6 +22,7 @@ import {
 import { useDisclosure } from "@mantine/hooks";
 import {
   IconChartPie,
+  IconChartCandle,
   IconLockAccess,
   IconLogout,
   IconMoonStars,
@@ -38,7 +39,8 @@ import { authEnabled, signOutUser, useUser } from "./auth";
 import { Brand } from "./components/Brand";
 import { MomentumPage } from "./pages/momentum/MomentumPage";
 
-// The portfolio pages bring the chart library with them, so each loads on first visit.
+// The portfolio and options pages bring the chart library with them, so each loads on first visit.
+const OptionsPage = lazy(() => import("./pages/options/OptionsPage").then((m) => ({ default: m.OptionsPage })));
 const StatisticsPage = lazy(() =>
   import("./pages/portfolio/StatisticsPage").then((m) => ({ default: m.StatisticsPage })),
 );
@@ -48,7 +50,13 @@ const OptimizationPage = lazy(() =>
 
 // Only built pages go in the navigation; the rest arrive as they are ported.
 const SECTIONS = [
-  { label: "Analysis", pages: [{ path: "/momentum", label: "Momentum", icon: IconTrendingUp }] },
+  {
+    label: "Analysis",
+    pages: [
+      { path: "/momentum", label: "Momentum", icon: IconTrendingUp },
+      { path: "/options", label: "Options", icon: IconChartCandle },
+    ],
+  },
   {
     label: "Portfolio",
     pages: [
@@ -118,6 +126,7 @@ export function App() {
             <Routes>
               <Route path="/" element={<Navigate to="/momentum" replace />} />
               <Route path="/momentum/:ticker?" element={<MomentumPage />} />
+              <Route path="/options" element={<OptionsPage />} />
               <Route path="/portfolio/statistics" element={<StatisticsPage />} />
               <Route path="/portfolio/optimization" element={<OptimizationPage />} />
               <Route path="*" element={<Text c="dimmed">No such page.</Text>} />

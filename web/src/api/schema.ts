@@ -47,6 +47,106 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/options/overview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Overview
+         * @description What the stored night holds, how old it is, and which names the filters leave.
+         */
+        get: operations["overview_api_options_overview_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/options/discover": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Discover
+         * @description Each visible name's buy-vol score, own-year percentiles and one-month 25Δ call.
+         */
+        get: operations["discover_api_options_discover_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/options/screen": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Screen
+         * @description The one-strike call spread that pays in full at a +k SD move, for every visible name.
+         */
+        get: operations["screen_api_options_screen_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/options/evaluate/{symbol}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Evaluate
+         * @description What replacing stock with calls costs on one name, by strike and expiry.
+         */
+        get: operations["evaluate_api_options_evaluate__symbol__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/options/history/{symbol}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * History
+         * @description One name's reward:risk over its trailing year, at constant 30 days, with ATM IV and skew.
+         */
+        get: operations["history_api_options_history__symbol__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/portfolio/statistics": {
         parameters: {
             query?: never;
@@ -199,12 +299,62 @@ export interface components {
             /** Rsi */
             rsi: number[];
         };
+        /** DiscoverRow */
+        DiscoverRow: {
+            /** Symbol */
+            symbol: string;
+            /** Theme */
+            theme: string;
+            /** Spot */
+            spot: number;
+            /** Score */
+            score: number | null;
+            /** Z Iv */
+            z_iv: number | null;
+            /** Z Iv Rv */
+            z_iv_rv: number | null;
+            /** Z Skew */
+            z_skew: number | null;
+            /** Skew Pct */
+            skew_pct: number | null;
+            /** Iv Pct */
+            iv_pct: number | null;
+            /** Rr Pct */
+            rr_pct: number | null;
+            call: components["schemas"]["OneMonthCall"] | null;
+        };
         /** Divergence */
         Divergence: {
             first: components["schemas"]["Anchor"];
             second: components["schemas"]["Anchor"];
             macd: components["schemas"]["Reading"];
             rsi: components["schemas"]["Reading"];
+        };
+        /** GridCell */
+        GridCell: {
+            /** Cost Pct */
+            cost_pct: number | null;
+            /** Annualised */
+            annualised: number | null;
+            /** Wide */
+            wide: boolean;
+        };
+        /** GridColumn */
+        GridColumn: {
+            /** Label */
+            label: string;
+            /**
+             * Expiration
+             * Format: date
+             */
+            expiration: string;
+        };
+        /** GridRow */
+        GridRow: {
+            /** Upside */
+            upside: number;
+            /** Cells */
+            cells: components["schemas"]["GridCell"][];
         };
         /** HTTPValidationError */
         HTTPValidationError: {
@@ -215,6 +365,20 @@ export interface components {
         Health: {
             /** Status */
             status: string;
+        };
+        /** HistoryPoint */
+        HistoryPoint: {
+            /**
+             * Session
+             * Format: date
+             */
+            session: string;
+            /** Reward Risk */
+            reward_risk: number | null;
+            /** Atm Iv */
+            atm_iv: number | null;
+            /** Skew */
+            skew: number | null;
         };
         /**
          * Matrix
@@ -264,6 +428,145 @@ export interface components {
             bars: components["schemas"]["Bars"];
             scanners: components["schemas"]["Scanners"];
             default_anchors: components["schemas"]["AnchorDates"];
+        };
+        /** Name */
+        Name: {
+            /** Symbol */
+            symbol: string;
+            /** Theme */
+            theme: string;
+            /** Next Earnings */
+            next_earnings: string | null;
+        };
+        /**
+         * OneMonthCall
+         * @description The listed call nearest 25Δ on the standard monthly nearest 30 days.
+         */
+        OneMonthCall: {
+            /**
+             * Expiration
+             * Format: date
+             */
+            expiration: string;
+            /** Strike */
+            strike: number;
+            /** Delta */
+            delta: number;
+            /** Iv */
+            iv: number;
+            /** Cost */
+            cost: number;
+            /** Cost Pct */
+            cost_pct: number;
+            /** Annualised */
+            annualised: number;
+            /** Otm */
+            otm: number;
+            /** Wide */
+            wide: boolean;
+        };
+        /** OptionsDiscover */
+        OptionsDiscover: {
+            /**
+             * Session
+             * Format: date
+             */
+            session: string;
+            /** Rows */
+            rows: components["schemas"]["DiscoverRow"][];
+        };
+        /** OptionsEvaluate */
+        OptionsEvaluate: {
+            /** Symbol */
+            symbol: string;
+            /** Theme */
+            theme: string;
+            /**
+             * Session
+             * Format: date
+             */
+            session: string;
+            /** Spot */
+            spot: number;
+            /** Columns */
+            columns: components["schemas"]["GridColumn"][];
+            /** Single */
+            single: components["schemas"]["GridRow"][];
+            /** Spread */
+            spread: components["schemas"]["GridRow"][];
+            /** Spread Width */
+            spread_width: number;
+        };
+        /** OptionsHistory */
+        OptionsHistory: {
+            /** Symbol */
+            symbol: string;
+            /** Theme */
+            theme: string;
+            /**
+             * Session
+             * Format: date
+             */
+            session: string;
+            /** Points */
+            points: components["schemas"]["HistoryPoint"][];
+            stats: components["schemas"]["RewardRiskStats"] | null;
+            /** Stored */
+            stored: number;
+            /** Needed */
+            needed: number;
+        };
+        /** OptionsOverview */
+        OptionsOverview: {
+            /**
+             * Session
+             * Format: date
+             */
+            session: string;
+            /** Written At */
+            written_at: string | null;
+            /** Sessions Behind */
+            sessions_behind: number;
+            /** Themes */
+            themes: string[];
+            /** Names */
+            names: components["schemas"]["Name"][];
+            /** Visible */
+            visible: string[];
+            /** Hidden For Earnings */
+            hidden_for_earnings: string[];
+            /** Earnings Known */
+            earnings_known: boolean;
+            /** Unavailable */
+            unavailable: components["schemas"]["Unavailable"][];
+            /** Not Collected */
+            not_collected: string[];
+            /** Universe */
+            universe: components["schemas"]["ThemeGroup"][];
+            /** Min History Sessions */
+            min_history_sessions: number;
+            /** Score Scale */
+            score_scale: number;
+        };
+        /** OptionsScreen */
+        OptionsScreen: {
+            /**
+             * Session
+             * Format: date
+             */
+            session: string;
+            /** Sds */
+            sds: number[];
+            /** Sd */
+            sd: number;
+            /** Expirations */
+            expirations: string[];
+            /** Expiration */
+            expiration: string | null;
+            /** Rows */
+            rows: components["schemas"]["Spread"][];
+            /** Visible Count */
+            visible_count: number;
         };
         /** PortfolioOptimization */
         PortfolioOptimization: {
@@ -316,6 +619,32 @@ export interface components {
             correlation: components["schemas"]["Matrix"];
             covariance: components["schemas"]["Matrix"];
         };
+        /** RewardRiskStats */
+        RewardRiskStats: {
+            /** Latest */
+            latest: number;
+            /**
+             * As Of
+             * Format: date
+             */
+            as_of: string;
+            /** Percentile */
+            percentile: number;
+            /** Quartile */
+            quartile: string;
+            /** Median */
+            median: number;
+            /** Q25 */
+            q25: number;
+            /** Q75 */
+            q75: number;
+            /** Low */
+            low: number;
+            /** High */
+            high: number;
+            /** Sessions */
+            sessions: number;
+        };
         /**
          * RiskFreeRate
          * @description The 13-week Treasury bill yield, as a decimal, and where it came from.
@@ -341,6 +670,33 @@ export interface components {
             /** Rsi Failure Swings */
             rsi_failure_swings: string;
         };
+        /** Spread */
+        Spread: {
+            /** Symbol */
+            symbol: string;
+            /** Theme */
+            theme: string;
+            /** Move */
+            move: number;
+            /** Long Strike */
+            long_strike: number;
+            /** Short Strike */
+            short_strike: number;
+            /** Price */
+            price: number;
+            /** Width */
+            width: number;
+            /** Bid */
+            bid: number;
+            /** Ask */
+            ask: number;
+            /** Payout Mid */
+            payout_mid: number;
+            /** Payout Ask */
+            payout_ask: number | null;
+            /** Reward Risk */
+            reward_risk: number | null;
+        };
         /** StrategyResult */
         StrategyResult: {
             /**
@@ -360,6 +716,20 @@ export interface components {
             allocation: components["schemas"]["Weight"][];
             /** Yearly Returns */
             yearly_returns: components["schemas"]["YearReturn"][];
+        };
+        /** ThemeGroup */
+        ThemeGroup: {
+            /** Theme */
+            theme: string;
+            /** Symbols */
+            symbols: string[];
+        };
+        /** Unavailable */
+        Unavailable: {
+            /** Symbol */
+            symbol: string;
+            /** Reason */
+            reason: string;
         };
         /** ValidationError */
         ValidationError: {
@@ -453,6 +823,173 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Divergence"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    overview_api_options_overview_get: {
+        parameters: {
+            query?: {
+                /** @description Themes to keep; omit for every theme. */
+                themes?: string[] | null;
+                /** @description Hide single stocks reporting within this many calendar days of the session; 0 hides none. */
+                earnings_window?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OptionsOverview"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    discover_api_options_discover_get: {
+        parameters: {
+            query?: {
+                /** @description Themes to keep; omit for every theme. */
+                themes?: string[] | null;
+                /** @description Hide single stocks reporting within this many calendar days of the session; 0 hides none. */
+                earnings_window?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OptionsDiscover"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    screen_api_options_screen_get: {
+        parameters: {
+            query?: {
+                /** @description Themes to keep; omit for every theme. */
+                themes?: string[] | null;
+                /** @description Hide single stocks reporting within this many calendar days of the session; 0 hides none. */
+                earnings_window?: number;
+                /** @description The move the spread pays in full at, in SDs. */
+                sd?: number;
+                expiration?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OptionsScreen"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    evaluate_api_options_evaluate__symbol__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                symbol: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OptionsEvaluate"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    history_api_options_history__symbol__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                symbol: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OptionsHistory"];
                 };
             };
             /** @description Validation Error */

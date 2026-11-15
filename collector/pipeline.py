@@ -8,6 +8,8 @@ run killed at any point leaves a manifest that names only what was finished.
   ThetaData has released (none if the job runs before the free tier's delay is
   over; it simply exits), with every expiry, so the newest session's chains can
   become ``latest/chains.parquet`` — the only chain the page reads.
+  It then solves that chain into the Discover and Screen tables
+  (:func:`write_screens`), so the web API reads them rather than solving.
 * :func:`run_backfill` walks one symbol one calendar month at a time with
   expiries ≤65 days out (what the 30-day metrics need; about half the server
   time of the full chain) and checkpoints each finished (symbol, month) in the
@@ -28,7 +30,7 @@ import pandas as pd
 
 from app import options_layout as layout
 from app.logic.options import chain as C
-from app.logic.options import freshness, history, universe
+from app.logic.options import freshness, history, snapshot, universe
 from app.logic.options.rates import CURVE_MAX_STALENESS_DAYS, curve_on
 from app.logic.options.tolerances import DEFAULT
 from collector.client import SourceError, ThetaSource, chunks
@@ -81,6 +83,49 @@ def _metrics_row(symbol, chain, session, closes, rates) -> tuple[dict | None, st
         return None, f"no Treasury curve within {CURVE_MAX_STALENESS_DAYS} days of {session}"
     upto = series[series.index <= session]
     return history.session_metrics(symbol, chain, session, float(series[session]), curve, upto, DEFAULT), None
+
+
+def _stored_metrics(store: Store) -> pd.DataFrame:
+    stored = store.read_frame(layout.METRICS)
+    return pd.DataFrame(columns=list(history.METRIC_COLUMNS)) if stored is None else stored
+
+
+def write_screens(
+    store: Store, session: date, chains: pd.DataFrame, metrics: pd.DataFrame, rates: pd.DataFrame,
+    *, log: Callable[[str], None] = print,
+) -> dict:
+    """Solves the night's chain into the Discover and Screen tables and stores them.
+
+    Returns the manifest's ``screens`` entry. The caller writes the manifest
+    after this, so a reader never sees tables the manifest does not vouch for.
+    """
+    started = datetime.now(timezone.utc)
+    solved = snapshot.solve_screens(chains, metrics, rates, session)
+    store.write_frame(layout.DISCOVER, solved.discover)
+    store.write_frame(layout.SPREADS, solved.spreads)
+    store.write_frame(layout.EXPIRATIONS, solved.listed)
+    seconds = (datetime.now(timezone.utc) - started).total_seconds()
+    log(f"Screens for {session}: {len(solved.discover)} names priced, {len(solved.unpriced)} not, "
+        f"{len(solved.spreads)} spreads ({seconds:.1f}s)")
+    return {"session": session.isoformat(), "unpriced": solved.unpriced}
+
+
+def run_screens(store: Store, *, log: Callable[[str], None] = print) -> dict:
+    """Rebuilds the stored screens from the stored night — no ThetaData request.
+
+    For a store a collector without :func:`write_screens` filled, or after a
+    change to how a screen is computed. Seconds, where ``recompute`` is minutes.
+    """
+    manifest = load_manifest(store)
+    if not manifest.get("last_session"):
+        raise SourceError("The store has no completed daily run to build screens from")
+    chains, rates = store.read_frame(layout.LATEST_CHAINS), store.read_frame(layout.RATES)
+    if chains is None or rates is None:
+        raise SourceError("The store has no latest chain or rates to build screens from")
+    session = date.fromisoformat(manifest["last_session"])
+    manifest["screens"] = write_screens(store, session, chains, _stored_metrics(store), rates, log=log)
+    store.write_json(layout.MANIFEST, manifest)
+    return manifest
 
 
 def _fetch_closes(source: ThetaSource, symbols, start: date, end: date, log) -> tuple[dict[str, pd.Series], dict]:
@@ -136,16 +181,21 @@ def run_daily(source: ThetaSource, store: Store, symbols, today: date, *, log: C
     if not newest_chains:
         raise SourceError(f"No name returned a chain for {sessions[-1]}; the manifest was not advanced")
     _merge(store, layout.CLOSES, _closes_frame(closes), ["symbol", "session"])
-    _merge(store, layout.RATES, rates, ["session", "tenor"])
+    all_rates = _merge(store, layout.RATES, rates, ["session", "tenor"])
     if rows:
-        _merge(store, layout.METRICS, pd.DataFrame(rows, columns=list(history.METRIC_COLUMNS)), ["symbol", "session"])
-    store.write_frame(layout.LATEST_CHAINS, pd.concat(newest_chains, ignore_index=True))
+        metrics = _merge(store, layout.METRICS, pd.DataFrame(rows, columns=list(history.METRIC_COLUMNS)), ["symbol", "session"])
+    else:
+        metrics = _stored_metrics(store)
+    latest = pd.concat(newest_chains, ignore_index=True)
+    store.write_frame(layout.LATEST_CHAINS, latest)
+    screens = write_screens(store, sessions[-1], latest, metrics, all_rates, log=log)
     if _earnings_stale(store, today):
         _refresh_earnings(store, log, today)
 
     manifest.update(
         metrics_version=history.METRICS_VERSION,
         last_session=sessions[-1].isoformat(),
+        screens=screens,
         symbols=status,
         universe_hash=universe.universe_hash(),
         collector_version=COLLECTOR_VERSION,
@@ -228,6 +278,11 @@ def run_recompute(store: Store, symbols, *, log: Callable[[str], None] = print) 
         frame = pd.DataFrame(rows, columns=list(history.METRIC_COLUMNS))
         _merge(store, layout.METRICS, frame, ["symbol", "session"])
     manifest = load_manifest(store)
+    latest = store.read_frame(layout.LATEST_CHAINS)
+    if manifest.get("last_session") and latest is not None:
+        # The Discover table ranks against the history just restated.
+        session = date.fromisoformat(manifest["last_session"])
+        manifest["screens"] = write_screens(store, session, latest, _stored_metrics(store), rates, log=log)
     manifest.update(metrics_version=history.METRICS_VERSION, written_at=_now())
     store.write_json(layout.MANIFEST, manifest)
     log(f"Recomputed {len(rows)} rows from {len(paths)} stored chains ({problems} could not be read)")

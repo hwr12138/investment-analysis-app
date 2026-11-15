@@ -134,12 +134,28 @@ client_id = "…"
 token_uri = "https://oauth2.googleapis.com/token"
 ```
 
+## Rebuilding the screens
+
+Each daily run also solves the night's chain into the tables the web app's Discover and Screen
+tabs read (`latest/discover.parquet`, `latest/spreads.parquet`, `latest/expirations.parquet`), and
+records the close they were solved from as `screens.session` in the manifest. The API refuses
+tables from an older close than the manifest's, so a store a collector without this step last
+wrote shows an error rather than yesterday's screens. To build them from what is stored, with no
+ThetaData request (about 15 s), run **Execute with overrides** with the argument `screens`:
+
+```bash
+gcloud run jobs execute options-collector --region=REGION --args=screens --wait
+```
+
+The image must be rebuilt first (§4) for the job to know the mode.
+
 ## When a metric's definition changes
 
 Every raw chain is kept in the bucket, so the history can be rebuilt without a
 ThetaData request. Run **Execute with overrides** with the single argument
 `recompute`, or `--args=recompute` from the command line. It takes about 0.1 s
-per name-session, so roughly 40 minutes for a year of 90 names.
+per name-session, so roughly 40 minutes for a year of 90 names. It rebuilds the screens
+afterwards, since the Discover table ranks against the history it restated.
 
 ## Running it locally
 

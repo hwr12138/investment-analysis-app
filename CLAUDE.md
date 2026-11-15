@@ -35,14 +35,15 @@ a `[gcp_service_account]` table. `THETADATA_API_KEY` is the collector's, never t
 **A migration is under way** from Streamlit to a web app: React + Mantine in `web/` on Firebase
 Hosting, over a FastAPI layer in `app/api/` on Cloud Run. Both front ends sit on the same logic and
 data layers and run side by side until every page is ported. 🚀 Momentum Analysis, 📊 Portfolio
-Statistics and 📈 Portfolio Optimization are; 🎯 Options and 🔎 Stock Research are not yet.
+Statistics, 📈 Portfolio Optimization and 🎯 Options are; 🔎 Stock Research is not yet.
 `web/README.md` covers running, regenerating the TypeScript types, and deploying. The rules that
 matter:
 
 - `app/api/` plays the part a view does: it fetches through `app/data/` and hands frames to
   `app/logic/`, and it does no arithmetic of its own. Logic a page needs that lived in its
   Streamlit view moves into the logic module, so both front ends share it (as
-  `momentum_analysis.indicator_frame` and `portfolio_statistics.relationships` did). `test_architecture.py` forbids anything below the API
+  `momentum_analysis.indicator_frame`, `portfolio_statistics.relationships` and the options
+  filters in `options/coverage.py` did). `test_architecture.py` forbids anything below the API
   from importing it, and the API from importing `app.views`.
 - Every response model derives from `app.api.contract.Contract`, which **rejects NaN**. Pydantic
   would otherwise serialise a NaN as `null` even into a `float` field. A number that can be
@@ -229,6 +230,7 @@ Cloud Scheduler → Cloud Run job  collector/  (thetadata, python 3.12) ─┐ i
                     private GCS bucket  options/v1/…  ◄─────────────────┘ + app.options_layout
                          ▲
 Streamlit ── app/data/options_store.py → app/logic/options/* → app/views/options/*
+FastAPI   ── app/data/options_store.py → app/api/options.py   (reads the stored screens)
 ```
 
 - **`app/options_layout.py` names every object** and sits at the `app/` root because the data
@@ -236,6 +238,16 @@ Streamlit ── app/data/options_store.py → app/logic/options/* → app/views
   **last** by every run, so a reader can trust whatever a manifest names; `latest/chains.parquet`
   is the only chain the page reads; `metrics/daily.parquet` (one row per name per session) is all
   the history panels read. Bump `PREFIX` to change a stored shape.
+- **The collector also solves the screens, for the web API.** Solving all ~90 surfaces takes
+  ~12 s: fine for Streamlit's per-night cache, too slow for a request. So every daily run (and
+  `recompute`, and the offline `screens` mode) writes `latest/discover|spreads|expirations.parquet`
+  through `snapshot.solve_screens` and records `screens.session` in the manifest. The API
+  **refuses tables solved from an older close than `last_session`** (503), because an older
+  collector that advanced the chain alone would otherwise leave yesterday's screens under
+  today's date. Evaluate still solves its one name from `latest/chains.parquet` (~0.3 s), and the
+  filters run server-side (`coverage.py`), so the Screen's expiry choices count only the names on
+  screen. On Cloud Run the reader authenticates as the service's own account. `st.secrets` raises
+  when there is no secrets file, so the fallback to that account is explicit.
 - **`app/logic/options/` is pure and shared**: no Streamlit, no `thetadata`, no `google` —
   `test_architecture.py` forbids both in logic, and checks `collector/*` reaches only
   `app.logic.options` and `app.options_layout`. The collector's image copies just those.

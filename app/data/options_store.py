@@ -14,6 +14,10 @@ Streamlit secrets:
 * or ``OPTIONS_BUCKET = "bucket"`` with a ``[gcp_service_account]`` table holding
   a read-only service account's key.
 
+Without a key the GCS client authenticates as whatever the environment
+provides — on Cloud Run, the API service's own account, which needs only
+``roles/storage.objectViewer`` on the bucket.
+
 **Two cache layers, keyed so a new night is picked up and an old one never
 re-downloaded.** Each object's *generation* (GCS's version stamp, or a local
 file's mtime) is read with a five-minute TTL, and the object itself is cached
@@ -69,16 +73,30 @@ def _gcs_bucket(name: str):
         from google.oauth2 import service_account
     except ImportError:
         raise OptionsStoreError("google-cloud-storage is not installed") from None
+    info = _service_account_info()
     try:
-        info = st.secrets.get("gcp_service_account")
         if info:
-            credentials = service_account.Credentials.from_service_account_info(dict(info))
+            credentials = service_account.Credentials.from_service_account_info(info)
             client = storage.Client(credentials=credentials, project=credentials.project_id)
         else:
+            # Application Default Credentials: on Cloud Run, the service's own account.
             client = storage.Client()
     except Exception:
         raise OptionsStoreError(f"Could not authenticate to the options bucket gs://{name}") from None
     return client.bucket(name)
+
+
+def _service_account_info() -> dict | None:
+    """The key from ``[gcp_service_account]``, or ``None`` to use the ambient account.
+
+    Cloud Run has no ``secrets.toml`` at all, and reading ``st.secrets`` without
+    one raises rather than returning nothing.
+    """
+    try:
+        info = st.secrets.get("gcp_service_account")
+    except Exception:
+        return None
+    return dict(info) if info else None
 
 
 def _split(location: str) -> tuple[str, str]:

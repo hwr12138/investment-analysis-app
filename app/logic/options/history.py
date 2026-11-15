@@ -97,6 +97,15 @@ def session_metrics(
     return row
 
 
+#: Where the latest reward:risk sits in its own year, by quartile. Higher is
+#: better for a buyer, so the bottom quartile is the worst.
+REWARD_RISK_QUARTILES = ("worst quartile", "below median", "above median", "best quartile")
+
+
+def reward_risk_quartile(percentile: float) -> str:
+    return REWARD_RISK_QUARTILES[min(int(percentile * 4), 3)]
+
+
 @dataclass(frozen=True)
 class HistoryStats:
     latest: float

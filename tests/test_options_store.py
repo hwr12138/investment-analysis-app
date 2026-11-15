@@ -58,6 +58,33 @@ def test_an_unconfigured_store_says_how_to_configure_it(monkeypatch):
         options_store.fetch_manifest()
 
 
+def test_without_a_key_the_bucket_uses_the_ambient_account(monkeypatch):
+    """Cloud Run has no secrets.toml, and st.secrets raises without one."""
+    from google.cloud import storage
+
+    class NoSecretsFile:
+        def get(self, key):
+            raise FileNotFoundError("No secrets found")
+
+    made = {}
+
+    class Client:
+        def __init__(self, **kwargs):
+            made.update(kwargs)
+
+        def bucket(self, name):
+            return ("bucket", name)
+
+    monkeypatch.setattr(options_store.st, "secrets", NoSecretsFile())
+    monkeypatch.setattr(storage, "Client", Client)
+    options_store._gcs_bucket.clear()
+    try:
+        assert options_store._gcs_bucket("options-store") == ("bucket", "options-store")
+        assert made == {}  # no credentials passed: Application Default Credentials
+    finally:
+        options_store._gcs_bucket.clear()
+
+
 @pytest.mark.parametrize(
     "last, today, behind",
     [
