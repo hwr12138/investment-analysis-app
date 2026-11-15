@@ -114,8 +114,9 @@ done
 
 The API service is deployed with `OPTIONS_STORE_URI=gs://BUCKET` and reads it as its own service
 account, so it needs no key file; `web/README.md` (Deploy) has both steps. Run locally, the API
-reads `OPTIONS_STORE_URI` from the environment, or `OPTIONS_BUCKET` plus a `[gcp_service_account]`
-table from `.streamlit/secrets.toml`, and otherwise your own application-default credentials.
+reads `OPTIONS_STORE_URI` (or `OPTIONS_BUCKET`) from the environment, else from
+`.streamlit/secrets.toml`, and authenticates with a `[gcp_service_account]` table from that file
+if there is one, otherwise with your own application-default credentials.
 
 ## Rebuilding the screens
 

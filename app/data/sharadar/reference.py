@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import pandas as pd
-import streamlit as st
 
+from app.data import cache
 from app.data.sharadar import transport
 from app.data.sharadar.transport import TickerNotFoundError
 
@@ -23,7 +23,7 @@ def _fetch_ticker_meta(ticker: str) -> dict:
     return {k: (None if pd.isna(v) else v) for k, v in record.items()}
 
 
-@st.cache_data(show_spinner=False, ttl=60 * 60 * 24 * 7)
+@cache.data(ttl=60 * 60 * 24 * 7)
 def fetch_ticker_meta(ticker: str) -> dict:
     """Reference data for one company.
 
@@ -55,7 +55,7 @@ def _fetch_price_tables(tickers: tuple[str, ...]) -> dict[str, str]:
     return routes
 
 
-@st.cache_data(show_spinner=False, ttl=60 * 60 * 24 * 7)
+@cache.data(ttl=60 * 60 * 24 * 7)
 def fetch_price_tables(tickers: tuple[str, ...]) -> dict[str, str]:
     """Cached ticker → price-table routing. Listings barely move; cached a week."""
     return _fetch_price_tables(tickers)

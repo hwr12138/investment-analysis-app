@@ -81,7 +81,7 @@ rather than a handful of inline ``requests.get`` calls:
    transactionpricepershare``, computed in ``logic/research/insiders`` and
    nowhere else.
 
-The API key is read from ``st.secrets`` and never leaves ``transport``. Nasdaq
+The API key is read by ``transport`` alone, which never lets it out. Nasdaq
 only accepts it as a query parameter, so no exception the client raises carries
 the params or the full URL — only the table, the ticker, and the status.
 """

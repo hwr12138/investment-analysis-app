@@ -9,7 +9,7 @@ from datetime import date
 import pandas as pd
 import pytest
 
-from app.data import options_store
+from app.data import options_store, settings
 from app import options_layout as layout
 from app.logic.options import freshness
 
@@ -52,19 +52,35 @@ def test_a_missing_object_raises_and_is_not_cached(store):
 
 
 def test_an_unconfigured_store_says_how_to_configure_it(monkeypatch):
+    # conftest points the secrets file at nothing; the environment is ours to clear.
     monkeypatch.delenv("OPTIONS_STORE_URI", raising=False)
-    monkeypatch.setattr(options_store.st, "secrets", {})
+    monkeypatch.delenv("OPTIONS_BUCKET", raising=False)
     with pytest.raises(options_store.OptionsStoreError, match="OPTIONS_STORE_URI"):
         options_store.fetch_manifest()
 
 
-def test_without_a_key_the_bucket_uses_the_ambient_account(monkeypatch):
-    """Cloud Run has no secrets.toml, and st.secrets raises without one."""
-    from google.cloud import storage
+def test_the_secrets_file_names_the_store(monkeypatch, tmp_path):
+    """Local development: the store's location in .streamlit/secrets.toml."""
+    monkeypatch.delenv("OPTIONS_STORE_URI", raising=False)
+    monkeypatch.delenv("OPTIONS_BUCKET", raising=False)
+    secrets = tmp_path / "secrets.toml"
+    secrets.write_text('OPTIONS_BUCKET = "from-file"\n')
+    monkeypatch.setattr(settings, "SECRETS_FILE", secrets)
+    assert options_store._location() == "gs://from-file"
+    monkeypatch.setenv("OPTIONS_STORE_URI", "file:///from-env")
+    assert options_store._location() == "file:///from-env"  # the environment wins
 
-    class NoSecretsFile:
-        def get(self, key):
-            raise FileNotFoundError("No secrets found")
+
+def test_a_service_account_table_is_read_from_the_secrets_file(monkeypatch, tmp_path):
+    secrets = tmp_path / "secrets.toml"
+    secrets.write_text('[gcp_service_account]\ntype = "service_account"\nproject_id = "p"\n')
+    monkeypatch.setattr(settings, "SECRETS_FILE", secrets)
+    assert options_store._service_account_info() == {"type": "service_account", "project_id": "p"}
+
+
+def test_without_a_key_the_bucket_uses_the_ambient_account(monkeypatch):
+    """Cloud Run has no secrets.toml (conftest points the file at nothing)."""
+    from google.cloud import storage
 
     made = {}
 
@@ -75,7 +91,6 @@ def test_without_a_key_the_bucket_uses_the_ambient_account(monkeypatch):
         def bucket(self, name):
             return ("bucket", name)
 
-    monkeypatch.setattr(options_store.st, "secrets", NoSecretsFile())
     monkeypatch.setattr(storage, "Client", Client)
     options_store._gcs_bucket.clear()
     try:

@@ -20,22 +20,39 @@ No test in this suite touches the network.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pandas as pd
 import pytest
-import streamlit as st
+
+from app.data import cache, settings
+
+#: Where no test finds a secrets file. A test about the file writes its own.
+NO_SECRETS_FILE = Path(__file__).resolve().parent / "no-secrets" / "secrets.toml"
 
 
 @pytest.fixture(autouse=True)
 def _fresh_cache():
-    """Every test starts with an empty ``st.cache_data``.
+    """Every test starts with every data-layer cache empty.
 
     The private fetchers now read each other through the cached public ones —
     statements through ``fetch_ticker_meta``, prices through one full-history
     entry — so without this a fixture company cached by one test would answer
     for the same ticker in the next, whatever that test stubbed.
     """
-    st.cache_data.clear()
+    cache.clear_all()
     yield
+
+
+@pytest.fixture(autouse=True)
+def _no_secrets_file(monkeypatch):
+    """No test reads the developer's ``.streamlit/secrets.toml``.
+
+    CI has none, so a test that passed only because a real key was on disk
+    would fail there; this makes every machine look like CI. The environment is
+    left alone — a test about it sets or deletes the variable itself.
+    """
+    monkeypatch.setattr(settings, "SECRETS_FILE", NO_SECRETS_FILE)
 
 _EDGAR = "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0000000999"
 

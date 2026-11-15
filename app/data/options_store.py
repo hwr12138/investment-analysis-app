@@ -6,8 +6,8 @@ that fetched the chains it draws would take minutes; instead a Cloud Run job
 (``collector/``) writes them to a private GCS bucket overnight and this module
 reads the bucket. :mod:`app.options_layout` names every object.
 
-Where the store is comes from the ``OPTIONS_STORE_URI`` environment variable, else
-Streamlit secrets:
+Where the store is comes from the environment, else ``.streamlit/secrets.toml``
+(:mod:`app.data.settings`):
 
 * ``OPTIONS_STORE_URI = "gs://bucket"`` or ``"file:///abs/path"`` — the local
   form is for development and tests, and needs no credentials;
@@ -22,8 +22,8 @@ provides — on Cloud Run, the API service's own account, which needs only
 re-downloaded.** Each object's *generation* (GCS's version stamp, or a local
 file's mtime) is read with a five-minute TTL, and the object itself is cached
 under ``(path, generation)``. **Failures raise :class:`OptionsStoreError` and are
-never cached** — Streamlit does not cache an exception — for the reason
-``market_data.FetchFailed`` gives: a transient outage cached for a day.
+never cached** — :mod:`app.data.cache` does not store an exception — for the
+reason ``market_data.FetchFailed`` gives: a transient outage cached for a day.
 
 Error messages name the object and the store, never the credentials.
 """
@@ -32,13 +32,12 @@ from __future__ import annotations
 
 import io
 import json
-import os
 from pathlib import Path
 
 import pandas as pd
-import streamlit as st
 
 from app import options_layout as layout
+from app.data import cache, settings
 
 
 class OptionsStoreError(Exception):
@@ -47,17 +46,14 @@ class OptionsStoreError(Exception):
 
 def _location() -> str:
     # The environment wins, so a local store can be pointed at for one run
-    # without editing secrets.toml.
-    uri = os.environ.get("OPTIONS_STORE_URI")
-    bucket = None
-    if not uri:
-        try:
-            uri = st.secrets.get("OPTIONS_STORE_URI")
-            bucket = st.secrets.get("OPTIONS_BUCKET")
-        except Exception:  # secrets.toml absent entirely
-            uri = bucket = None
+    # without editing secrets.toml; a URI wins over a bare bucket name.
+    try:
+        uri = settings.get("OPTIONS_STORE_URI")
+        bucket = None if uri else settings.get("OPTIONS_BUCKET")
+    except settings.SettingsError as error:
+        raise OptionsStoreError(str(error)) from None
     if uri:
-        return str(uri)
+        return uri
     if bucket:
         return f"gs://{bucket}"
     raise OptionsStoreError(
@@ -66,7 +62,7 @@ def _location() -> str:
     )
 
 
-@st.cache_resource(show_spinner=False)
+@cache.resource()
 def _gcs_bucket(name: str):
     try:
         from google.cloud import storage
@@ -89,14 +85,12 @@ def _gcs_bucket(name: str):
 def _service_account_info() -> dict | None:
     """The key from ``[gcp_service_account]``, or ``None`` to use the ambient account.
 
-    Cloud Run has no ``secrets.toml`` at all, and reading ``st.secrets`` without
-    one raises rather than returning nothing.
+    Cloud Run has no ``secrets.toml`` at all, so this is ``None`` there.
     """
     try:
-        info = st.secrets.get("gcp_service_account")
-    except Exception:
-        return None
-    return dict(info) if info else None
+        return settings.table("gcp_service_account")
+    except settings.SettingsError as error:
+        raise OptionsStoreError(str(error)) from None
 
 
 def _split(location: str) -> tuple[str, str]:
@@ -137,17 +131,17 @@ def _read(path: str, generation: str) -> bytes:
         raise OptionsStoreError(f"Could not read {path} from the options store") from None
 
 
-@st.cache_data(show_spinner=False, ttl=300)
+@cache.data(ttl=300)
 def _cached_generation(path: str) -> str:
     return _generation(path)
 
 
-@st.cache_data(show_spinner=False, ttl=3600 * 36, max_entries=32)
+@cache.data(ttl=3600 * 36, max_entries=32)
 def _cached_frame(path: str, generation: str) -> pd.DataFrame:
     return pd.read_parquet(io.BytesIO(_read(path, generation)))
 
 
-@st.cache_data(show_spinner=False, ttl=3600 * 36, max_entries=8)
+@cache.data(ttl=3600 * 36, max_entries=8)
 def _cached_json(path: str, generation: str) -> dict:
     return json.loads(_read(path, generation))
 

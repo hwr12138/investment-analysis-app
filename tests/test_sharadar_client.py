@@ -5,6 +5,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
+from app.data import settings
 from app.data import sharadar_client as sc
 from app.data.sharadar import actions as sh_actions
 from app.data.sharadar import insiders as sh_insiders
@@ -447,8 +448,8 @@ def test_as_reported_and_restated_are_labelled_distinctly(
 def test_omitting_a_default_keyword_still_hits_the_cache(monkeypatch):
     """One request, however the caller spells the defaults.
 
-    ``st.cache_data`` keys on the arguments as written at the call site and does
-    *not* apply defaults, so ``fetch_statements(t, annual=True)`` and
+    The cache keys on the arguments as passed and does *not* apply defaults
+    (it kept ``st.cache_data``'s rule when it replaced it), so ``fetch_statements(t, annual=True)`` and
     ``fetch_statements(t, annual=True, ttm=False)`` would hash differently and
     fetch the same ``MRY`` rows twice. The research page spells all three
     keywords and the DCF spells two, so this cost one duplicate SF1 request per
@@ -614,9 +615,7 @@ def test_rate_limit_recovers_on_retry(monkeypatch):
 
 
 def test_missing_key_raises_before_any_request(monkeypatch):
-    monkeypatch.setattr(sh_transport.st, "secrets", {})
-    # Streamlit copies top-level secrets into the environment when it parses
-    # secrets.toml, so an earlier test may have left the real key there.
+    # conftest points the secrets file at nothing; the environment is ours to clear.
     monkeypatch.delenv("SHARADAR_API_KEY", raising=False)
 
     def _fail(*args, **kwargs):
@@ -629,9 +628,32 @@ def test_missing_key_raises_before_any_request(monkeypatch):
 
 def test_the_environment_supplies_the_key_where_there_is_no_secrets_file(monkeypatch):
     """How Cloud Run hands a Secret Manager secret to the API service."""
-    monkeypatch.setattr(sh_transport.st, "secrets", {})
     monkeypatch.setenv("SHARADAR_API_KEY", "from-env")
     assert sh_transport._api_key() == "from-env"
+
+
+def test_the_secrets_file_supplies_the_key_locally(monkeypatch, tmp_path):
+    """Local development: ``.streamlit/secrets.toml``, read when the environment is silent."""
+    secrets = tmp_path / "secrets.toml"
+    secrets.write_text('SHARADAR_API_KEY = "from-file"\n')
+    monkeypatch.setattr(settings, "SECRETS_FILE", secrets)
+    monkeypatch.delenv("SHARADAR_API_KEY", raising=False)
+    assert sh_transport._api_key() == "from-file"
+    monkeypatch.setenv("SHARADAR_API_KEY", "from-env")
+    assert sh_transport._api_key() == "from-env"  # the environment wins
+
+
+def test_a_malformed_secrets_file_is_named_and_never_quoted(monkeypatch, tmp_path):
+    secrets = tmp_path / "secrets.toml"
+    secrets.write_text('SHARADAR_API_KEY = "SUPERSECRETKEY123\n')  # unterminated
+    monkeypatch.setattr(settings, "SECRETS_FILE", secrets)
+    monkeypatch.delenv("SHARADAR_API_KEY", raising=False)
+    with pytest.raises(sc.SharadarError) as caught:
+        sh_transport._api_key()
+    rendered = f"{caught.value} {caught.value.args!r} {caught.value.__dict__!r}"
+    assert str(secrets) in rendered
+    assert "SUPERSECRETKEY123" not in rendered
+    assert caught.value.__cause__ is None and caught.value.__suppress_context__
 
 
 def test_pagination_follows_the_cursor_until_exhausted(monkeypatch, annual_rows):
