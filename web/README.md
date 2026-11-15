@@ -74,7 +74,10 @@ One-time setup:
    Copy `firebase apps:sdkconfig WEB <app id> --project PROJECT` into
    `web/.env.production.local` as the four `VITE_FIREBASE_*` values (git ignores the file). Then,
    in the Firebase console under Authentication → Sign-in method, turn on **Google**. The CLI
-   cannot do that step, because it creates the OAuth client.
+   cannot do that step, because it creates the OAuth client. Finally add `equiti-app.web.app` and
+   `equiti-app.firebaseapp.com` under Authentication → Settings → Authorized domains. Firebase
+   lists only the project's default domains, so sign-in on the second site fails until they are
+   added.
 2. **Secret and service account** (the build account also needs the staging-bucket binding in
    `collector/README.md` §4):
 
