@@ -11,7 +11,7 @@ export type Period = Schemas["Summary"]["period"];
 export type StatementKey = Schemas["Financials"]["statement"];
 export type UnitName = Schemas["Financials"]["unit"];
 
-export const TABS = ["summary", "valuation", "insiders", "holdings", "financials"] as const;
+export const TABS = ["summary", "dcf", "valuation", "insiders", "holdings", "financials"] as const;
 export type Tab = (typeof TABS)[number];
 
 // A research page is a snapshot: the API caches the fetches for the day, so a
@@ -91,6 +91,38 @@ export function useRelative(ticker: string, kind: "valuation" | "growth") {
       kind === "valuation"
         ? unwrap(api.GET("/api/research/{ticker}/valuation", { params: { path: { ticker } } }))
         : unwrap(api.GET("/api/research/{ticker}/growth", { params: { path: { ticker } } })),
+    staleTime: STALE,
+    placeholderData: keepPreviousData,
+  });
+}
+
+export type DcfOverrides = Schemas["DcfOverrides"];
+
+/** The DCF panel and the run it makes. The overrides are the key, so an input
+ *  set back to where it was is served from here; the last answer stays on
+ *  screen while the next one is computed. */
+export function useDcf(ticker: string, overrides: DcfOverrides) {
+  return useQuery({
+    queryKey: ["research", ticker, "dcf", overrides],
+    queryFn: () => unwrap(api.POST("/api/research/{ticker}/dcf", { params: { path: { ticker } }, body: overrides })),
+    staleTime: STALE,
+    placeholderData: keepPreviousData,
+    // A refused input (422) is the reader's to undo, not a blip to retry.
+    retry: (count, error) => !("status" in error && error.status === 422) && count < 2,
+  });
+}
+
+export function useDcfWhatIf(ticker: string, overrides: DcfOverrides, price: number | null) {
+  return useQuery({
+    queryKey: ["research", ticker, "dcf-what-if", overrides, price],
+    queryFn: () =>
+      unwrap(
+        api.POST("/api/research/{ticker}/dcf/what-if", {
+          params: { path: { ticker } },
+          body: { overrides, price: price as number },
+        }),
+      ),
+    enabled: price !== null && price > 0,
     staleTime: STALE,
     placeholderData: keepPreviousData,
   });

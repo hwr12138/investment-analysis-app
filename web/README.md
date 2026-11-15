@@ -2,8 +2,8 @@
 
 The Streamlit app's successor: a React + Mantine frontend here, a FastAPI service in
 `app/api/`, both over the same `app/logic/` and `app/data/`. 🚀 Momentum Analysis, 🔎 Stock Research
-(all but its 💰 DCF tab), the two portfolio pages and 🎯 Options are ported so far; the Streamlit app
-keeps running until every page is.
+(all six tabs, the 💰 DCF included), the two portfolio pages and 🎯 Options are ported so far; the
+Streamlit app keeps running until every page is.
 
 ```
 Firebase Hosting ── web/dist (this app)
@@ -51,7 +51,10 @@ on the Python side then fails `npm run typecheck` rather than showing up as `und
   being silently renamed `null` (which is what Pydantic otherwise does, even for a plain `float`).
 - **No result is drawn against inputs it does not match.** The divergence query keeps its
   previous answer while the next one loads (`placeholderData`), but shows it dimmed and keeps it
-  off the chart. The DCF tab will need the same rule for its assumption fingerprint.
+  off the chart. The DCF tab does the same with its overrides as the query key: while the next run
+  loads, the last one stays on screen dimmed, headline included, and a refused input (a 422) leaves
+  it dimmed beside an Undo. Only the inputs the reader changed are sent, so an untouched one keeps
+  following its default.
 - **Every data route requires sign-in** (`test_every_data_route_carries_the_gate`). The data is
   licensed, and Hosting can only reach a Cloud Run service open to unauthenticated calls, so the
   gate is a Firebase ID token plus an email allowlist. An empty allowlist admits nobody.

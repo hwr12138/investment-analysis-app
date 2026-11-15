@@ -21,6 +21,7 @@ import {
   IconAlertTriangle,
   IconBuildingBank,
   IconChartCandle,
+  IconCoin,
   IconExternalLink,
   IconFileSpreadsheet,
   IconScale,
@@ -31,6 +32,7 @@ import { useNavigate } from "react-router";
 import { ApiError } from "../../api/client";
 import { TickerSearch } from "../../components/TickerSearch";
 import { isoDay } from "../../format";
+import { DcfTab } from "./DcfTab";
 import { FinancialsTab } from "./FinancialsTab";
 import { HoldingsTab } from "./HoldingsTab";
 import { InsidersTab } from "./InsidersTab";
@@ -38,10 +40,12 @@ import { SummaryTab } from "./SummaryTab";
 import { ValuationTab } from "./ValuationTab";
 import { price, type Profile, type Tab, useProfile, useResearchParams } from "./common";
 
-// Valuation follows Summary, Insiders and Holdings read as an ownership pair,
-// and the statements close the strip as the reference the rest draw on.
+// The two valuations follow Summary — the company's own cash flows, then what
+// its peers trade at — Insiders and Holdings read as an ownership pair, and the
+// statements close the strip as the reference the rest draw on.
 const TAB_LABELS: { value: Tab; label: string; icon: typeof IconScale }[] = [
   { value: "summary", label: "Summary", icon: IconChartCandle },
+  { value: "dcf", label: "DCF", icon: IconCoin },
   { value: "valuation", label: "Relative valuation", icon: IconScale },
   { value: "insiders", label: "Insiders", icon: IconUsers },
   { value: "holdings", label: "Holdings", icon: IconBuildingBank },
@@ -115,6 +119,9 @@ export function ResearchPage() {
           </Tabs.List>
           <Tabs.Panel value="summary">
             <SummaryTab ticker={ticker} />
+          </Tabs.Panel>
+          <Tabs.Panel value="dcf">
+            <DcfTab ticker={ticker} />
           </Tabs.Panel>
           <Tabs.Panel value="valuation">
             <ValuationTab ticker={ticker} />

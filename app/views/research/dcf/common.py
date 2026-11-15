@@ -9,6 +9,7 @@ from __future__ import annotations
 import streamlit as st
 
 from app.formatting import format_money
+from app.logic.dcf import inputs as dcf_inputs
 from app.provenance import Origin, Sourced
 from app.views import components
 
@@ -53,25 +54,8 @@ def render_blocking(title: str, body: str, detail: str = "") -> None:
 def model_kwargs(inputs: dict) -> dict:
     """Every ``run_model`` argument the assumption set supplies, bar the drivers.
 
-    One place builds it because three places call the model — the forward run,
-    the reverse solve, and the what-if price — and the reverse DCF has to invert
-    exactly the model on screen: an argument added to one call and forgotten in
-    another would solve a different model than the one displayed.
+    :func:`app.logic.dcf.inputs.run_kwargs`, which the forward run, the reverse
+    solve and the what-if price all go through, so the reverse DCF inverts
+    exactly the model on screen.
     """
-    return dict(
-        wacc_result=inputs["wacc"],
-        terminal_growth=inputs["terminal_growth"],
-        exit_multiple=inputs["exit_multiple"],
-        elapsed=inputs["elapsed"],
-        mid_year=inputs["mid_year"],
-        shares=inputs["shares"],
-        share_basis=inputs["share_basis"],
-        include_short_term_investments=inputs["include_sti"],
-        operating_cash_floor=inputs["cash_floor"],
-        non_operating_assets=inputs["non_operating"],
-        base_fcff=inputs["base_fcff"],
-        headline_method=inputs["headline_method"],
-        ronic=inputs["ronic"],
-        terminal_tax_rate=inputs["terminal_tax_rate"],
-        ebita_proxy=inputs["ebita_proxy"],
-    )
+    return dcf_inputs.run_kwargs(inputs)

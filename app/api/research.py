@@ -1,9 +1,8 @@
 """🔎 Stock Research over HTTP: one route per tab, each calling the loader its Streamlit tab calls.
 
-The page is a profile and five tabs — 📊 Summary, 📄 Financials, ⚖️ Valuation
-and Growth, 👤 Insiders and 🏛️ Holdings. The 💰 DCF is not here yet: its
-assumption set is still assembled inside the Streamlit view, and it arrives
-once that is a logic function both front ends can call.
+The page is a profile and six tabs — 📊 Summary, 📄 Financials, ⚖️ Valuation
+and Growth, 👤 Insiders and 🏛️ Holdings here, and the 💰 DCF in
+:mod:`app.api.dcf`, which loads through the DCF engine rather than the snapshot.
 
 Every route starts from :func:`app.logic.research.dataset.load_research`, the
 snapshot a Streamlit search builds. Its fetches are cached in the data layer, so
@@ -87,7 +86,7 @@ class Frame(Contract):
     rows: list[list[Cell]]
 
 
-def _provenance(sourced: Sourced) -> Provenance:
+def as_provenance(sourced: Sourced) -> Provenance:
     return Provenance(
         origin=sourced.origin.value,
         source=sourced.source,
@@ -114,7 +113,7 @@ def _cell(value: object) -> Cell:
     return str(value)
 
 
-def _frame(frame: pd.DataFrame) -> Frame:
+def as_frame(frame: pd.DataFrame) -> Frame:
     return Frame(
         columns=[str(c) for c in frame.columns],
         rows=[[_cell(v) for v in row] for row in frame.itertuples(index=False)],
@@ -542,7 +541,7 @@ def financials(
             )
             for r in table.diagnostics
         ],
-        filings=_frame(filings),
+        filings=as_frame(filings),
     )
 
 
@@ -847,7 +846,7 @@ def insiders_tab(ticker: Ticker) -> Insiders:
         ],
         roster_reason=roster.reason,
         roster_as_of=roster.as_of,
-        reconciliation=_frame(panel),
+        reconciliation=as_frame(panel),
         filed_rows=len(frame),
         shown_rows=int(counted["Rows"].iloc[0]) if not counted.empty else 0,
         **criteria,
@@ -995,7 +994,7 @@ def holdings_tab(ticker: Ticker) -> Holdings:
             )
             for row in built.ownership.itertuples()
         ],
-        reconciliation=_frame(built.reconciliation),
+        reconciliation=as_frame(built.reconciliation),
         families=[
             FilerFamily(label=label, entities=len(members))
             for label, members in holdings.FILER_FAMILIES.items()

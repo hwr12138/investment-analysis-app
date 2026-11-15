@@ -9,9 +9,9 @@ import streamlit as st
 
 from app.formatting import format_pct
 from app.logic.dcf import export as dcf_export
+from app.logic.dcf import inputs as dcf_inputs
 from app.logic.dcf import model as dcf_model
 from app.logic.dcf import validation as val
-from app.logic.dcf import valuation as dcf
 from app.views.research.dcf import common
 
 def render_header(dataset: dcf_model.CompanyDataset, valuation_date: date):
@@ -94,25 +94,8 @@ def render_headline_value(
     )
 
 
-def _cross_implied(terminal: dcf.TerminalValue) -> str:
-    """Restates one terminal value method in the other method's units.
-
-    Gordon growth produces a terminal value, which divided by terminal EBITDA is
-    an exit multiple. An exit multiple produces a terminal value, which says
-    what perpetual growth it needs even if growth were free, and what return on
-    new capital it needs at the terminal growth rate. Each row therefore reports
-    a different quantity, and the label says which.
-    """
-    if terminal.implied_exit_multiple is not None:
-        return f"an exit multiple of {terminal.implied_exit_multiple:,.2f}×"
-    if terminal.implied_growth is not None:
-        text = f"perpetual growth of at least {terminal.implied_growth:.2%}"
-        if terminal.implied_ronic is not None:
-            text += f"; RONIC of {terminal.implied_ronic:.1%} at the terminal rate"
-        elif terminal.terminal_year is not None and terminal.terminal_year.growth > 0:
-            text += "; no return on new capital reaches it at the terminal rate"
-        return text
-    return "—"
+#: Each method restated in the other's units — shared with the web app.
+_cross_implied = dcf_inputs.cross_implied
 
 
 def render_valuation(

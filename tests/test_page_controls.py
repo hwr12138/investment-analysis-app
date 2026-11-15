@@ -423,16 +423,13 @@ def test_both_methods_remain_selectable():
 
 
 # ---------------------------------------------------------------------------
-# Capex normalisation
+# Capex normalisation — app.logic.dcf.inputs.resolve_target
 # ---------------------------------------------------------------------------
 
 
-def _capex_target(normal_value):
-    """Draws the capex target alone, as the panel does, and keeps what it returned."""
-    import streamlit as st
-
+def _capex_target(normal_value, *, on=None, value=None):
     from app.logic.dcf import financials as fin
-    from app.views.research.dcf import assumptions
+    from app.logic.dcf import inputs as dcf_inputs
 
     periods = ("2022", "2023", "2024", "2025", "2026")
     normal = fin.DriverDefault(
@@ -441,65 +438,52 @@ def _capex_target(normal_value):
         periods if normal_value is not None else (),
         "" if normal_value is not None else "No period had every component needed.",
     )
-    records = []
-    st.session_state["_target"] = assumptions._driver_target(
-        "capex % of revenue", "capex", 0.35, 10, records, normal=normal
+    return dcf_inputs.resolve_target(
+        "capex_pct_revenue", "capex % of revenue", 0.35, 10, normal=normal, on=on, value=value
     )
-    st.session_state["_origin"] = records[-1].sourced.origin.value
-
-
-def _run_capex_target(normal_value):
-    from streamlit.testing.v1 import AppTest
-
-    app = AppTest.from_function(_capex_target, args=(normal_value,))
-    app.run()
-    assert not app.exception
-    return app
 
 
 def test_capex_moves_to_its_five_year_average_by_default():
     """Today's capex is where the forecast starts, not where it stays: the
     target is on without anyone touching it, and it is derived, not typed."""
-    app = _run_capex_target(0.20)
-    assert app.toggle(key="dcf_input_target_capex_on").value is True
-    assert app.session_state["_target"] == pytest.approx(0.20)
-    assert app.session_state["_origin"] == "derived"
+    target = _capex_target(0.20)
+    assert target.default_on is True and target.on is True
+    assert target.input.value == pytest.approx(0.20)
+    assert target.input.sourced.origin.value == "derived"
 
 
 def test_a_typed_capex_target_reads_as_the_users():
-    app = _run_capex_target(0.20)
-    app.number_input(key="dcf_input_target_capex").set_value(15.0).run()
-    assert app.session_state["_target"] == pytest.approx(0.15)
-    assert app.session_state["_origin"] == "user"
+    target = _capex_target(0.20, value=0.15)
+    assert target.input.value == pytest.approx(0.15)
+    assert target.input.sourced.origin.value == "user"
+
+
+def test_a_target_typed_back_to_its_default_is_the_default_again():
+    """Both front ends show the default rounded; reading it back is no override."""
+    target = _capex_target(0.20, value=round(0.20 * 100, 4) / 100)
+    assert target.input.sourced.origin.value == "derived"
 
 
 def test_turning_normalisation_off_holds_todays_capex():
-    app = _run_capex_target(0.20)
-    app.toggle(key="dcf_input_target_capex_on").set_value(False).run()
-    assert app.session_state["_target"] is None
+    target = _capex_target(0.20, on=False)
+    assert target.on is False and target.input is None
 
 
 def test_no_history_leaves_capex_flat_and_says_why():
     """No silent fallback: with nothing to normalise to, nothing is substituted."""
-    app = _run_capex_target(None)
-    assert app.toggle(key="dcf_input_target_capex_on").value is False
-    assert app.session_state["_target"] is None
-    assert any("No 5-year average to normalise to" in c.value for c in app.caption)
+    target = _capex_target(None)
+    assert target.default_on is False and target.on is False
+    assert any("No 5-year average to normalise to" in n.text for n in target.notes)
 
 
 # ---------------------------------------------------------------------------
-# Return on new invested capital
+# Return on new invested capital — app.logic.dcf.inputs.resolve_ronic
 # ---------------------------------------------------------------------------
 
 
-def _ronic_panel(ebit):
-    """Draws the RONIC choice for a company whose ROIC is ebit × 0.8 ÷ 100 a year."""
-    from types import SimpleNamespace
-
-    import pandas as pd
-    import streamlit as st
-
-    from app.views.research.dcf import assumptions
+def _ronic(ebit, basis=None, value=None):
+    """The RONIC for a company whose ROIC is ebit × 0.8 ÷ 100 a year, at a 9% WACC."""
+    from app.logic.dcf import inputs as dcf_inputs
 
     years = 6
     annual = pd.DataFrame(
@@ -509,80 +493,82 @@ def _ronic_panel(ebit):
         },
         index=list(range(2020, 2020 + years)),
     )
-    ronic, sourced = assumptions._return_on_new_capital(
-        SimpleNamespace(annual=annual), SimpleNamespace(wacc=0.09)
-    )
-    st.session_state["_ronic"] = ronic
-    st.session_state["_origin"] = sourced.origin.value
-
-
-def _run_ronic(ebit):
-    from streamlit.testing.v1 import AppTest
-
-    app = AppTest.from_function(_ronic_panel, args=(ebit,))
-    app.run()
-    assert not app.exception
-    return app
+    return dcf_inputs.resolve_ronic(annual, 0.09, basis=basis, value=value)
 
 
 def test_the_default_ronic_is_the_companys_own_return_above_the_wacc():
     """RONIC = WACC credited nothing to growth beyond year N; the company's own
     record is the default evidence for what its new capital earns."""
-    app = _run_ronic(ebit=30.0)                          # 30 × 0.8 ÷ 100 = 24%
-    assert app.radio(key="dcf_input_ronic_basis").value == assumptions._OWN_ROIC
-    assert app.session_state["_ronic"] == pytest.approx(0.24)
-    assert app.session_state["_origin"] == "derived"
+    options, basis, ronic = _ronic(ebit=30.0)            # 30 × 0.8 ÷ 100 = 24%
+    assert basis == assumptions._OWN_ROIC == options[0]
+    assert ronic.value == pytest.approx(0.24)
+    assert ronic.sourced.origin.value == "derived"
 
 
 def test_an_own_return_below_the_wacc_defaults_to_the_wacc_not_to_destroying_value():
-    app = _run_ronic(ebit=5.0)                           # 4%, against a 9% WACC
-    assert app.session_state["_ronic"] is None
-    assert app.session_state["_origin"] == "estimate"
-    assert any("does not exceed its WACC" in c.value for c in app.caption)
+    _, _, ronic = _ronic(ebit=5.0)                       # 4%, against a 9% WACC
+    assert ronic.value is None
+    assert ronic.sourced.origin.value == "estimate"
+    assert any("does not exceed its WACC" in n.text for n in ronic.notes)
 
 
 def test_no_measurable_return_offers_only_the_wacc_and_a_manual_figure():
-    app = _run_ronic(ebit=-10.0)
-    radio = app.radio(key="dcf_input_ronic_basis")
-    assert list(radio.options) == [assumptions._RONIC_AT_WACC, assumptions._RONIC_MANUAL]
-    assert app.session_state["_ronic"] is None
-    assert any("No own ROIC to default to" in c.value for c in app.caption)
+    options, _, ronic = _ronic(ebit=-10.0)
+    assert list(options) == [assumptions._RONIC_AT_WACC, assumptions._RONIC_MANUAL]
+    assert ronic.value is None
+    assert any("No own ROIC to default to" in n.text for n in ronic.notes)
 
 
 def test_ronic_can_still_be_set_to_the_wacc_or_by_hand():
-    app = _run_ronic(ebit=30.0)
-    app.radio(key="dcf_input_ronic_basis").set_value(assumptions._RONIC_AT_WACC).run()
-    assert app.session_state["_ronic"] is None
-    app.radio(key="dcf_input_ronic_basis").set_value(assumptions._RONIC_MANUAL).run()
-    assert app.number_input(key="dcf_input_ronic").value == pytest.approx(24.0)
+    _, _, at_wacc = _ronic(ebit=30.0, basis=assumptions._RONIC_AT_WACC)
+    assert at_wacc.value is None
+    _, _, manual = _ronic(ebit=30.0, basis=assumptions._RONIC_MANUAL)
+    assert manual.value == pytest.approx(0.24)       # seeded from the company's own
+    _, _, typed = _ronic(ebit=30.0, basis=assumptions._RONIC_MANUAL, value=0.12)
+    assert typed.value == pytest.approx(0.12) and typed.sourced.origin.value == "user"
 
 
 # ---------------------------------------------------------------------------
-# Driver basis selector (DCF_ROUND2_INSTRUCTIONS.md §2.2)
+# Widgets that follow their default until typed in (DCF_ROUND2_INSTRUCTIONS.md §2.2)
 # ---------------------------------------------------------------------------
 
 
 def test_changing_a_drivers_basis_reseeds_its_value_and_its_provenance():
     state: dict = {}
-    seed = lambda basis, default: assumptions._seed_driver_value(  # noqa: E731
-        state, "dcf_input_growth_value", "dcf_input_growth_seeded_from", basis, default
-    )
+    key = "dcf_input_growth_value"
 
-    seed("5-year CAGR", 8.0)
-    assert state["dcf_input_growth_value"] == 8.0
+    assumptions._seed(state, key, 8.0, basis="5-year CAGR")
+    assert state[key] == 8.0
+    assert assumptions._typed(state, key, 100.0, basis="5-year CAGR") is None
 
     # Typed by hand: kept while the basis stays put, and read as an override.
-    state["dcf_input_growth_value"] = 12.0
-    seed("5-year CAGR", 8.0)
-    assert state["dcf_input_growth_value"] == 12.0
-    assert not assumptions._untouched(12.0, 8.0, 4)
+    state[key] = 12.0
+    assert assumptions._typed(state, key, 100.0, basis="5-year CAGR") == pytest.approx(0.12)
+    assumptions._seed(state, key, 8.0, basis="5-year CAGR")
+    assert state[key] == 12.0
 
     # A new basis brings its own default, which is then read as untouched —
     # derived provenance, not a user override.
-    seed("5-year average", 9.5)
-    assert state["dcf_input_growth_value"] == 9.5
-    assert assumptions._untouched(state["dcf_input_growth_value"], 9.5, 4)
+    assert assumptions._typed(state, key, 100.0, basis="5-year average") is None
+    assumptions._seed(state, key, 9.5, basis="5-year average")
+    assert state[key] == 9.5
+    assert assumptions._typed(state, key, 100.0, basis="5-year average") is None
 
+
+def test_an_untouched_input_follows_its_default_when_the_default_moves():
+    """A cost of debt nobody typed follows the risk-free rate it is built on."""
+    state: dict = {}
+    assumptions._seed(state, "dcf_input_kd", 5.1)
+    assumptions._seed(state, "dcf_input_kd", 5.6)
+    assert state["dcf_input_kd"] == 5.6
+    assert assumptions._typed(state, "dcf_input_kd", 100.0) is None
+
+
+def test_the_seeds_are_cleared_with_the_company():
+    """Every seed sits under the prefix the ticker change wipes."""
+    state: dict = {}
+    assumptions._seed(state, "dcf_input_rf", 4.2)
+    assert all(key.startswith("dcf_input_") for key in state)
 
 
 def test_the_projection_view_formats_only_columns_the_export_produces():
@@ -613,10 +599,12 @@ def test_the_effective_growth_basis_names_the_rate_actually_used():
     slow = fin.DriverDefault("revenue_growth", 0.04, fin.TTM_GROWTH_BASIS, 1, ("P",))
     burst = fin.lower_of_growth(ttm, cagr)
     slowdown = fin.lower_of_growth(slow, cagr)
-    assert assumptions._effective_growth_basis(fin.LOWER_GROWTH_BASIS, burst, ttm) == "5-year CAGR"
-    assert assumptions._effective_growth_basis(
+    from app.logic.dcf import inputs as dcf_inputs
+
+    assert dcf_inputs.effective_growth_basis(fin.LOWER_GROWTH_BASIS, burst, ttm) == "5-year CAGR"
+    assert dcf_inputs.effective_growth_basis(
         fin.LOWER_GROWTH_BASIS, slowdown, slow
     ) == fin.TTM_GROWTH_BASIS
-    assert assumptions._effective_growth_basis(
+    assert dcf_inputs.effective_growth_basis(
         fin.TTM_GROWTH_BASIS, burst, ttm
     ) == fin.TTM_GROWTH_BASIS
