@@ -283,7 +283,7 @@ export interface paths {
          * @description One statement, laid out and reconciled by ``logic.statements``.
          *
          *     The balance sheet's leading column is the latest quarter, the others' the
-         *     trailing twelve months — the same choice the Streamlit tab makes.
+         *     trailing twelve months.
          */
         get: operations["financials_api_research__ticker__financials_get"];
         put?: never;
@@ -1544,7 +1544,7 @@ export interface components {
         };
         /**
          * Panel
-         * @description Every input, top to bottom, as the Streamlit panel draws them.
+         * @description Every input, top to bottom, as the panel draws them.
          */
         Panel: {
             /** Base Label */

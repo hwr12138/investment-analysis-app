@@ -18,6 +18,7 @@ from datetime import date
 import pandas as pd
 import pytest
 
+from app.data import sharadar_client as sc
 from app.logic.research import holdings
 from app.provenance import Origin
 from tests.conftest import sf3_splits
@@ -477,3 +478,42 @@ def test_the_module_makes_no_request():
         if isinstance(node, ast.Attribute)
     }
     assert not {name for name in called if name.startswith("fetch")}
+
+
+# ---------------------------------------------------------------------------
+# What both the banner and the headline read off a built register
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def built(holders_frame, holdings_summary, investor_names, actions):
+    shares = pd.DataFrame(
+        {
+            "Calendar Date": Q,
+            sc.SF1_CAPTIONS["sharesbas"]: [10_000_000.0] * 6,
+            sc.SF1_CAPTIONS["sharefactor"]: [1.0] * 6,
+        }
+    )
+    return holdings.build(
+        summary=holdings_summary,
+        current=holders_frame,
+        history=holders_frame,
+        names=investor_names,
+        actions=actions,
+        statements=shares,
+        today=TODAY,
+    )
+
+
+def test_the_register_dates_its_own_deadline(built):
+    """The banner's arithmetic: 13F is due 45 days after the quarter closes."""
+    assert built.deadline == (built.as_of + pd.Timedelta(days=45)).date()
+    assert built.days_old(built.deadline) == 0
+    assert built.days_old(built.deadline - pd.Timedelta(days=3)) == -3
+
+
+def test_the_latest_reading_is_the_last_quarter_with_nothing_filled(built):
+    last = built.ownership.iloc[-1]
+    assert built.latest["units"] == float(last["units"])
+    assert built.latest["holders"] == float(last["holders"])
+    assert holdings.Holdings().latest == {}

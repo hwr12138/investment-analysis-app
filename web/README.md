@@ -1,9 +1,9 @@
-# Equiti web (proof of concept)
+# Equiti web
 
-The Streamlit app's successor: a React + Mantine frontend here, a FastAPI service in
-`app/api/`, both over the same `app/logic/` and `app/data/`. 🚀 Momentum Analysis, 🔎 Stock Research
-(all six tabs, the 💰 DCF included), the two portfolio pages and 🎯 Options are ported so far; the
-Streamlit app keeps running until every page is.
+The app: a React + Mantine frontend here, over a FastAPI service in `app/api/`, which sits on
+`app/logic/` and `app/data/`. It replaced a Streamlit front end, removed in November 2026 once
+every page — 🚀 Momentum Analysis, 📊 Portfolio Statistics, 📈 Portfolio Optimization, 🎯 Options
+and 🔎 Stock Research with all six tabs — had been ported.
 
 ```
 Firebase Hosting ── web/dist (this app)
@@ -139,18 +139,19 @@ Notes:
   release shows on the next load. A rule on `/index.html` alone would miss routes such as
   `/momentum/AAPL`, which reach it through the rewrite and otherwise get Hosting's one-hour cache.
 - Hosting stops waiting for Cloud Run after **60 seconds**. A cold Sharadar price fetch takes 5–20 s.
-- **The Options routes solve nothing heavy on request.** Solving every name's surface takes the
-  Streamlit page about ten seconds, so the collector does it nightly and stores the Discover and
+- **The Options routes solve nothing heavy on request.** Solving every name's surface takes
+  about ten seconds, so the collector does it nightly and stores the Discover and
   Screen tables (~130 kB); the API reads those in milliseconds. Evaluate reads the night's full
   chain once per instance (~35 MB in memory) and solves one name, about 0.3 s. A store whose
   tables are older than its manifest's close answers 503 with how to rebuild them
   (`collector/README.md`, "Rebuilding the screens").
 - The data layer's caches are still `st.cache_data`, in process: each instance starts cold, and
-  `--max-instances 2` keeps that bounded. Moving them to a shared cache is the next step of the
-  migration.
+  `--max-instances 2` keeps that bounded. Moving them off Streamlit, and to a shared cache, is
+  what is left of the migration.
 - **The first request after an idle spell waits 12–15 s** while Cloud Run starts an instance,
   because there is no minimum instance. Locally the app imports in about 1 s, so the time is
   mostly Cloud Run loading the ~300 MB image. `--cpu-boost` made no measurable difference (14.4 s
   with it, 11.6–15.7 s without). `--min-instances 1` would remove the wait at about $13 a month
   idle for 1 vCPU and 1 GiB; the wait was accepted instead (November 2026). A smaller image is the
-  other way out: the API currently installs everything the Streamlit app needs.
+  other way out. Removing the Streamlit front end took plotly, matplotlib and seaborn out of it;
+  Streamlit itself stays until the data layer's caches move off it.

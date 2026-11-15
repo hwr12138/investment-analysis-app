@@ -1,26 +1,25 @@
 """Every input the DCF takes: its default, the reader's override, and the run they make.
 
-The 💰 DCF tab's assumption panel used to assemble the run inside the Streamlit
-view, which left the web app nothing to call. This module is that assembly
-without a page. :func:`resolve` takes the dataset, the three market inputs that
+The 💰 DCF tab's assumption panel, without a page. :func:`resolve` takes the
+dataset, the three market inputs that
 have to be fetched (the risk-free rate, the ERP and a regressed beta) and an
 :class:`Overrides` naming only what the reader changed; every other input takes
 its default *given the choices made*, so a cost of debt nobody typed follows the
-risk-free rate it is built on. Both front ends call it, so an untouched panel on
-either is one run, and the summary chart's DCF line, :func:`default_value_on`,
-is that run once per filing.
+risk-free rate it is built on. The API's panel calls it, so an untouched panel
+is one run, and the summary chart's DCF line, :func:`default_value_on`, is that
+run once per filing.
 
 :func:`evaluate` then values the run the way the tab draws it: the model, the
 reverse DCF under both terminal methods, the sensitivity grid, and every check.
 The last section is what the tab reads off a valued run that is more than
 formatting — the reverse DCF's revenue paths and verdicts, the cross-check
 between the two terminal methods, the filing behind each year — so the API
-serves the same reading the Streamlit tab draws.
+shapes those readings rather than deciding them.
 
 Each input comes back as a :class:`Field`, holding the value in use, the value
 an untouched input holds, its provenance, and the conditional notes about it:
 a fallback, a fetch that failed, a basis with no history. The help text that
-never changes stays with each front end.
+never changes stays with the front end.
 
 An orchestrator like ``model``, which it sits on. It fetches nothing itself
 except in :func:`default_value_on`, which loads a company and its rates.
@@ -246,8 +245,8 @@ class Blocked:
 class Assumptions:
     """The resolved panel, and the run it makes.
 
-    ``inputs`` is the snapshot the Streamlit tab fingerprints and stores, and
-    what :func:`evaluate` and :func:`run_kwargs` read. It is ``None`` when
+    ``inputs`` is the snapshot :func:`evaluate` and :func:`run_kwargs` read,
+    and what the API's what-if and export routes re-value. It is ``None`` when
     ``blocked`` says why the run cannot be assembled.
     """
 
@@ -320,7 +319,7 @@ class Assumptions:
 def _changed(value: float | None, default: float | None, places: int) -> bool:
     """True when ``value`` is a real override of ``default`` at ``places`` decimals.
 
-    Both front ends show a default rounded, so a value read back from an
+    The panel shows a default rounded, so a value read back from an
     untouched input differs from it by the rounding. A rate shown to four
     decimals of a percent is six decimals of a fraction.
     """

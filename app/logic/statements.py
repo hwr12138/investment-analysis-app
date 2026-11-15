@@ -6,9 +6,9 @@ sections, indented detail lines, bolded subtotals, and — where the arithmetic 
 checkable — a reconciliation of each reported subtotal against the lines above
 it.
 
-Pure. No Streamlit, no network, no global state. The view layer supplies the
-frames and renders the result; every number and every string in the output is
-decided here.
+Pure. No Streamlit, no network, no global state. The API supplies the frames
+and the web tab renders the result; every number and every string in the output
+is decided here.
 
 Three properties are load-bearing and easy to break:
 

@@ -392,7 +392,7 @@ def test_growth_reads_no_price_series():
 
 
 # ---------------------------------------------------------------------------
-# The verdict, as both front ends read it
+# The verdict
 # ---------------------------------------------------------------------------
 
 
@@ -407,3 +407,8 @@ def test_faster_is_favourable_and_slower_not():
     assert read(0.001) == Verdict(0.001, "in line", None)
     assert read(None) == Verdict(None)
     assert growth.GrowthTolerances().material_gap == 0.02
+
+
+def test_every_growth_row_is_formatted_as_a_percentage():
+    for metric in growth.METRICS:
+        assert metric.format(0.125) == "12.50%", metric.label

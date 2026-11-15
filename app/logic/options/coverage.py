@@ -5,9 +5,8 @@ theme left out, earnings too close) is the reader's choice; a name that
 **failed** — its fetch errored, or its chain could not be priced — or was **not
 collected** at all is listed with its reason, never dropped quietly.
 
-Shared by both front ends: the Streamlit shell filters its own solved
-snapshots, the web API filters the collector's stored tables, and both pass the
-same theme lookup through :func:`visible`.
+The web API filters the collector's stored tables through :func:`visible`, so
+the expiry choices a screen offers count only the names on it.
 """
 
 from __future__ import annotations
@@ -19,10 +18,9 @@ import pandas as pd
 
 from app.logic.options import universe
 
-#: The earnings filter's windows, in calendar days after the session. A single
-#: stock reporting within the window is hidden: its calls price the event, not
-#: the name. ``0`` hides nothing.
-EARNINGS_WINDOWS = (0, 7, 14, 21)
+#: The earnings filter's default window, in calendar days after the session. A
+#: single stock reporting within the window is hidden: its calls price the event,
+#: not the name. ``0`` hides nothing.
 DEFAULT_EARNINGS_WINDOW = 21
 
 

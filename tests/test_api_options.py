@@ -185,7 +185,7 @@ def test_a_name_without_a_year_of_history_has_no_score_but_still_a_call(client, 
 def test_the_screen_opens_on_the_default_expiry_and_matches_the_spread_table(client, store):
     body = _strict(client.get("/api/options/screen"))
     visible = {s: snap for s, snap in _solved().items() if s in ("SPY", "GLD")}
-    choices = snapshot.spread_expirations(visible)
+    choices = snapshot.common_expirations(snapshot.listed_expirations(visible))
     assert body["expirations"] == [e.isoformat() for e in choices]
     expected_expiry = snapshot.default_spread_expiry(choices, fx.SESSION)
     assert body["expiration"] == expected_expiry.isoformat()

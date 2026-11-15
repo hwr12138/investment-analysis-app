@@ -1,7 +1,7 @@
 """Who may call the API.
 
 The data behind it is licensed — Sharadar via Nasdaq Data Link, ThetaData for
-options — and a JSON API is far easier to scrape than a Streamlit page. Firebase
+options — and a JSON API is far easier to scrape than a rendered page. Firebase
 Hosting can only reach a Cloud Run service that allows unauthenticated
 invocations, so the gate cannot be IAM: every data route requires a Firebase ID
 token, and the token's verified email must be on an allowlist.

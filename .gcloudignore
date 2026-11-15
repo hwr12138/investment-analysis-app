@@ -5,11 +5,9 @@
 .github/
 .streamlit/
 .claude/
-.devcontainer/
 **/__pycache__/
 .pytest_cache/
 tests/
-assets/
 *.md
 sharadar_documentation.txt
 # The frontend deploys to Firebase Hosting, not in the API image.

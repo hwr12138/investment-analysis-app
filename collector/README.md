@@ -25,16 +25,14 @@ gcloud storage buckets create gs://BUCKET --location=REGION --uniform-bucket-lev
 gcloud artifacts repositories create options --repository-format=docker --location=REGION
 ```
 
-## 2. Service accounts
+## 2. The collector's service account
 
-There are two. The collector can write the bucket and read its one secret; the
-Streamlit app can only read the bucket.
+It can write the bucket and read its one secret. The API reads the bucket as its own account,
+which `web/README.md` sets up (Deploy, step 3).
 
 ```bash
 gcloud iam service-accounts create options-collector
-gcloud iam service-accounts create streamlit-reader
 gcloud storage buckets add-iam-policy-binding gs://BUCKET --member=serviceAccount:options-collector@PROJECT.iam.gserviceaccount.com --role=roles/storage.objectAdmin
-gcloud storage buckets add-iam-policy-binding gs://BUCKET --member=serviceAccount:streamlit-reader@PROJECT.iam.gserviceaccount.com --role=roles/storage.objectViewer
 ```
 
 ## 3. The ThetaData key, in Secret Manager
@@ -112,27 +110,12 @@ for spec in "options-nightly|30 1 * * 2-6" "options-retry|0 7 * * 2-6"; do
 done
 ```
 
-## 7. Point the Streamlit app at the bucket
+## 7. Point the API at the bucket
 
-```bash
-gcloud iam service-accounts keys create reader-key.json --iam-account=streamlit-reader@PROJECT.iam.gserviceaccount.com
-```
-
-In Streamlit Community Cloud, open **App settings → Secrets** and add the
-following. Copy each field from `reader-key.json`, then delete the file.
-
-```toml
-OPTIONS_BUCKET = "BUCKET"
-
-[gcp_service_account]
-type = "service_account"
-project_id = "PROJECT"
-private_key_id = "…"
-private_key = "-----BEGIN PRIVATE KEY-----\n…\n-----END PRIVATE KEY-----\n"
-client_email = "streamlit-reader@PROJECT.iam.gserviceaccount.com"
-client_id = "…"
-token_uri = "https://oauth2.googleapis.com/token"
-```
+The API service is deployed with `OPTIONS_STORE_URI=gs://BUCKET` and reads it as its own service
+account, so it needs no key file; `web/README.md` (Deploy) has both steps. Run locally, the API
+reads `OPTIONS_STORE_URI` from the environment, or `OPTIONS_BUCKET` plus a `[gcp_service_account]`
+table from `.streamlit/secrets.toml`, and otherwise your own application-default credentials.
 
 ## Rebuilding the screens
 
@@ -167,7 +150,7 @@ Leave out `--symbols` to cover the whole universe.
 export THETADATA_API_KEY=…
 python -m collector.main backfill --start 2025-10-24 --symbols GLD,SPY --store file:///tmp/options-store
 python -m collector.main daily --symbols GLD,SPY --store file:///tmp/options-store
-OPTIONS_STORE_URI=file:///tmp/options-store streamlit run streamlit_app.py
+OPTIONS_STORE_URI=file:///tmp/options-store EQUITI_AUTH=off python3 -m uvicorn app.api.main:app --port 8600
 ```
 
 ## Cost

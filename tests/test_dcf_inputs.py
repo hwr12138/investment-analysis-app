@@ -1,23 +1,27 @@
-"""The DCF's assumption set, defaults plus overrides, as both front ends assemble it.
+"""The DCF's assumption set, defaults plus overrides, as the panel and the chart assemble it.
 
-``app.logic.dcf.inputs.resolve`` is what the Streamlit panel and the web API both
-call, so these tests pin the rules the two must agree on: an untouched input is
-its default exactly, a default follows the choices it depends on, an override is
-marked as the reader's, and a choice the panel does not offer is refused rather
-than quietly replaced. The second half drives the real Streamlit tab, to check
-its widgets reach the same function.
+``app.logic.dcf.inputs.resolve`` is what the web API's panel and the summary
+chart's DCF line both call, so these tests pin the rules the two must agree on:
+an untouched input is its default exactly, a default follows the choices it
+depends on, an override is marked as the reader's, and a choice the panel does
+not offer is refused rather than quietly replaced. The second half covers what
+the tab draws from a run: the reverse-DCF verdicts, the cross-check between the
+two terminal values, and the capex and RONIC targets.
 """
 
 from __future__ import annotations
 
+import inspect
 from datetime import date
 
+import pandas as pd
 import pytest
-from streamlit.testing.v1 import AppTest
 
-from app.data import market_data
+from app.logic.dcf import financials as fin
 from app.logic.dcf import inputs as dcf_inputs
 from app.logic.dcf import model as dcf_model
+from app.logic.dcf import reverse
+from app.logic.dcf import valuation as dcf
 from app.logic.dcf import wacc as wacc_lib
 from app.provenance import Sourced
 
@@ -91,14 +95,14 @@ def test_every_default_matches_the_engines_constants(dataset):
     assert resolved.inputs["terminal_tax_rate"] == dcf_model.DEFAULT_MARGINAL_TAX
 
 
-def test_the_snapshot_carries_everything_the_tab_fingerprints(dataset):
-    """The Streamlit tab fingerprints this dict and the API values it, so a key
-    the shell reads and resolve does not write would fail on both."""
-    from app.views.research import dcf as page
-
-    inputs = _resolve(dataset).inputs
-    assert page._assumption_fingerprint(inputs)
-    assert dcf_inputs.run_kwargs(inputs)
+def test_every_run_model_argument_comes_from_one_place(dataset):
+    """The forward run, the reverse solve and the what-if price share
+    ``run_kwargs``, so the reverse DCF cannot invert a different model. Every
+    keyword ``run_model`` takes beyond the dataset, base and drivers has to be
+    in it, and the resolved set has to supply every one."""
+    parameters = set(inspect.signature(dcf_model.run_model).parameters)
+    supplied = set(dcf_inputs.run_kwargs(_resolve(dataset).inputs))
+    assert supplied == parameters - {"dataset", "base", "drivers"}
 
 
 # ---------------------------------------------------------------------------
@@ -115,7 +119,7 @@ def test_an_override_is_the_readers_and_reaches_the_run(dataset):
 
 
 def test_an_override_equal_to_the_rounded_default_is_no_override(dataset):
-    """Both front ends display a default rounded; reading it back is untouched."""
+    """The panel displays a default rounded; reading it back is untouched."""
     default = _resolve(dataset).driver("operating_margin").input.default
     resolved = _resolve(dataset, values={"operating_margin": round(default * 100, 4) / 100})
     assert resolved.driver("operating_margin").input.sourced.origin.value == "derived"
@@ -250,68 +254,246 @@ def test_a_what_if_price_inverts_the_model_on_screen(dataset):
 
 
 # ---------------------------------------------------------------------------
-# The Streamlit panel reaches the same function
+# Reverse DCF verdicts
 # ---------------------------------------------------------------------------
 
 
-def _dcf_tab():
-    from app.views.research.dcf import render
-
-    render("TEST")
-
-
-@pytest.fixture
-def tab(statements_payload, tickers_response, monkeypatch):
-    build_model(statements_payload, tickers_response, monkeypatch)
-    monkeypatch.setattr(dcf_model, "regress_company_beta", lambda *a, **k: _BETA)
-    monkeypatch.setattr(market_data, "fetch_10y_treasury_rate", lambda: _RF)
-    monkeypatch.setattr(market_data, "fetch_erp", lambda: _ERP)
-    app = AppTest.from_function(_dcf_tab, default_timeout=120)
-    app.run()
-    assert not app.exception, app.exception
-    return app
+def _reverse(status, **overrides):
+    fields = dict(status=status, target=100.0, growth=None)
+    fields.update(overrides)
+    return reverse.ReverseDcfResult(**fields)
 
 
-def _inputs(app) -> dict:
-    return app.session_state["dcf_output"]["inputs"]
+def test_every_reverse_status_has_a_verdict():
+    """Adding a status without writing its message has to fail here."""
+    for status in reverse.Status:
+        result = _reverse(
+            status,
+            growth=0.12 if status is reverse.Status.SOLVED else None,
+            local_slope=5.0 if status is reverse.Status.SOLVED else None,
+            reason="measured detail",
+        )
+        level, message = dcf_inputs.reverse_verdict(result)
+        assert level in {"", "info", "warning", "error"}
+        if status is not reverse.Status.SOLVED:
+            assert message, f"{status} renders nothing"
 
 
-def test_a_typed_input_reaches_the_run_as_the_readers(tab):
-    tab.number_input(key="dcf_input_g").set_value(3.0).run()
-    assert not tab.exception, tab.exception
-    assert _inputs(tab)["terminal_growth"] == pytest.approx(0.03)
-    growth = next(r for r in _inputs(tab)["records"] if r.name == "Perpetuity growth")
-    assert growth.sourced.origin.value == "user"
+def test_an_ordinary_solved_rate_needs_no_banner():
+    result = _reverse(reverse.Status.SOLVED, growth=0.12, local_slope=5.0)
+    assert dcf_inputs.reverse_verdict(result) == ("", "")
 
 
-def test_a_cost_of_debt_nobody_typed_follows_a_typed_risk_free_rate(tab):
-    before = tab.number_input(key="dcf_input_kd").value
-    tab.number_input(key="dcf_input_rf").set_value(5.2).run()
-    assert not tab.exception, tab.exception
-    # The fixture discloses no interest, so its placeholder is the risk-free rate itself.
-    assert tab.number_input(key="dcf_input_kd").value == pytest.approx(before + 1.0)
+def test_a_value_destroying_solve_says_the_reading_is_inverted():
+    result = _reverse(reverse.Status.SOLVED, growth=0.12, local_slope=-5.0)
+    level, message = dcf_inputs.reverse_verdict(result)
+    assert level == "warning"
+    assert "destroys value" in message
+    assert "inverted" in message
 
 
-def test_a_new_basis_reseeds_the_value_on_screen(tab):
-    box = tab.selectbox(key="dcf_input_growth_basis")
-    other = next(o for o in box.options if o != box.value)
-    tab.number_input(key="dcf_input_growth_value").set_value(42.0).run()
-    assert _inputs(tab)["drivers"].revenue_growth[0] == pytest.approx(0.42)
-    tab.selectbox(key="dcf_input_growth_basis").set_value(other).run()
-    assert not tab.exception, tab.exception
-    assert tab.number_input(key="dcf_input_growth_value").value != pytest.approx(42.0)
+def test_an_extreme_solved_rate_is_flagged_rather_than_presented_as_a_forecast():
+    result = _reverse(reverse.Status.SOLVED, growth=0.90, local_slope=5.0)
+    level, message = dcf_inputs.reverse_verdict(result)
+    assert level == "warning"
+    assert "not explained by revenue growth" in message
 
 
-def test_reset_to_regressed_puts_the_beta_back(tab):
-    tab.number_input(key="dcf_input_beta").set_value(1.7).run()
-    assert _inputs(tab)["beta"] == pytest.approx(1.7)
-    tab.button(key="dcf_beta_reset").click().run()
-    assert not tab.exception, tab.exception
-    assert _inputs(tab)["beta"] == pytest.approx(_BETA.result.beta)
+def test_the_precondition_message_says_it_is_not_a_failed_search():
+    result = _reverse(reverse.Status.NOT_EVALUABLE, reason="Terminal growth is not below WACC.")
+    level, message = dcf_inputs.reverse_verdict(result)
+    assert level == "error"
+    assert "not a failed search" in message
 
 
-def test_shortening_the_forecast_pulls_the_hold_in(tab):
-    tab.number_input(key="dcf_input_hold").set_value(9).run()
-    tab.slider(key="dcf_input_years").set_value(5).run()
-    assert not tab.exception, tab.exception
-    assert _inputs(tab)["growth_hold"] == 4
+def test_an_unwritten_status_is_a_loud_failure_not_a_blank_panel():
+    with pytest.raises(AssertionError):
+        dcf_inputs.reverse_verdict(_reverse("invented_status"))
+
+
+def test_an_implied_revenue_path_compounds_from_the_base():
+    path = dcf_inputs.implied_revenue_path(1000.0, 0.10, 3)
+    assert path == pytest.approx([1100.0, 1210.0, 1331.0])
+
+
+def test_an_implied_revenue_path_follows_the_forecast_fade():
+    path = dcf_inputs.implied_revenue_path(1000.0, 0.20, 3, fade_to=0.02)
+    assert path == pytest.approx([1200.0, 1200.0 * 1.14, 1200.0 * 1.14 * 1.08])
+
+
+def test_an_implied_revenue_path_holds_before_it_fades():
+    path = dcf_inputs.implied_revenue_path(1000.0, 0.20, 3, fade_to=0.02, hold=2)
+    assert path == pytest.approx([1200.0, 1440.0, 1440.0 * 1.11])
+
+
+def test_the_reverse_dcf_reads_gordon_first_as_the_fundamentals():
+    """Both methods are solved, Gordon leading."""
+    assert dcf_inputs.REVERSE_METHODS == ("gordon", "exit_multiple")
+    assert "fundamentals" in dcf_inputs.REVERSE_LABELS["gordon"]
+
+
+# ---------------------------------------------------------------------------
+# The terminal value cross-check and the headline method
+# ---------------------------------------------------------------------------
+
+
+def test_gordon_row_is_restated_as_an_exit_multiple():
+    terminal = dcf.TerminalValue(
+        method="Gordon growth", value=1000.0, present_value=800.0,
+        discount_exponent=3.5, formula="", implied_exit_multiple=13.6,
+    )
+    assert dcf_inputs.cross_implied(terminal) == "an exit multiple of 13.60×"
+
+
+def test_exit_multiple_row_is_restated_as_growth_and_a_return_on_capital():
+    terminal = dcf.TerminalValue(
+        method="Exit multiple", value=1000.0, present_value=800.0,
+        discount_exponent=3.5, formula="", implied_growth=0.0511, implied_ronic=0.184,
+    )
+    assert dcf_inputs.cross_implied(terminal) == (
+        "perpetual growth of at least 5.11%; RONIC of 18.4% at the terminal rate"
+    )
+
+
+def test_cross_check_is_blank_when_neither_is_computable():
+    terminal = dcf.TerminalValue(
+        method="Gordon growth", value=1000.0, present_value=800.0,
+        discount_exponent=3.5, formula="",
+    )
+    assert dcf_inputs.cross_implied(terminal) == "—"
+
+
+def test_gordon_growth_is_the_default_headline_method():
+    """The owner's choice: the headline rests on the company's own cash flows
+    rather than on the multiple it traded at. The exit multiple is still
+    computed and shown beside it as the cross-check."""
+    assert dcf_model.DEFAULT_HEADLINE_METHOD == "gordon"
+
+
+def test_the_panel_offers_the_default_headline_first_and_both_methods():
+    assert list(dcf_inputs.HEADLINE_METHODS)[0] == dcf_model.DEFAULT_HEADLINE_METHOD
+    assert set(dcf_inputs.HEADLINE_METHODS) == {"exit_multiple", "gordon"}
+
+
+# ---------------------------------------------------------------------------
+# Capex normalisation — resolve_target
+# ---------------------------------------------------------------------------
+
+
+def _capex_target(normal_value, *, on=None, value=None):
+    periods = ("2022", "2023", "2024", "2025", "2026")
+    normal = fin.DriverDefault(
+        "capex_pct_revenue", normal_value, fin.NORMAL_CAPEX_BASIS,
+        len(periods) if normal_value is not None else 0,
+        periods if normal_value is not None else (),
+        "" if normal_value is not None else "No period had every component needed.",
+    )
+    return dcf_inputs.resolve_target(
+        "capex_pct_revenue", "capex % of revenue", 0.35, 10, normal=normal, on=on, value=value
+    )
+
+
+def test_capex_moves_to_its_five_year_average_by_default():
+    """Today's capex is where the forecast starts, not where it stays: the
+    target is on without anyone touching it, and it is derived, not typed."""
+    target = _capex_target(0.20)
+    assert target.default_on is True and target.on is True
+    assert target.input.value == pytest.approx(0.20)
+    assert target.input.sourced.origin.value == "derived"
+
+
+def test_a_typed_capex_target_reads_as_the_users():
+    target = _capex_target(0.20, value=0.15)
+    assert target.input.value == pytest.approx(0.15)
+    assert target.input.sourced.origin.value == "user"
+
+
+def test_a_target_typed_back_to_its_default_is_the_default_again():
+    """The panel shows the default rounded; reading it back is no override."""
+    target = _capex_target(0.20, value=round(0.20 * 100, 4) / 100)
+    assert target.input.sourced.origin.value == "derived"
+
+
+def test_turning_normalisation_off_holds_todays_capex():
+    target = _capex_target(0.20, on=False)
+    assert target.on is False and target.input is None
+
+
+def test_no_history_leaves_capex_flat_and_says_why():
+    """No silent fallback: with nothing to normalise to, nothing is substituted."""
+    target = _capex_target(None)
+    assert target.default_on is False and target.on is False
+    assert any("No 5-year average to normalise to" in n.text for n in target.notes)
+
+
+# ---------------------------------------------------------------------------
+# Return on new invested capital — resolve_ronic
+# ---------------------------------------------------------------------------
+
+
+def _ronic(ebit, basis=None, value=None):
+    """The RONIC for a company whose ROIC is ebit × 0.8 ÷ 100 a year, at a 9% WACC."""
+    years = 6
+    annual = pd.DataFrame(
+        {
+            "ebit": [ebit] * years, "pretax_income": [ebit] * years,
+            "tax_expense": [-0.2 * ebit] * years, "total_equity": [100.0] * years,
+        },
+        index=list(range(2020, 2020 + years)),
+    )
+    return dcf_inputs.resolve_ronic(annual, 0.09, basis=basis, value=value)
+
+
+def test_the_default_ronic_is_the_companys_own_return_above_the_wacc():
+    """RONIC = WACC credits nothing to growth beyond year N; the company's own
+    record is the default evidence for what its new capital earns."""
+    options, basis, ronic = _ronic(ebit=30.0)            # 30 × 0.8 ÷ 100 = 24%
+    assert basis == dcf_inputs.OWN_ROIC == options[0]
+    assert ronic.value == pytest.approx(0.24)
+    assert ronic.sourced.origin.value == "derived"
+
+
+def test_an_own_return_below_the_wacc_defaults_to_the_wacc_not_to_destroying_value():
+    _, _, ronic = _ronic(ebit=5.0)                       # 4%, against a 9% WACC
+    assert ronic.value is None
+    assert ronic.sourced.origin.value == "estimate"
+    assert any("does not exceed its WACC" in n.text for n in ronic.notes)
+
+
+def test_no_measurable_return_offers_only_the_wacc_and_a_manual_figure():
+    options, _, ronic = _ronic(ebit=-10.0)
+    assert list(options) == [dcf_inputs.RONIC_AT_WACC, dcf_inputs.RONIC_MANUAL]
+    assert ronic.value is None
+    assert any("No own ROIC to default to" in n.text for n in ronic.notes)
+
+
+def test_ronic_can_still_be_set_to_the_wacc_or_by_hand():
+    _, _, at_wacc = _ronic(ebit=30.0, basis=dcf_inputs.RONIC_AT_WACC)
+    assert at_wacc.value is None
+    _, _, manual = _ronic(ebit=30.0, basis=dcf_inputs.RONIC_MANUAL)
+    assert manual.value == pytest.approx(0.24)       # seeded from the company's own
+    _, _, typed = _ronic(ebit=30.0, basis=dcf_inputs.RONIC_MANUAL, value=0.12)
+    assert typed.value == pytest.approx(0.12) and typed.sourced.origin.value == "user"
+
+
+# ---------------------------------------------------------------------------
+# The growth basis the checks read
+# ---------------------------------------------------------------------------
+
+
+def test_the_effective_growth_basis_names_the_rate_actually_used():
+    """The TTM-window acquisitions check reads it: it applies only when the
+    trailing rate is the one in use."""
+    ttm = fin.DriverDefault("revenue_growth", 0.83, fin.TTM_GROWTH_BASIS, 1, ("P",))
+    cagr = fin.DriverDefault("revenue_growth", 0.67, "5-year CAGR", 5, ("P",))
+    slow = fin.DriverDefault("revenue_growth", 0.04, fin.TTM_GROWTH_BASIS, 1, ("P",))
+    burst = fin.lower_of_growth(ttm, cagr)
+    slowdown = fin.lower_of_growth(slow, cagr)
+
+    assert dcf_inputs.effective_growth_basis(fin.LOWER_GROWTH_BASIS, burst, ttm) == "5-year CAGR"
+    assert dcf_inputs.effective_growth_basis(
+        fin.LOWER_GROWTH_BASIS, slowdown, slow
+    ) == fin.TTM_GROWTH_BASIS
+    assert dcf_inputs.effective_growth_basis(
+        fin.TTM_GROWTH_BASIS, burst, ttm
+    ) == fin.TTM_GROWTH_BASIS

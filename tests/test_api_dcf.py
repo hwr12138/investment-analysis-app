@@ -4,7 +4,7 @@ The routes run the real engine: ``load_company`` against the recorded SF1
 payload, :func:`app.logic.dcf.inputs.resolve` and ``evaluate``. These tests check
 what the API adds — the overrides it accepts and refuses, the strict JSON, a
 refused company as a response rather than an error, and the export — and that an
-untouched request is the Streamlit tab's own number.
+untouched request is the summary chart's own number, ``default_value``.
 """
 
 from __future__ import annotations

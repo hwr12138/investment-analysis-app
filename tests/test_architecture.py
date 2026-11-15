@@ -6,9 +6,9 @@ builds the app-internal import graph and asserts the rules the architecture
 rests on:
 
 * the logic layer never reaches Streamlit, ``requests`` or ``yfinance``, even
-  transitively, except through the two orchestrators that exist to fetch;
-* the data layer never imports the logic or view layers;
-* the logic layer never imports the view layer;
+  transitively, except through the three orchestrators that exist to fetch;
+* the data layer never imports the logic layer, and nothing below the API
+  imports the API;
 * no module reaches into another's private names;
 * the DCF arithmetic reaches nothing in ``app.data`` at all.
 
@@ -37,7 +37,7 @@ FORBIDDEN_IN_LOGIC = frozenset({"streamlit", "requests", "yfinance", "thetadata"
 #: The logic modules that exist to fetch. Each is the single network-touching
 #: entry point of its feature — ``load_research`` and ``load_company`` — and may
 #: reach the data layer's fetchers. ``dcf.inputs`` sits on ``dcf.model`` to
-#: assemble the DCF's assumption set for both front ends, and reaches the
+#: assemble the DCF's assumption set for the API, and reaches the
 #: network only for the summary chart's past values. They still may not import
 #: Streamlit themselves; see
 #: :func:`test_nothing_in_logic_imports_the_ui_or_network_directly`.
@@ -179,7 +179,7 @@ def test_the_scanner_finds_the_graph_it_checks():
     """
     assert {"app.logic.dcf.wacc", "app.logic.research.summary"} <= set(_in_layer("app.logic"))
     assert "app.data.sharadar_client" in _reach("app.logic.research.dataset")
-    assert "streamlit" in _imports("app.views.research")[1]
+    assert "streamlit" in _imports("app.data.market_data")[1]
     assert "app.logic.research" in _reach("app.logic.research.summary")
 
 
@@ -207,14 +207,6 @@ def test_logic_never_reaches_the_ui_or_network(module):
     assert not _forbidden_chains(module, FORBIDDEN_IN_LOGIC)
 
 
-@pytest.mark.parametrize("module", _in_layer("app.logic"))
-def test_logic_never_imports_the_view_layer(module):
-    internal, _ = _imports(module)
-    assert not {
-        name for name in internal if name.startswith(("app.views", "app.charts"))
-    }
-
-
 @pytest.mark.parametrize("module", PURE_ENGINE)
 def test_the_dcf_arithmetic_reaches_nothing_in_the_data_layer(module):
     assert not [name for name in _reach(module) if name.startswith("app.data")]
@@ -226,26 +218,20 @@ def test_the_dcf_arithmetic_reaches_nothing_in_the_data_layer(module):
 
 
 @pytest.mark.parametrize("module", _in_layer("app.data"))
-def test_data_never_imports_logic_or_views(module):
+def test_data_never_imports_logic(module):
     internal, _ = _imports(module)
-    assert not {
-        name for name in internal if name.startswith(("app.logic", "app.views"))
-    }
+    assert not {name for name in internal if name.startswith("app.logic")}
 
 
 @pytest.mark.parametrize("module", ("app.provenance", "app.formatting", "app.options_layout"))
 def test_shared_root_modules_import_no_layer(module):
     """Both layers construct these, so they may depend on neither."""
     internal, _ = _imports(module)
-    assert not {
-        name
-        for name in internal
-        if name.startswith(("app.data", "app.logic", "app.views"))
-    }
+    assert not {name for name in internal if name.startswith(("app.data", "app.logic"))}
 
 
 # ---------------------------------------------------------------------------
-# The API layer — the web frontend's, beside the Streamlit views it replaces
+# The API layer — the one front end over the logic
 # ---------------------------------------------------------------------------
 
 
@@ -257,13 +243,6 @@ def test_the_scanner_finds_the_api():
 def test_nothing_below_the_api_imports_it(module):
     internal, _ = _imports(module)
     assert not {name for name in internal if name.startswith("app.api")}
-
-
-@pytest.mark.parametrize("module", _in_layer("app.api"))
-def test_the_api_never_imports_the_streamlit_views(module):
-    """Both are top layers over the same logic; neither may lean on the other."""
-    internal, _ = _imports(module)
-    assert not {name for name in internal if name.startswith(("app.views", "app.charts"))}
 
 
 def test_the_api_imports_streamlit_only_to_quiet_it():
@@ -377,5 +356,5 @@ def test_the_collector_reaches_only_the_options_logic_and_layout(path):
     for name in internal:
         assert name == "app" or name.startswith(_COLLECTOR_MAY_REACH), name
         reached |= {module for module in _reach(name) if module in MODULES} if name in MODULES else set()
-    assert not [m for m in reached if m.startswith(("app.data", "app.views"))]
+    assert not [m for m in reached if m.startswith(("app.data", "app.api"))]
     assert not [c for m in internal if m in MODULES for c in _forbidden_chains(m, frozenset({"streamlit"}))]

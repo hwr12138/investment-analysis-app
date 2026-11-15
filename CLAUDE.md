@@ -5,9 +5,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-pip install -r requirements-dev.txt          # requirements-api.txt + pytest; Streamlit Cloud installs only requirements.txt
-streamlit run streamlit_app.py               # run the app
-python -m pytest tests/ -q                   # full suite (~1,400 tests, no network; CI runs it too)
+pip install -r requirements-dev.txt          # requirements.txt (what the API image installs) + pytest, httpx
+python -m pytest tests/ -q                   # full suite (~1,300 tests, no network; CI runs it too)
 python -m pytest tests/test_valuation.py -q  # one file
 python -m pytest tests/test_wacc.py::test_market_value_of_equity -q  # one test
 python -m pytest tests/ -k "fcff" -q         # by name
@@ -16,13 +15,12 @@ python -m pytest tests/ -k "fcff" -q         # by name
 There is no linter, formatter, or pytest config file in this repo. The web frontend
 (`web/`) has a TypeScript type check: `cd web && npm run typecheck`.
 
-`.claude/launch.json` defines a `streamlit` configuration on port 8502, with `autoPort` so a
-second session falls back to a free port instead of colliding — start the app for preview
-with that rather than Bash. It also defines `api` (uvicorn on 8600, sign-in off) and `web`
-(Vite on 5173, proxying `/api` to 8600); start both to preview the web app.
+`.claude/launch.json` defines `api` (uvicorn on 8600, sign-in off) and `web` (Vite on 5173,
+proxying `/api` to 8600); start both to preview the app, rather than through Bash.
 
-`SHARADAR_API_KEY` (fundamentals, prices) comes from `.streamlit/secrets.toml`, which is
-gitignored. Treasury yields come from Yahoo Finance via `yfinance` (`^IRX` short rate, `^TNX`
+`SHARADAR_API_KEY` (fundamentals, prices) comes from the environment or
+`.streamlit/secrets.toml` (gitignored; the data layer reads it through `st.secrets`), and on
+Cloud Run from Secret Manager. Treasury yields come from Yahoo Finance via `yfinance` (`^IRX` short rate, `^TNX`
 10-year) and need no key. Tests never need either.
 
 The 🎯 Options page reads a store written by a separate job, `collector/` (Python ≥ 3.12, its
@@ -32,20 +30,19 @@ a `[gcp_service_account]` table. `THETADATA_API_KEY` is the collector's, never t
 
 ## Architecture
 
-**A migration is under way** from Streamlit to a web app: React + Mantine in `web/` on Firebase
-Hosting, over a FastAPI layer in `app/api/` on Cloud Run. Both front ends sit on the same logic and
-data layers and run side by side until every page is ported. 🚀 Momentum Analysis, 📊 Portfolio
-Statistics, 📈 Portfolio Optimization, 🎯 Options and 🔎 Stock Research — all six tabs — are.
-`web/README.md` covers running, regenerating the TypeScript types, and deploying. The rules that
-matter:
+A web app: React + Mantine in `web/` on Firebase Hosting, over a FastAPI layer in `app/api/` on
+Cloud Run, over the logic and data layers. It replaced a Streamlit front end, removed in November
+2026 once every page had been ported; what is left of Streamlit is a library use in the data layer
+(below). `web/README.md` covers running, regenerating the TypeScript types, and deploying. The
+rules that matter:
 
-- `app/api/` plays the part a view does: it fetches through `app/data/` and hands frames to
-  `app/logic/`, and it does no arithmetic of its own. Logic a page needs that lived in its
-  Streamlit view moves into the logic module, so both front ends share it (as
-  `momentum_analysis.indicator_frame`, `portfolio_statistics.relationships`, the options
-  filters in `options/coverage.py`, Stock Research's `verdict`s, `summary.dcf_line_steps` and
-  `insiders.open_market_trades`, and the whole 💰 DCF assumption panel, `dcf/inputs.py`, did). `test_architecture.py` forbids anything below the API
-  from importing it, and the API from importing `app.views`.
+- `app/api/` is the top layer: it fetches through `app/data/` and hands frames to `app/logic/`,
+  and it does no arithmetic of its own. Logic a page needs goes in the logic module, where it is
+  tested without a request (as `momentum_analysis.indicator_frame`,
+  `portfolio_statistics.relationships`, the options filters in `options/coverage.py`, Stock
+  Research's `verdict`s, `summary.dcf_line_steps`, `insiders.open_market_trades` and the whole 💰
+  DCF assumption panel, `dcf/inputs.py`, did when they moved out of the Streamlit views).
+  `test_architecture.py` forbids anything below the API from importing it.
 - The API caches nothing of its own: the data layer's caches make a warm loader cost ~0.01 s. The
   one exception is `research.py`'s DCF-line points (`functools.lru_cache`, one entry per filing, so
   an exception — an outage — is never remembered). The research page fetches the profile first and
@@ -55,69 +52,65 @@ matter:
   missing is typed `float | None` and converted with `finite_or_none`.
 - Every data route carries `auth.require_user` (a test checks the routes). Sign-in is a Firebase
   ID token plus an email allowlist, and `EQUITI_AUTH=off` is ignored on Cloud Run.
-- The data layer still caches through `st.cache_data`, which works without a Streamlit server
-  but is per process. `app/api/__init__.py` turns Streamlit's logging down for that, and is the
-  API's only Streamlit import.
+- The data layer still caches through `st.cache_data` and `st.cache_resource`, which work
+  without a Streamlit server but are per process; it also reads `st.secrets`, and
+  `parallel.gather` carries Streamlit's script-run context into its threads. Those three are why
+  `streamlit` is still in `requirements.txt`. `app/api/__init__.py` turns Streamlit's logging down
+  for them, and is the API's only Streamlit import.
 
-Streamlit multi-page app. `streamlit_app.py` sets page config, loads `assets/style.css`, and
-registers pages in `st.navigation([...])`. Each feature is three layers:
+Each feature is three Python layers under the page that draws it (`web/src/pages/<feature>/`):
 
-- `app/views/<feature>.py` — a `render_page()` function; all Streamlit calls live here
+- `app/api/<feature>.py` — the routes and their response models; no arithmetic
 - `app/logic/<feature>.py` — the math, no Streamlit
 - `app/data/` — every external API call, so caching and keys stay in one place
 
-A feature earns a **package** in place of either module when it grows several independently
-testable parts — `app/logic/dcf/` and both halves of `app/views/research/` are the cases.
+A feature earns a **package** in place of a logic module when it grows several independently
+testable parts — `app/logic/dcf/`, `app/logic/research/` and `app/logic/options/` are the cases.
 Reach for it when the single module would otherwise hold pieces that have no reason to know
 about each other, not at a line count.
 
 `app/provenance.py` sits at the `app/` root because both the data and logic layers construct its
-types and neither may import the other. `app/formatting.py` sits beside it for the same reason:
-the logic layer builds display strings with it (`StatTile`) and every view formats with it.
-`app/views/components.py` holds the few Streamlit pieces more than one page draws identically.
+types and neither may import the other. `app/formatting.py` sits beside it and imports no layer
+either: the logic layer builds display strings with it (`StatTile`, the DCF panel's notes).
 
 **The layering is enforced, not just described.** `tests/test_architecture.py` parses `app/` into
 an import graph and fails if a logic module reaches Streamlit, `requests` or `yfinance` — even
 transitively, which is how it actually breaks — other than the three orchestrators
-(`logic/research/dataset.py`, `logic/dcf/model.py`, `logic/dcf/inputs.py`); if data imports logic or views; if logic
-imports views; if the DCF arithmetic reaches `app.data` at all; or if any module uses another's
-`_private` name. A logic module that needs a Sharadar constant imports
+(`logic/research/dataset.py`, `logic/dcf/model.py`, `logic/dcf/inputs.py`); if data imports
+logic; if anything below the API imports it; if the DCF arithmetic reaches `app.data` at all; or
+if any module uses another's `_private` name. A logic module that needs a Sharadar constant imports
 `app.data.sharadar.vocabulary`, never `sharadar_client`.
 
-To add a page: create the logic module, create the view with `render_page()`, register it in
-`st.navigation`, and fetch through `app/data/` — `sharadar_client` or `market_data` — from the
-view, never from the logic module.
+To add a page: create the logic module; add a router in `app/api/` whose models derive from
+`Contract`, fetching through `app/data/` — `sharadar_client` or `market_data` — never from the
+logic module, and mount it in `app/api/main.py`; run `npm run gen:api` in `web/`; then add the
+page under `web/src/pages/` with its route and nav entry in `web/src/App.tsx`.
 
-To add a **tab** to Stock Research: create `app/logic/research/<tab>.py` for the arithmetic and
-`app/views/research/<tab>.py` with a `render` function and its own CSS, then add the label to
-`_TAB_ORDER` and dispatch it in `views/research/__init__.py` — a test fails if a label has no
-body. Only built tabs go in the strip: there are no "not built yet" stubs.
+To add a **tab** to Stock Research: create `app/logic/research/<tab>.py` for the arithmetic, with
+a loader beside the others in `dataset.py` if it fetches; add its route to `app/api/research.py`;
+then add its key to `TABS` in `web/src/pages/research/common.ts`, and its label and panel to
+`ResearchPage.tsx`. Only built tabs go in the strip: there are no "not built yet" stubs.
 
 A tab that compares metrics against peers and against history should be a **sub-tab of ⚖️
 Valuation** rather than a new top-level one: declare its metrics and its own usable/base rule,
-and reuse `logic/research/comparison.py` and `views/research/valuation/table.py` for everything
-else. That is what Growth is, and it is why there is no top-level 🌱 Growth tab.
+and reuse `logic/research/comparison.py`, the API's `Relative` response and `ValuationTab.tsx`'s
+grid for everything else. That is what Growth is, and it is why there is no top-level 🌱 Growth tab.
 
 ### The Stock Research page
 
-The one feature that is a package on both layers rather than a pair of modules, because it
-carries six tabs — one of which is itself a package, holding two sub-tabs:
+The one feature whose logic is a package rather than a module, because it carries six tabs:
 
 ```
-app/views/research/            __init__.py = the shell; one module per tab beside it
-app/views/research/valuation/  the ⚖️ tab: shell + table + multiples + growth
-app/logic/research/            comparison ← summary, valuation, growth,
-                               insiders, holdings ← dataset
+web/src/pages/research/  ResearchPage.tsx = the shell; one component per tab beside it,
+                         and dcf/ for the 💰 DCF tab's parts
+app/api/research.py      one route per tab (the DCF's are in app/api/dcf.py)
+app/logic/research/      comparison ← summary, valuation, growth,
+                         insiders, holdings ← dataset
 ```
 
-`views/research/__init__.py` owns the ticker box, the search gate, the session snapshot and
-`_TAB_ORDER` — **the one place tab order is decided** — and draws the strip with
-`st.tabs(..., key="research_tab", on_change="rerun")`, rendering **only the tab whose `.open` is
-true** (see *Lazy tabs* under UI conventions). Each tab module exposes a `render` function taking
-exactly what that tab needs: the snapshot for the ones that read it, the bare ticker for `dcf`,
-which loads through the DCF engine instead. There is no shared signature, because the dispatch is
-explicit and a uniform one would hide that the DCF reads nothing from the snapshot. Each tab
-also owns its CSS, so the rules travel with the markup they style.
+`ResearchPage.tsx` owns the ticker box, the profile header and `TAB_LABELS` — **the one place tab
+order is decided** — and mounts **only the open tab** (`keepMounted={false}`), so only it fetches
+(see *Lazy tabs* under UI conventions). The tab, like every choice inside one, is in the URL.
 
 On the logic side the dependencies run one way — `comparison` is shared, each
 tab module owns its arithmetic, and `dataset` sits on top because it holds every network-touching
@@ -125,45 +118,34 @@ loader: `load_research` (the snapshot — only what 📊 Summary draws) and one 
 it (`load_financials`, `load_insiders`, `load_peers`, `load_holdings`). Its calls into
 `summary.build_key_stats` and `comparison.build_peer_universe` are the only upward edges, and both
 exist for the same reason: the result is cached per company per day, so anything a tab would
-otherwise recompute on every rerun is precomputed there.
+otherwise recompute on every request is precomputed there.
 
 `logic/research/comparison.py` holds what the two ⚖️ sub-tabs genuinely share — the `Comparison`
 record, the median-and-percentile summary, the peer universe join, the industry lookup. What it
 deliberately does **not** hold is either tab's notion of a *usable* number or its `Tolerances`,
 because on both points the two are opposites; see the ⚖️ section below.
 
-Two modules deliberately stay outside both packages. `app/logic/statements.py` declares the four
+Two modules deliberately stay outside the package. `app/logic/statements.py` declares the four
 SF1 statement layouts (sections, rows, subtotals, reconciliations) and evaluates them into a
 rendered table; the financials tab is its only consumer today, and it sits outside so a second
 one needs no move. `app/logic/dcf/` stays independently reusable so batch screening remains an
 extension rather than a rewrite. Both are pure.
 
-**Statements are shown in exactly one place — the 📄 Financials tab.** The DCF tab used to carry
-a raw viewer of its own and now links there instead; it keeps only `_render_filing_provenance`,
-the per-year SEC filing links, which Financials does not show. Do not add a second statement
-table anywhere: the removed one scaled every row by the units divisor, which turned EPS and
-margins into `0.00`, and `logic/statements.py` carries a `Unit` enum precisely so a layout
-cannot repeat that.
-
-`views/research/dcf/` is a package: `__init__` is the shell (the load, the two caches, the
-fingerprint, the session lifecycle and the draw order), beside `assumptions` (the widgets, one
-function per block of the panel), `checks` (banners, validation panel), `history`, `results`
-(header, projection, valuation), `implied` (the reverse DCF), `download` and `common`. None of
-them decides a number: what the panel *means* is `app/logic/dcf/inputs.py` (below), which the
-web tab reaches through `app/api/dcf.py`. The names
-avoid `valuation`, `reverse` and `export` on purpose — `app/logic/dcf/` already has modules by
-those names. Functions that cross modules are public inside the package; the rest stay private.
+**Statements are shown in exactly one place — the 📄 Financials tab.** The DCF tab points there
+and keeps only the per-year SEC filing links (`inputs.filings`), which Financials does not show.
+Do not add a second statement table anywhere: the Streamlit DCF tab once carried one, which scaled
+every row by the units divisor and turned EPS and margins into `0.00`, and `logic/statements.py`
+carries a `Unit` enum precisely so a layout cannot repeat that.
 
 ### The ⚖️ Relative Valuation tab and its two sub-tabs
 
 `Valuation` asks what the market pays for the company; `Growth` asks how fast the thing being
 paid for moves. Both answer per metric in the same three columns — current, the company's own 5Y
 median, the industry median — over one peer universe, and a metric that cannot fill all three is
-not shown. The package shell injects the one `.val-*` stylesheet and draws the sub-tab strip;
-`table.py` owns the grid and the four cells the bodies render identically. The shell loads the
-peer universe once (`dataset.load_peers`) and hands it to both bodies, which fetch nothing. **This
-is the only nested `st.tabs` in the app**, and it is stateful like the outer strip, so only the
-open sub-tab's body is built.
+not shown. On the web the two are one table read two ways: `ValuationTab.tsx` switches with
+`view=growth` in the URL, draws the shared grid, and words each one's verdict and legend. The
+`/valuation` and `/growth` routes both read the peer universe through `dataset.load_peers`,
+cached per day, so whichever opens second costs nothing.
 
 **Trailing-only, deliberately.** Forward multiples were dropped because yfinance supplies forward
 EPS and revenue only per-ticker by scrape, so forward *industry* medians would cost thousands of
@@ -215,7 +197,7 @@ normalisation, validation, and arithmetic are each independently testable. The p
 | `reverse.py` | Backsolving a driver from a target price — **pure**, DCF-agnostic |
 | `validation.py` | Checks, severity model, issue types, tolerances |
 | `model.py` | Orchestration: the load, the run, the sensitivity grid |
-| `inputs.py` | The assumption panel as data — defaults, overrides, provenance, notes — and everything both front ends draw from a run |
+| `inputs.py` | The assumption panel as data — defaults, overrides, provenance, notes — and everything the tab draws from a run |
 | `export.py` | Multi-sheet `.xlsx` and CSV export |
 
 `wacc.py`, `valuation.py`, and `reverse.py` import no Streamlit, make no network calls, and hold
@@ -236,7 +218,7 @@ panel does not offer raises `InvalidOverride` (the API's 422). A run that cannot
 (no share count, a WACC that raises) still returns the whole panel with `blocked` set, so the
 reader can undo whatever caused it. `evaluate` runs the model, both reverse solves, the grid and
 the checks; `reverse_verdict`, `revenue_chart`, `scan_rows`, `cross_implied` and `filings` are what
-both front ends draw from the result. It is an orchestrator only because `default_value_on`
+the tab draws from the result. It is an orchestrator only because `default_value_on`
 fetches the company and that day's rates; `resolve` and `evaluate` take what they are handed.
 
 ### The 🎯 Options page and its collector
@@ -250,7 +232,6 @@ Cloud Scheduler → Cloud Run job  collector/  (thetadata, python 3.12) ─┐ i
                                                                         │ app.logic.options
                     private GCS bucket  options/v1/…  ◄─────────────────┘ + app.options_layout
                          ▲
-Streamlit ── app/data/options_store.py → app/logic/options/* → app/views/options/*
 FastAPI   ── app/data/options_store.py → app/api/options.py   (reads the stored screens)
 ```
 
@@ -259,8 +240,8 @@ FastAPI   ── app/data/options_store.py → app/api/options.py   (reads the s
   **last** by every run, so a reader can trust whatever a manifest names; `latest/chains.parquet`
   is the only chain the page reads; `metrics/daily.parquet` (one row per name per session) is all
   the history panels read. Bump `PREFIX` to change a stored shape.
-- **The collector also solves the screens, for the web API.** Solving all ~90 surfaces takes
-  ~12 s: fine for Streamlit's per-night cache, too slow for a request. So every daily run (and
+- **The collector also solves the screens.** Solving all ~90 surfaces takes ~12 s, too slow for
+  a request. So every daily run (and
   `recompute`, and the offline `screens` mode) writes `latest/discover|spreads|expirations.parquet`
   through `snapshot.solve_screens` and records `screens.session` in the manifest. The API
   **refuses tables solved from an older close than `last_session`** (503), because an older
@@ -512,25 +493,22 @@ because the research page spelled all three keywords and the DCF spelled two.
 
 ### Lazy tabs
 
-**Only the open tab runs.** Both tab strips are `st.tabs(..., key=..., on_change="rerun")`:
-switching tabs reruns the script, and each `TabContainer.open` says which body is on screen, so
-the shell skips every other one. That needs **Streamlit ≥ 1.57**, pinned in `requirements.txt`
-— an older build returns `None` from `.open` and the page would render no tab at all.
+**Only the open tab runs.** Stock Research's strip is Mantine `Tabs` with `keepMounted={false}`,
+so only the open tab's component is mounted and only it queries the API; the ⚖️ views and the 💰
+DCF's parts are chosen the same way, each by a URL parameter.
 
 Everything about loading follows from it:
 
 - **Search fetches only what 📊 Summary draws** (`load_research`, ~9 requests, ~4s cold). Every
-  other tab fetches its own **the first time it is opened**, through a `_load_cached(ticker,
-  as_of)` wrapper in its own module and `components.load_tab`, which draws the same spinner and
-  the same blocking notice on failure for every tab. No tab has a load button, and none keeps its
-  payload in session state — the cache is keyed on the company, so there is nothing to clear
-  when the ticker moves.
-- **📊 Summary's one fetch of its own is the chart's DCF line**, and it never holds up the
-  candles: they draw first and the line joins them once it is valued. Each filing's value is
-  cached on its own (`_dcf_point_cached`), so a window pays only for the filings it adds — 1Y is
-  six runs, 5Y twenty-two — and the line reaches back at most `DCF_LINE_MAX_YEARS` (5). Measured
-  cold on AAPL: candles 2.7s, a 5Y line 8.1s; once a company's as-reported statements are cached,
-  a further filing costs ~0.1s.
+  other tab fetches its own **the first time it is opened**, through its own route and its own
+  loader in `dataset.py`. The data layer's cache is keyed on the company, so nothing needs
+  clearing when the ticker moves.
+- **📊 Summary's one fetch of its own is the chart's DCF line** (`/dcf-line`), and it never holds
+  up the candles: they draw first and the line joins them once it is valued. Each filing's value
+  is cached on its own (`_dcf_point_cached` in `app/api/research.py`), so a window pays only for
+  the filings it adds — 1Y is six runs, 5Y twenty-two — and the line reaches back at most
+  `DCF_LINE_MAX_YEARS` (5). Measured cold on AAPL: candles 2.7s, a 5Y line 8.1s; once a company's
+  as-reported statements are cached, a further filing costs ~0.1s.
 - **The requests inside a loader go out together**, through `app/data/parallel.gather`, which
   carries the Streamlit run context into its worker threads and re-raises the first failure in
   submission order. A tolerated fetch is wrapped in `_tolerant` *before* it is handed over. The
@@ -543,9 +521,9 @@ Everything about loading follows from it:
   bare `_fetch_*` call inside another fetcher silently re-requests: that was six of the 23
   requests a search used to make. `test_stock_research.py` counts requests per table to keep it
   that way.
-- **The selected tab is a viewing preference**, like the price window: the page's
-  `_session_reset` leaves `research_tab` alone, so a reader on ⚖️ Relative Valuation who searches another
-  ticker lands on its Relative Valuation.
+- **The selected tab is a viewing preference**, like the price window: a search keeps the URL's
+  other parameters, so a reader on ⚖️ Relative Valuation who searches another ticker lands on its
+  Relative Valuation.
 
 Measured on the live API: search 27.6s → 3.8s; Financials ~1.2s and Insiders ~1.4s on first
 open; the DCF makes **no** requests once Financials has been opened; Valuation's peer universe
@@ -570,37 +548,26 @@ one. The only collapse it still does is the **restatement**: two filings for the
 
 ### The DCF tab
 
-On the web the tab is one `POST /api/research/{ticker}/dcf` carrying only the reader's
-overrides, answered with the resolved panel and the valued run together (warm, ~0.2 s), plus
-`/dcf/what-if` and `/dcf/export`; the export filters the reader's acknowledgements to the run's own
-issues. The rest of this section describes the Streamlit tab.
+The tab is one `POST /api/research/{ticker}/dcf` carrying only the reader's overrides, answered
+with the resolved panel and the valued run together (warm, ~0.2 s), plus `/dcf/what-if` and
+`/dcf/export`; the export filters the reader's acknowledgements to the run's own issues.
 
 The DCF tab has **no Compute gate**. It loads and values whatever ticker the page has searched,
 as soon as the tab is opened, and an assumption change is applied on the spot. Nothing on that tab
-is ever drawn from a run that does not match the controls on screen — which is why the staleness
-notice it used to carry is gone rather than merely unused. Statements are always the **restated**
-(`MR`) series; `dcf_model.load_company` still takes `asreported`, but the page does not offer the
-choice.
+is ever drawn as current from a run that does not match the controls on screen: the overrides are
+the query key, so while the next run loads the last one stays on screen dimmed, headline included,
+and a refused input (a 422) leaves it dimmed beside an Undo. Statements are always the
+**restated** (`MR`) series; `dcf_model.load_company` still takes `asreported`, but the tab does
+not offer the choice. The overrides and acknowledgements live in the tab's component, keyed by
+ticker, so a new search starts from the defaults.
 
-Two caches are what make that affordable, and both are load-bearing:
+Severity banners sit above everything else on the tab. The governing rule for that tab: it must be
+impossible to look at the output and not notice something is wrong.
 
-- `_load_company_cached` — the fetch and normalisation, per ticker.
-- `_needs_run` against `_assumption_fingerprint` — the model, the checks and the workbook, per
-  distinct assumption set. A field missing from that tuple is a **correctness** bug: the previous
-  run's numbers would stay on screen looking current, with nothing to say so.
-
-Session state is keyed `dcf_*`. The tab clears its own acknowledgements and assumption overrides
-via `_session_reset` when it notices the page's ticker has moved; the research page's Search does
-**not** reach across and do it, so there is one place that decides when a model is stale.
-
-Severity banners sit above everything and do not collapse. The governing rule for that tab: it
-must be impossible to look at the output and not notice something is wrong.
-
-**The untouched assumption set is `inputs.resolve` with no overrides** — the panel, the API and
-the summary chart's DCF line (`inputs.default_value`, which resolves with `strict=True`) all call
-it, so there is one set of defaults. `test_dcf_history.py` runs the tab headlessly beside
-`default_value` and asserts the two headlines agree to 1e-12, and `test_api_dcf.py` asserts an
-untouched request returns the same number.
+**The untouched assumption set is `inputs.resolve` with no overrides** — the API's panel and the
+summary chart's DCF line (`inputs.default_value`, which resolves with `strict=True`) both call it,
+so there is one set of defaults; `test_api_dcf.py` asserts an untouched request returns
+`default_value`'s headline.
 
 **A past value is struck as the company stood that day** (`inputs.default_value_on(ticker, as_of)`).
 `load_company(asreported=True, as_of=...)` keeps only the rows filed by then — `AR` only, because
@@ -635,20 +602,18 @@ answer for the next. A test that
 needs a client internal (`_fetch_statements`, `_sf1_frames`, …) imports the submodule that owns
 it as `sh_<module>`; `sharadar_client` re-exports only the public API.
 
-View-level tests (`test_page_controls.py`, `test_acknowledgements.py`, `test_research_page_controls.py`)
-import the view modules directly and monkeypatch `page.st.session_state` with a dict subclass,
-since there is no Streamlit runtime.
+API tests (`test_api_*.py`) call the routes through FastAPI's `TestClient`, over the fixture
+company or with a loader monkeypatched, and parse every body strictly, so a NaN or a missing field
+fails the test rather than reaching the page as `null`.
 
 The ⚖️ Relative Valuation tab is tested per-module, which is the layout the rest should move to —
-`test_research_valuation.py` and `test_research_growth.py` for the logic, and
-`..._controls.py` for each view. All six carry the `research_` prefix because
-`test_valuation.py` was already taken by the **DCF** engine's `logic/dcf/valuation.py`: two
-unrelated modules share the name `valuation.py`, and the test files have to disambiguate what the
-modules themselves do not. `test_research_valuation_controls.py` covers the package shell and the
-shared grid as well as the Valuation body; `test_research_growth_controls.py` covers only what
-Growth words differently.
+`test_research_valuation.py` and `test_research_growth.py`. Both carry the `research_` prefix
+because `test_valuation.py` was already taken by the **DCF** engine's `logic/dcf/valuation.py`:
+two unrelated modules share the name `valuation.py`, and the test files have to disambiguate what
+the modules themselves do not.
 
-👤 Insiders and 🏛️ Holdings follow the same split. The fixture behind it is a sixteen-row company in
+👤 Insiders and 🏛️ Holdings follow the same layout (`test_research_insiders.py`,
+`test_research_holdings.py`). The fixture behind the first is a sixteen-row company in
 `conftest.py` priced at $100, built so that the naive total is **negative** and the correct one
 **positive** — that one assertion is the file's reason for existing. Every other row breaks
 exactly one thing: a restatement that duplicates a trade, a holdings-only pair carrying a bare
@@ -661,10 +626,9 @@ middle and Vanguard's **real** investorids for the two entities that reorganise 
 stand-ins. Its headline assertions are that a split reads as no purchase, that the entity split
 reads −67% alone and −3.3% as a family, and that a holder's missing quarters stay missing.
 
-The two older files still map onto the *pre-package* layout:
-`test_stock_research.py` covers all of `app/logic/research/` except the comparison tabs, and
-`test_research_page_controls.py` covers the shell plus three tab modules. Split them along their
-existing section headers when either is next touched substantially.
+One older file still maps onto the *pre-package* layout: `test_stock_research.py` covers all of
+`app/logic/research/` except the comparison and ownership tabs. Split it along its existing section
+headers when it is next touched substantially.
 
 `tests/conftest.py` also carries a miniature eleven-ticker universe for the peer medians, two
 periods per ticker so the year-on-year pairing has both ends. It is

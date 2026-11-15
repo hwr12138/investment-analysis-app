@@ -67,7 +67,7 @@ def test_a_short_history_has_no_score_but_still_a_call():
 def test_spread_table_and_its_expiry_choices():
     metrics = _metrics(["GLD", "SPY"])
     snaps, _ = snapshot.build(_chains(), metrics, _rates(), fx.SESSION)
-    assert date(2026, 12, 18) in snapshot.spread_expirations(snaps)
+    assert date(2026, 12, 18) in snapshot.common_expirations(snapshot.listed_expirations(snaps))
     table = snapshot.spread_table(snaps, date(2026, 12, 18), 1.0)
     assert set(table["symbol"]) == {"GLD", "SPY"}
     assert (table["payout_ask"] < table["payout_mid"]).all()
@@ -82,7 +82,7 @@ def test_every_spread_is_the_spread_table_at_each_choice():
     snaps, _ = snapshot.build(_chains(), _metrics(["GLD", "SPY"]), _rates(), fx.SESSION)
     stored = snapshot.every_spread(snaps)
     assert set(stored["sd"]) == set(snapshot.SD_TARGETS)
-    for expiration in snapshot.spread_expirations(snaps):
+    for expiration in snapshot.common_expirations(snapshot.listed_expirations(snaps)):
         for sd in snapshot.SD_TARGETS:
             picked = stored[(stored["expiration"] == expiration) & (stored["sd"] == sd)]
             pd.testing.assert_frame_equal(

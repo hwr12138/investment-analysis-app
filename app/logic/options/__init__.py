@@ -1,9 +1,10 @@
-"""The 🎯 Options page's arithmetic — pure, shared by the page and the collector.
+"""The 🎯 Options page's arithmetic — pure, shared by the API and the collector.
 
-Two consumers import this package and nothing else of the app's: the Streamlit
-views, which compute the snapshot screens from the latest stored chain, and the
-nightly collector (``collector/``), which computes the per-session metrics the
-history panels read. That is why it may import no Streamlit, no network client,
+Two consumers import this package: the web API, which evaluates one name from
+the latest stored chain and filters the stored screens, and the nightly
+collector (``collector/``), which imports nothing else of the app's and solves
+the screens and the per-session metrics the history panels read. That is why
+it may import no Streamlit, no network client,
 no ``thetadata`` and no Google SDK — ``tests/test_architecture.py`` enforces it,
 and the collector's image does not install Streamlit at all.
 

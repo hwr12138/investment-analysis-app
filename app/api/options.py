@@ -1,8 +1,7 @@
 """🎯 Options over HTTP: one stored night, read rather than solved.
 
-The Streamlit page solves every name's surface itself, about ten seconds a
-night, and keeps the result in its process. A request here cannot wait that
-long on a cold instance, so the nightly collector solves the night once
+Solving every name's surface takes about ten seconds, longer than a request
+can wait on a cold instance, so the nightly collector solves the night once
 (:func:`app.logic.options.snapshot.solve_screens`) and stores the tables; the
 overview, Discover and Screen routes read those. Evaluate and History draw one
 name each, and solve or read just that one when asked.

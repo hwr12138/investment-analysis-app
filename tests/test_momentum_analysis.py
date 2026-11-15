@@ -72,7 +72,7 @@ def test_divergence_is_read_off_the_two_slopes(prices, indicator, points, expect
 
 
 # ---------------------------------------------------------------------------
-# Preparing a window: shared by the Streamlit page and the API
+# Preparing a window, as the API does
 # ---------------------------------------------------------------------------
 
 

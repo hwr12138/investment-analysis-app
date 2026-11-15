@@ -7,12 +7,11 @@ that needs more has a loader here beside it — :func:`load_financials`,
 the first time it is opened. The 💰 DCF is the one exception, loading through
 ``dcf.model.load_company`` for the reason given at the bottom of this docstring.
 
-That split was not expressible until Streamlit's tab strip learned to report its
-selection. Before it, ``st.tabs`` rendered every body on every rerun, so one
-search paid for every tab — 23 requests one after another, 27.6s on MSFT — and
-the 🏛️ Holdings register hid behind a button because it was too dear to bill to
-everyone. With ``on_change="rerun"`` only the open tab's body runs, and every tab
-loads the same way: on first open, behind a spinner, cached after that.
+Before that split one search paid for every tab — 23 requests one after
+another, 27.6s on MSFT — and the 🏛️ Holdings register hid behind a button
+because it was too dear to bill to everyone. Now the web page mounts only the
+open tab, each tab has its own route, and every tab loads the same way: on
+first open, cached after that.
 
 Within each loader the independent requests go out together through
 :func:`app.data.parallel.gather`. The ticker's reference record goes first and

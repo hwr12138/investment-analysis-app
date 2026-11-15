@@ -26,8 +26,8 @@ export function money(value: number, currency: string): string {
 
 const INLINE = /(\*\*[^*]+\*\*|\*[^*\s][^*]*\*|`[^`]+`)/g;
 
-/** The logic layer's notes are written in Streamlit's inline markdown: bold,
- *  italics and code, nothing else. */
+/** The logic layer's notes are written in inline markdown: bold, italics and
+ *  code, nothing else. */
 export function Md({ text }: { text: string }) {
   return (
     <>
