@@ -107,6 +107,9 @@ Notes:
   own token check is the gate.
 - The `^;^` prefix makes `;` the separator, so the email list can keep its commas.
 - `firebase.json` assumes `us-central1`; change its `region` if the service is elsewhere.
+- Every page is served `no-cache` and only the hashed `assets/` are cached for a year, so a
+  release shows on the next load. A rule on `/index.html` alone would miss routes such as
+  `/momentum/AAPL`, which reach it through the rewrite and otherwise get Hosting's one-hour cache.
 - Hosting stops waiting for Cloud Run after **60 seconds**. A cold Sharadar price fetch takes 5–20 s.
 - The data layer's caches are still `st.cache_data`, in process: each instance starts cold, and
   `--max-instances 2` keeps that bounded. Moving them to a shared cache is the next step of the

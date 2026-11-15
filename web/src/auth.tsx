@@ -3,7 +3,8 @@
 // The API checks every token itself (app/api/auth.py) — this file only obtains
 // one. Without the variables the app calls the API with no token, which an API
 // started with EQUITI_AUTH=off accepts locally and Cloud Run never does.
-import { Button, Center, Loader, Stack, Text, Title } from "@mantine/core";
+import { Button, Center, Loader, Paper, Stack, Text, Title } from "@mantine/core";
+import { IconBrandGoogle } from "@tabler/icons-react";
 import { initializeApp } from "firebase/app";
 import {
   GoogleAuthProvider,
@@ -14,6 +15,8 @@ import {
   type User,
 } from "firebase/auth";
 import { useEffect, useState, type ReactNode } from "react";
+
+import { Brand } from "./components/Brand";
 
 const env = import.meta.env;
 
@@ -53,31 +56,43 @@ export function AuthGate({ children }: { children: ReactNode }) {
   if (!auth) return children;
   if (user === undefined) {
     return (
-      <Center h="100vh">
+      <Center mih="100vh" className="app-main">
         <Loader />
       </Center>
     );
   }
   if (user === null) {
     return (
-      <Center h="100vh">
-        <Stack align="center">
-          <Title order={2}>Equiti</Title>
-          <Button
-            onClick={() =>
-              signInWithPopup(auth, new GoogleAuthProvider()).catch((e: Error) =>
-                setError(e.message),
-              )
-            }
-          >
-            Sign in with Google
-          </Button>
-          {error && (
-            <Text c="red" size="sm">
-              {error}
-            </Text>
-          )}
-        </Stack>
+      <Center mih="100vh" className="app-main" p="md">
+        <Paper withBorder radius="lg" p="xl" w={380} maw="100%" shadow="sm">
+          <Stack align="center" gap="lg">
+            <Brand size="lg" />
+            <Stack gap={4} align="center">
+              <Title order={3}>Sign in</Title>
+              <Text size="sm" c="dimmed" ta="center">
+                Access is limited to approved accounts.
+              </Text>
+            </Stack>
+            <Button
+              fullWidth
+              size="md"
+              variant="default"
+              leftSection={<IconBrandGoogle size={18} />}
+              onClick={() =>
+                signInWithPopup(auth, new GoogleAuthProvider()).catch((e: Error) =>
+                  setError(e.message),
+                )
+              }
+            >
+              Continue with Google
+            </Button>
+            {error && (
+              <Text c="red" size="sm" ta="center">
+                {error}
+              </Text>
+            )}
+          </Stack>
+        </Paper>
       </Center>
     );
   }

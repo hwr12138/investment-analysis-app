@@ -38,6 +38,7 @@ export function PlotlyChart({ data, layout, config, height }: Props) {
       void plotly.react(node, data, { ...layout, height }, {
         responsive: true,
         displaylogo: false,
+        displayModeBar: false,
         ...config,
       });
       setReady(true);
