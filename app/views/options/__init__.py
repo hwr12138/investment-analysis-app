@@ -27,7 +27,7 @@ import streamlit as st
 from app import options_layout as layout
 from app.data import options_store
 from app.formatting import format_date
-from app.logic.options import freshness, score, snapshot, universe
+from app.logic.options import coverage, freshness, score, snapshot, universe
 from app.views.components import load_tab, render_blocking
 from app.views.options import discover, evaluate, history, screen
 from app.views.options.common import OptionsContext
@@ -36,7 +36,9 @@ _TAB_ORDER = ("🔭 Discover", "📋 Screen", "🧮 Evaluate", "📈 History")
 _TAB_KEY = "options_tab"
 
 #: Earnings filter: label → calendar days ahead within which a single stock is hidden.
-_EARNINGS_WINDOWS = {"Show all": None, "Hide within 1 week": 7, "Hide within 2 weeks": 14, "Hide within 3 weeks": 21}
+_EARNINGS_WINDOWS = dict(zip(
+    ("Show all", "Hide within 1 week", "Hide within 2 weeks", "Hide within 3 weeks"), coverage.EARNINGS_WINDOWS
+))
 
 
 def _today_et() -> date:
@@ -131,27 +133,24 @@ def _render_filters(snaps, earnings: pd.DataFrame | None, session: date) -> list
     with row[0]:
         chosen = st.multiselect("Themes", themes, default=themes, key="options_themes")
     with row[1]:
-        window = st.selectbox("Earnings", list(_EARNINGS_WINDOWS), index=3, key="options_earnings")
-    hidden = set()
+        window = st.selectbox(
+            "Earnings", list(_EARNINGS_WINDOWS),
+            index=coverage.EARNINGS_WINDOWS.index(coverage.DEFAULT_EARNINGS_WINDOW), key="options_earnings",
+        )
     days = _EARNINGS_WINDOWS[window]
-    if days is not None and earnings is not None and not earnings.empty:
-        for _, item in earnings.iterrows():
-            upcoming = item.get("next_earnings")
-            if upcoming is not None and not pd.isna(upcoming) and 0 <= (pd.Timestamp(upcoming).date() - session).days <= days:
-                hidden.add(item["symbol"])
+    hidden = coverage.hidden_for_earnings(earnings, session, days)
     if hidden:
         st.caption(f"Hidden for earnings within {days} days: {', '.join(sorted(hidden))}")
-    return [s for s in universe.UNIVERSE if s in snaps and snaps[s].theme in chosen and s not in hidden]
+    return coverage.visible({s: snap.theme for s, snap in snaps.items()}, chosen, hidden)
 
 
 def _render_missing(manifest: dict, missing: dict[str, str]) -> None:
-    problems = {s: v.get("error") for s, v in manifest.get("symbols", {}).items() if v.get("error")}
-    problems.update(missing)
-    not_collected = [s for s in universe.UNIVERSE if s not in manifest.get("symbols", {})]
+    problems = coverage.unavailable(manifest, missing)
+    not_collected = coverage.not_collected(manifest)
     if not problems and not not_collected:
         return
     with st.expander(f"{len(problems) + len(not_collected)} names not on this page"):
-        for symbol, reason in sorted(problems.items()):
+        for symbol, reason in problems.items():
             st.write(f"**{symbol}** — {reason}")
         if not_collected:
             st.write(f"Not collected yet: {', '.join(not_collected)}")

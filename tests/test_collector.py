@@ -14,6 +14,7 @@ import pytest
 
 from app import options_layout as layout
 from app.logic.options import chain as C
+from app.logic.options import snapshot
 from collector import pipeline
 from collector.client import SourceError, ThetaSource, chunks, normalise_chain
 from collector.store import LocalStore
@@ -107,6 +108,12 @@ def _source(client):
 @pytest.fixture
 def store(tmp_path):
     return LocalStore(tmp_path)
+
+
+@pytest.fixture(autouse=True)
+def _no_earnings_scrape(monkeypatch):
+    """The earnings refresh scrapes Yahoo; no test may reach the network."""
+    monkeypatch.setattr(pipeline, "_refresh_earnings", lambda store, log, today: None)
 
 
 def test_chunks_split_by_month_and_by_365_days():
@@ -237,3 +244,43 @@ def test_earnings_refresh_by_age_not_by_weekday(store):
                                                      "fetched": [date(2026, 10, 27)]}))
     assert not pipeline._earnings_stale(store, date(2026, 10, 31))  # Saturday, four days on
     assert pipeline._earnings_stale(store, date(2026, 11, 3))       # the next Tuesday
+
+
+def test_daily_solves_the_screens_and_writes_them_before_the_manifest(store):
+    store.write_json(layout.MANIFEST, {"last_session": "2026-10-22"})
+    writes = []
+    original = store.write_bytes
+    store.write_bytes = lambda path, data: (writes.append(path), original(path, data))
+    manifest = pipeline.run_daily(_source(FakeClient()), store, ["GLD", "SPY"], date(2026, 10, 28))
+    assert manifest["screens"] == {"session": "2026-10-27", "unpriced": {}}
+    assert all(writes.index(p) < writes.index(layout.MANIFEST) for p in (layout.DISCOVER, layout.SPREADS, layout.EXPIRATIONS))
+    assert sorted(store.read_frame(layout.DISCOVER)["symbol"]) == ["GLD", "SPY"]
+    spreads = store.read_frame(layout.SPREADS)
+    assert set(spreads["sd"]) == set(snapshot.SD_TARGETS) and set(spreads["symbol"]) == {"GLD", "SPY"}
+    listed = store.read_frame(layout.EXPIRATIONS)
+    assert set(listed["expiration"]) == {e for e in fx.EXPIRATIONS if e > date(2026, 10, 27)}
+
+
+def test_the_screens_mode_rebuilds_them_from_the_store_without_a_request(store):
+    pipeline.run_daily(_source(FakeClient()), store, ["GLD"], date(2026, 10, 28))
+    for path in (layout.DISCOVER, layout.SPREADS, layout.EXPIRATIONS):
+        (store.root / path).unlink()
+    manifest = store.read_json(layout.MANIFEST)
+    del manifest["screens"]  # as an older collector left it
+    store.write_json(layout.MANIFEST, manifest)
+    manifest = pipeline.run_screens(store, log=lambda m: None)
+    assert manifest["screens"]["session"] == manifest["last_session"]
+    assert list(store.read_frame(layout.DISCOVER)["symbol"]) == ["GLD"]
+
+
+def test_the_screens_mode_refuses_an_empty_store(store):
+    with pytest.raises(SourceError, match="no completed daily run"):
+        pipeline.run_screens(store, log=lambda m: None)
+
+
+def test_a_recompute_rebuilds_the_screens_from_the_restated_history(store):
+    pipeline.run_daily(_source(FakeClient()), store, ["GLD"], date(2026, 10, 28))
+    (store.root / layout.DISCOVER).unlink()
+    manifest = pipeline.run_recompute(store, ["GLD"], log=lambda m: None)
+    assert manifest["screens"]["session"] == "2026-10-27"
+    assert list(store.read_frame(layout.DISCOVER)["symbol"]) == ["GLD"]

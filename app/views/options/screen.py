@@ -8,22 +8,16 @@ the names a buyer cannot trade at the mid.
 
 from __future__ import annotations
 
-from datetime import date
-
 import streamlit as st
 
 from app.logic.options import snapshot
 from app.views.options.common import OptionsContext
 
-_SDS = {"+1 SD": 1.0, "+2 SD": 2.0}
+_SDS = {f"+{sd:g} SD": sd for sd in snapshot.SD_TARGETS}
 
-
-def _default_expiry(choices: list[date], session: date) -> int:
-    """The first expiry at least eight weeks out, or the last one."""
-    for i, expiration in enumerate(choices):
-        if (expiration - session).days >= 56:
-            return i
-    return len(choices) - 1
+#: The grid's columns; the stored table also carries each leg's strike.
+_SHOWN = ("symbol", "theme", "move", "spread", "price", "width", "bid", "ask",
+          "payout_mid", "payout_ask", "reward_risk")
 
 
 def render(context: OptionsContext) -> None:
@@ -37,7 +31,8 @@ def render(context: OptionsContext) -> None:
         sd_label = st.selectbox("Move", list(_SDS), key="options_screen_sd")
     with row[1]:
         expiration = st.selectbox(
-            "Expiry", choices, index=_default_expiry(choices, context.session), key="options_screen_expiry",
+            "Expiry", choices, index=choices.index(snapshot.default_spread_expiry(choices, context.session)),
+            key="options_screen_expiry",
             format_func=lambda e: f"{e:%Y-%m-%d} ({(e - context.session).days}d)",
         )
     table = snapshot.spread_table(visible, expiration, _SDS[sd_label])
@@ -48,7 +43,7 @@ def render(context: OptionsContext) -> None:
     table = table.astype({"payout_ask": float})  # None → NaN, so the cell is blank, not "None"
     shown = table.sort_values("payout_ask", ascending=False, na_position="last").assign(move=lambda f: f["move"] * 100)
     st.dataframe(
-        shown, hide_index=True, width="stretch",
+        shown[list(_SHOWN)], hide_index=True, width="stretch",
         column_config={
             "symbol": "Name", "theme": "Theme",
             "move": st.column_config.NumberColumn("Move to target", format="+%.1f%%",

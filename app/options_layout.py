@@ -12,6 +12,12 @@ the page moves over when it is deployed.
   previous manifest, and the page keeps showing the previous night, saying so.
 * ``latest/chains.parquet`` is the newest session's full chain for every name —
   the only chain the page reads.
+* ``latest/discover.parquet``, ``latest/spreads.parquet`` and
+  ``latest/expirations.parquet`` are that chain solved into the Discover and
+  Screen tables (:func:`app.logic.options.snapshot.solve_screens`), for a reader
+  that cannot spend ten seconds solving them per request — the web API. The
+  manifest's ``screens.session`` names the close they were solved from, so a
+  run of an older collector that advanced the chain without them is caught.
 * ``metrics/daily.parquet`` is one :data:`~app.logic.options.history.METRIC_COLUMNS`
   row per symbol per session — every history panel reads only this.
 * ``chains/session=…/<SYM>.parquet`` keeps every raw chain fetched, so metrics
@@ -26,6 +32,9 @@ PREFIX = "options/v1"
 
 MANIFEST = f"{PREFIX}/manifest.json"
 LATEST_CHAINS = f"{PREFIX}/latest/chains.parquet"
+DISCOVER = f"{PREFIX}/latest/discover.parquet"
+SPREADS = f"{PREFIX}/latest/spreads.parquet"
+EXPIRATIONS = f"{PREFIX}/latest/expirations.parquet"
 METRICS = f"{PREFIX}/metrics/daily.parquet"
 EARNINGS = f"{PREFIX}/ref/earnings.parquet"
 RATES = f"{PREFIX}/ref/rates.parquet"

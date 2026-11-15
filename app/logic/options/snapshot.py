@@ -1,10 +1,14 @@
 """The latest session across every name — what the Discover and Screen tabs draw.
 
-The page reads the newest stored chain for the whole universe once, and this
-module turns it into one :class:`NameSnapshot` per name (spot, solved surface,
-quotes by expiry) and the two cross-sectional tables. Solving ninety-odd
-surfaces takes a second or two; the view caches the result per stored night,
-so it is paid once per day, not per rerun.
+The newest stored chain for the whole universe is turned into one
+:class:`NameSnapshot` per name (spot, solved surface, quotes by expiry) and the
+two cross-sectional tables. Solving ninety-odd surfaces takes about ten
+seconds, so it is done once per stored night, by one of two consumers:
+
+* the Streamlit page solves it itself and caches the result per night;
+* the nightly collector solves it with :func:`solve_screens` and stores the
+  tables (``latest/discover.parquet`` and its neighbours), which the web API
+  reads instead of solving — a request there cannot wait ten seconds.
 
 A name is in a table only when every figure its row needs could be read; the
 names that could not are returned beside the table with the reason, so the view
@@ -13,6 +17,7 @@ can list them rather than let them vanish.
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from datetime import date
 
@@ -25,6 +30,24 @@ from app.logic.options.rates import curve_on
 from app.logic.options.score import buy_vol_score
 from app.logic.options.surface import Expiry, build_surface
 from app.logic.options.tolerances import DEFAULT, OptionsTolerances
+
+#: The Screen tab's targets: a call spread that pays in full at a +k SD move.
+SD_TARGETS = (1.0, 2.0)
+
+#: The Screen tab opens on the first expiry at least this many calendar days
+#: out: past the weeklies, where a one-strike spread is mostly noise.
+DEFAULT_SPREAD_DAYS = 56
+
+DISCOVER_COLUMNS = (
+    "symbol", "theme", "spot", "score", "z IV level", "z IV − realized", "z 25Δ call skew",
+    "skew_pct", "iv_pct", "rr_pct",
+    "expiration", "strike", "delta", "iv", "cost", "cost_pct", "annualised", "otm", "wide",
+)
+
+SPREAD_COLUMNS = (
+    "symbol", "theme", "move", "spread", "long_strike", "short_strike", "price", "width", "bid", "ask",
+    "payout_mid", "payout_ask", "reward_risk",
+)
 
 
 @dataclass(frozen=True)
@@ -46,14 +69,22 @@ def build(
     rates: pd.DataFrame,
     session: date,
     tolerances: OptionsTolerances = DEFAULT,
+    *,
+    symbols: Collection[str] | None = None,
 ) -> tuple[dict[str, NameSnapshot], dict[str, str]]:
-    """Every name's snapshot on ``session``, and why each missing name is missing."""
+    """Every name's snapshot on ``session``, and why each missing name is missing.
+
+    ``symbols`` solves only those names — one, for a page that shows one.
+    """
+    rows = chains[chains[C.SESSION] == session]
+    if symbols is not None:
+        rows = rows[rows[C.SYMBOL].isin(list(symbols))]
     curve = curve_on(rates, session)
     if curve is None:
-        return {}, {symbol: f"no Treasury curve for {session}" for symbol in chains[C.SYMBOL].unique()}
+        return {}, {symbol: f"no Treasury curve for {session}" for symbol in rows[C.SYMBOL].unique()}
     spots = metrics[metrics["session"] == session].set_index("symbol")["spot"]
     out, missing = {}, {}
-    for symbol, quotes in chains[chains[C.SESSION] == session].groupby(C.SYMBOL):
+    for symbol, quotes in rows.groupby(C.SYMBOL):
         if symbol not in spots.index or not spots[symbol] > 0:
             missing[symbol] = "no close for the session"
             continue
@@ -111,17 +142,57 @@ def discover_table(
             "otm": call.otm if call else None,
             "wide": call.wide if call else None,
         })
-    return pd.DataFrame(rows)
+    return pd.DataFrame(rows, columns=list(DISCOVER_COLUMNS))
+
+
+def listed_expirations(snapshots: dict[str, NameSnapshot]) -> pd.DataFrame:
+    """One ``(symbol, expiration)`` row per expiry each name's surface solved."""
+    rows = [(symbol, e.expiration) for symbol, snap in snapshots.items() for e in snap.surface]
+    return pd.DataFrame(rows, columns=["symbol", "expiration"])
+
+
+def common_expirations(listed: pd.DataFrame, min_share: float = 0.5) -> list[date]:
+    """Expiries listed for at least ``min_share`` of the names in ``listed``, nearest first."""
+    names = listed["symbol"].nunique()
+    if not names:
+        return []
+    floor = max(1, int(min_share * names))
+    counts = listed.drop_duplicates().groupby("expiration")["symbol"].nunique()
+    return sorted(e for e, n in counts.items() if n >= floor)
 
 
 def spread_expirations(snapshots: dict[str, NameSnapshot], min_share: float = 0.5) -> list[date]:
     """Expiries listed for at least ``min_share`` of the names, nearest first."""
-    counts: dict[date, int] = {}
-    for snap in snapshots.values():
-        for expiry in snap.surface:
-            counts[expiry.expiration] = counts.get(expiry.expiration, 0) + 1
-    floor = max(1, int(min_share * len(snapshots)))
-    return sorted(e for e, n in counts.items() if n >= floor)
+    return common_expirations(listed_expirations(snapshots), min_share)
+
+
+def default_spread_expiry(choices: list[date], session: date) -> date | None:
+    """The first choice at least :data:`DEFAULT_SPREAD_DAYS` out, else the furthest."""
+    for expiration in choices:
+        if (expiration - session).days >= DEFAULT_SPREAD_DAYS:
+            return expiration
+    return choices[-1] if choices else None
+
+
+def _spread_row(snap: NameSnapshot, expiry: Expiry, sd: float, tolerances: OptionsTolerances) -> dict | None:
+    spread = screens.sd_spread(expiry, snap.quotes[expiry.expiration], sd, tolerances)
+    if spread is None:
+        return None
+    return {
+        "symbol": snap.symbol,
+        "theme": snap.theme,
+        "move": spread.move,
+        "spread": f"{spread.long_strike:g}/{spread.short_strike:g}C",
+        "long_strike": spread.long_strike,
+        "short_strike": spread.short_strike,
+        "price": spread.price,
+        "width": spread.width,
+        "bid": spread.bid,
+        "ask": spread.ask,
+        "payout_mid": spread.payout_mid,
+        "payout_ask": spread.payout_ask,
+        "reward_risk": spread.reward_risk,
+    }
 
 
 def spread_table(
@@ -129,24 +200,56 @@ def spread_table(
 ) -> pd.DataFrame:
     """The +``sd`` spread at ``expiration`` for every name that lists it."""
     rows = []
-    for symbol, snap in snapshots.items():
+    for snap in snapshots.values():
         expiry = snap.expiry(expiration)
-        if expiry is None:
-            continue
-        spread = screens.sd_spread(expiry, snap.quotes[expiration], sd, tolerances)
-        if spread is None:
-            continue
-        rows.append({
-            "symbol": symbol,
-            "theme": snap.theme,
-            "move": spread.move,
-            "spread": f"{spread.long_strike:g}/{spread.short_strike:g}C",
-            "price": spread.price,
-            "width": spread.width,
-            "bid": spread.bid,
-            "ask": spread.ask,
-            "payout_mid": spread.payout_mid,
-            "payout_ask": spread.payout_ask,
-            "reward_risk": spread.reward_risk,
-        })
-    return pd.DataFrame(rows)
+        if expiry is not None and (row := _spread_row(snap, expiry, sd, tolerances)) is not None:
+            rows.append(row)
+    return pd.DataFrame(rows, columns=list(SPREAD_COLUMNS))
+
+
+def every_spread(
+    snapshots: dict[str, NameSnapshot], sds: tuple[float, ...] = SD_TARGETS, tolerances: OptionsTolerances = DEFAULT
+) -> pd.DataFrame:
+    """:func:`spread_table` at every expiry any name lists and every target, in one frame.
+
+    Two more columns, ``expiration`` and ``sd``, say which choice a row answers,
+    so a reader can select any expiry and target without solving a surface.
+    """
+    rows = [
+        row | {"expiration": expiry.expiration, "sd": sd}
+        for snap in snapshots.values()
+        for expiry in snap.surface
+        for sd in sds
+        if (row := _spread_row(snap, expiry, sd, tolerances)) is not None
+    ]
+    return pd.DataFrame(rows, columns=[*SPREAD_COLUMNS, "expiration", "sd"])
+
+
+@dataclass(frozen=True)
+class Screens:
+    """Every cross-sectional table for one stored night — what the collector writes."""
+
+    session: date
+    discover: pd.DataFrame
+    spreads: pd.DataFrame
+    listed: pd.DataFrame
+    #: Names with a chain that could not be priced, and why.
+    unpriced: dict[str, str]
+
+
+def solve_screens(
+    chains: pd.DataFrame,
+    metrics: pd.DataFrame,
+    rates: pd.DataFrame,
+    session: date,
+    tolerances: OptionsTolerances = DEFAULT,
+) -> Screens:
+    """:func:`build`, then each table the Discover and Screen tabs read."""
+    snaps, unpriced = build(chains, metrics, rates, session, tolerances)
+    return Screens(
+        session=session,
+        discover=discover_table(snaps, metrics, tolerances),
+        spreads=every_spread(snaps, tolerances=tolerances),
+        listed=listed_expirations(snaps),
+        unpriced=unpriced,
+    )

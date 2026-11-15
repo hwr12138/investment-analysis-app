@@ -13,13 +13,9 @@ import streamlit as st
 from plotly.subplots import make_subplots
 
 from app.formatting import format_date
-from app.logic.options.history import own_history_stats
+from app.logic.options.history import own_history_stats, reward_risk_quartile
 from app.logic.options.tolerances import DEFAULT
 from app.views.options.common import OptionsContext
-
-
-def _quartile(percentile: float) -> str:
-    return ("worst quartile", "below median", "above median", "best quartile")[min(int(percentile * 4), 3)]
 
 
 def render(context: OptionsContext) -> None:
@@ -37,7 +33,7 @@ def render(context: OptionsContext) -> None:
         )
     else:
         cells = st.columns(5)
-        cells[0].metric(format_date(stats.as_of), f"{stats.latest:.2f}×", _quartile(stats.percentile), delta_color="off")
+        cells[0].metric(format_date(stats.as_of), f"{stats.latest:.2f}×", reward_risk_quartile(stats.percentile), delta_color="off")
         cells[1].metric("Percentile of own year", f"{stats.percentile:.0%}")
         cells[2].metric("Median", f"{stats.median:.2f}×")
         cells[3].metric("Middle half", f"{stats.q25:.2f}–{stats.q75:.2f}")

@@ -1,4 +1,4 @@
-"""``python -m collector.main daily|backfill|recompute`` — the Cloud Run job's entry point.
+"""``python -m collector.main daily|backfill|recompute|screens`` — the Cloud Run job's entry point.
 
 The store comes from ``--store`` or ``OPTIONS_STORE_URI`` (``gs://bucket`` or
 ``file:///abs/path``); the ThetaData key from ``THETADATA_API_KEY``, which on
@@ -19,13 +19,17 @@ from collector.client import SourceError, ThetaSource
 from collector.store import open_store
 
 
+#: Modes that read only the store, never ThetaData, so need no key.
+_OFFLINE = ("recompute", "screens")
+
+
 def _today_et() -> date:
     return datetime.now(ZoneInfo("America/New_York")).date()
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="collector")
-    parser.add_argument("mode", choices=("daily", "backfill", "recompute"))
+    parser.add_argument("mode", choices=("daily", "backfill", "recompute", "screens"))
     parser.add_argument("--start", type=date.fromisoformat, help="backfill: first calendar day")
     parser.add_argument("--end", type=date.fromisoformat, help="backfill: last calendar day (default: last session)")
     parser.add_argument("--symbols", help="comma-separated subset of the universe (default: all)")
@@ -35,7 +39,7 @@ def main(argv: list[str] | None = None) -> int:
     if not args.store:
         parser.error("set --store or OPTIONS_STORE_URI")
     key = os.environ.get("THETADATA_API_KEY")
-    if not key and args.mode != "recompute":
+    if not key and args.mode not in _OFFLINE:
         parser.error("THETADATA_API_KEY is not set")
     symbols = [s.strip().upper() for s in args.symbols.split(",")] if args.symbols else list(universe.UNIVERSE)
     unknown = [s for s in symbols if s not in universe.UNIVERSE]
@@ -43,9 +47,12 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"not in the universe: {', '.join(unknown)}")
 
     store = open_store(args.store)
-    if args.mode == "recompute":
+    if args.mode in _OFFLINE:
         try:
-            pipeline.run_recompute(store, symbols)
+            if args.mode == "recompute":
+                pipeline.run_recompute(store, symbols)
+            else:
+                pipeline.run_screens(store)
         except SourceError as error:
             print(f"FAILED: {error}", file=sys.stderr)
             return 1

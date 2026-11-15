@@ -1,8 +1,9 @@
 # Equiti web (proof of concept)
 
 The Streamlit app's successor: a React + Mantine frontend here, a FastAPI service in
-`app/api/`, both over the same `app/logic/` and `app/data/`. 🚀 Momentum Analysis and the two
-portfolio pages are ported so far; the Streamlit app keeps running until every page is.
+`app/api/`, both over the same `app/logic/` and `app/data/`. 🚀 Momentum Analysis, the two
+portfolio pages and 🎯 Options are ported so far; the Streamlit app keeps running until every page
+is.
 
 ```
 Firebase Hosting ── web/dist (this app)
@@ -87,6 +88,13 @@ One-time setup:
    gcloud secrets add-iam-policy-binding sharadar-api-key --member=serviceAccount:equiti-api@PROJECT.iam.gserviceaccount.com --role=roles/secretmanager.secretAccessor
    ```
 
+3. **Read access to the options store**, for the 🎯 Options routes. The service authenticates to
+   the bucket as its own account, so it needs no key file:
+
+   ```bash
+   gcloud storage buckets add-iam-policy-binding gs://BUCKET --member=serviceAccount:equiti-api@PROJECT.iam.gserviceaccount.com --role=roles/storage.objectViewer
+   ```
+
 Each release:
 
 ```bash
@@ -94,7 +102,7 @@ gcloud builds submit --config deploy/api/cloudbuild.yaml --substitutions=_REGION
 ```
 
 ```bash
-gcloud run deploy equiti-api --image REGION-docker.pkg.dev/PROJECT/options/api:latest --region REGION --service-account equiti-api@PROJECT.iam.gserviceaccount.com --allow-unauthenticated --set-secrets SHARADAR_API_KEY=sharadar-api-key:latest --set-env-vars "^;^FIREBASE_PROJECT_ID=PROJECT;EQUITI_ALLOWED_EMAILS=you@example.com" --memory 1Gi --timeout 60 --max-instances 2 --cpu-boost
+gcloud run deploy equiti-api --image REGION-docker.pkg.dev/PROJECT/options/api:latest --region REGION --service-account equiti-api@PROJECT.iam.gserviceaccount.com --allow-unauthenticated --set-secrets SHARADAR_API_KEY=sharadar-api-key:latest --set-env-vars "^;^FIREBASE_PROJECT_ID=PROJECT;EQUITI_ALLOWED_EMAILS=you@example.com;OPTIONS_STORE_URI=gs://BUCKET" --memory 1Gi --timeout 60 --max-instances 2 --cpu-boost
 ```
 
 ```bash
@@ -111,6 +119,12 @@ Notes:
   release shows on the next load. A rule on `/index.html` alone would miss routes such as
   `/momentum/AAPL`, which reach it through the rewrite and otherwise get Hosting's one-hour cache.
 - Hosting stops waiting for Cloud Run after **60 seconds**. A cold Sharadar price fetch takes 5–20 s.
+- **The Options routes solve nothing heavy on request.** Solving every name's surface takes the
+  Streamlit page about ten seconds, so the collector does it nightly and stores the Discover and
+  Screen tables (~130 kB); the API reads those in milliseconds. Evaluate reads the night's full
+  chain once per instance (~35 MB in memory) and solves one name, about 0.3 s. A store whose
+  tables are older than its manifest's close answers 503 with how to rebuild them
+  (`collector/README.md`, "Rebuilding the screens").
 - The data layer's caches are still `st.cache_data`, in process: each instance starts cold, and
   `--max-instances 2` keeps that bounded. Moving them to a shared cache is the next step of the
   migration.
