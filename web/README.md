@@ -94,7 +94,7 @@ gcloud builds submit --config deploy/api/cloudbuild.yaml --substitutions=_REGION
 ```
 
 ```bash
-gcloud run deploy equiti-api --image REGION-docker.pkg.dev/PROJECT/options/api:latest --region REGION --service-account equiti-api@PROJECT.iam.gserviceaccount.com --allow-unauthenticated --set-secrets SHARADAR_API_KEY=sharadar-api-key:latest --set-env-vars "^;^FIREBASE_PROJECT_ID=PROJECT;EQUITI_ALLOWED_EMAILS=you@example.com" --memory 1Gi --timeout 60 --max-instances 2
+gcloud run deploy equiti-api --image REGION-docker.pkg.dev/PROJECT/options/api:latest --region REGION --service-account equiti-api@PROJECT.iam.gserviceaccount.com --allow-unauthenticated --set-secrets SHARADAR_API_KEY=sharadar-api-key:latest --set-env-vars "^;^FIREBASE_PROJECT_ID=PROJECT;EQUITI_ALLOWED_EMAILS=you@example.com" --memory 1Gi --timeout 60 --max-instances 2 --cpu-boost
 ```
 
 ```bash
@@ -114,3 +114,9 @@ Notes:
 - The data layer's caches are still `st.cache_data`, in process: each instance starts cold, and
   `--max-instances 2` keeps that bounded. Moving them to a shared cache is the next step of the
   migration.
+- **The first request after an idle spell waits 12–15 s** while Cloud Run starts an instance,
+  because there is no minimum instance. Locally the app imports in about 1 s, so the time is
+  mostly Cloud Run loading the ~300 MB image. `--cpu-boost` made no measurable difference (14.4 s
+  with it, 11.6–15.7 s without). `--min-instances 1` would remove the wait at about $13 a month
+  idle for 1 vCPU and 1 GiB; the wait was accepted instead (November 2026). A smaller image is the
+  other way out: the API currently installs everything the Streamlit app needs.
