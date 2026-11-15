@@ -48,7 +48,7 @@ DEFAULT_BENCHMARK = "SPY"
 DEFAULT_HEADLINE_METHOD = "gordon"
 
 #: The DCF tab's untouched assumption set, which ``app.logic.dcf.inputs``
-#: assembles for both front ends and for the summary chart's line of past
+#: assembles for the API's panel and for the summary chart's line of past
 #: values. Conventions rather than measurements: each reads as an estimate on
 #: the tab until someone changes it.
 DEFAULT_FORECAST_YEARS = 10

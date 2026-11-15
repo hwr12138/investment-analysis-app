@@ -134,7 +134,6 @@ TRANSFER_CODES = frozenset({"G", "J", "C", "D", "I", "W", "X", "E", "L"})
 KNOWN_CODES = OPEN_MARKET_CODES | COMPENSATION_CODES | TRANSFER_CODES
 
 BUY_CODE = "P"
-SELL_CODE = "S"
 
 #: The columns every function here needs. A frame missing one of these is not
 #: an SF2 frame, and is treated as empty rather than half-read.

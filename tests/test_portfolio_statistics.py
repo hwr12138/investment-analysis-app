@@ -99,20 +99,8 @@ def test_weights_are_renormalised_over_the_tickers_with_prices():
 
 
 # ---------------------------------------------------------------------------
-# The inputs and the relationships, shared by both front ends
+# The weights and the relationships
 # ---------------------------------------------------------------------------
-
-
-def test_allocations_are_read_in_the_pages_format():
-    assert ps.parse_allocations(" qqq:55, GLD : 30 ,xle:15, ") == {
-        "QQQ": 55.0, "GLD": 30.0, "XLE": 15.0
-    }
-
-
-@pytest.mark.parametrize("text", ["QQQ 55", "QQQ:55:1", "QQQ:lots", ":55"])
-def test_an_entry_that_is_not_ticker_colon_number_is_refused(text):
-    with pytest.raises(ValueError):
-        ps.parse_allocations(text)
 
 
 @pytest.mark.parametrize(

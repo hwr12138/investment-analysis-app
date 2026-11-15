@@ -3,12 +3,10 @@
 The newest stored chain for the whole universe is turned into one
 :class:`NameSnapshot` per name (spot, solved surface, quotes by expiry) and the
 two cross-sectional tables. Solving ninety-odd surfaces takes about ten
-seconds, so it is done once per stored night, by one of two consumers:
-
-* the Streamlit page solves it itself and caches the result per night;
-* the nightly collector solves it with :func:`solve_screens` and stores the
-  tables (``latest/discover.parquet`` and its neighbours), which the web API
-  reads instead of solving — a request there cannot wait ten seconds.
+seconds, so it is done once per stored night: the nightly collector solves it
+with :func:`solve_screens` and stores the tables (``latest/discover.parquet``
+and its neighbours), which the web API reads instead of solving — a request
+cannot wait ten seconds.
 
 A name is in a table only when every figure its row needs could be read; the
 names that could not are returned beside the table with the reason, so the view
@@ -159,11 +157,6 @@ def common_expirations(listed: pd.DataFrame, min_share: float = 0.5) -> list[dat
     floor = max(1, int(min_share * names))
     counts = listed.drop_duplicates().groupby("expiration")["symbol"].nunique()
     return sorted(e for e, n in counts.items() if n >= floor)
-
-
-def spread_expirations(snapshots: dict[str, NameSnapshot], min_share: float = 0.5) -> list[date]:
-    """Expiries listed for at least ``min_share`` of the names, nearest first."""
-    return common_expirations(listed_expirations(snapshots), min_share)
 
 
 def default_spread_expiry(choices: list[date], session: date) -> date | None:

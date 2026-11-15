@@ -167,25 +167,7 @@ def get_comprehensive_metrics(
     return pd.DataFrame(results)
 
 
-# --- The page's inputs, and how the holdings move together ---
-
-
-def parse_allocations(text: str) -> dict[str, float]:
-    """``"QQQ:55, GLD:30"`` as ``{"QQQ": 55.0, "GLD": 30.0}``: the Streamlit page's format.
-
-    Raises ``ValueError`` for an entry that is not one ticker and one number
-    joined by a colon. Blank entries, as a trailing comma leaves, are skipped.
-    """
-    allocations: dict[str, float] = {}
-    for part in text.split(","):
-        if not part.strip():
-            continue
-        ticker, weight = part.split(":")
-        ticker = ticker.strip().upper()
-        if not ticker:
-            raise ValueError(f"No ticker in {part.strip()!r}")
-        allocations[ticker] = float(weight.strip())
-    return allocations
+# --- The weights, and how the holdings move together ---
 
 
 def needs_rescaling(total: float) -> bool:

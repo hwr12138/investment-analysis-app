@@ -5,11 +5,11 @@ FROM python:3.13-slim
 WORKDIR /srv
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 
-COPY requirements.txt requirements-api.txt ./
-RUN pip install --no-cache-dir -r requirements-api.txt
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
 
-# The package only: no streamlit_app.py, no tests, and .gcloudignore keeps
-# .streamlit/ (the local secrets) out of the build context entirely.
+# The package only: no tests, and .gcloudignore keeps .streamlit/ (the local
+# secrets) out of the build context entirely.
 COPY app app
 
 # One worker: the data layer's caches are in-process, so a second worker would

@@ -7,7 +7,6 @@ from types import SimpleNamespace
 
 import pandas as pd
 import pytest
-from streamlit.testing.v1 import AppTest
 
 from app.data import market_data
 from app.data import sharadar_client as sc
@@ -19,7 +18,6 @@ from app.logic.dcf import wacc as wacc_lib
 from app.logic.research import dataset as research_dataset
 from app.logic.research import summary as research
 from app.provenance import Sourced
-from app.views.research import summary as summary_view
 
 from .test_golden import build_model
 
@@ -160,7 +158,7 @@ def test_the_company_on_a_past_date_is_built_from_that_days_filings(
 
 
 # ---------------------------------------------------------------------------
-# Today's point is the DCF tab's own number
+# A default the tab would ask the reader for is a gap
 # ---------------------------------------------------------------------------
 
 _BETA = dcf_model.BetaOutcome(
@@ -172,44 +170,6 @@ _BETA = dcf_model.BetaOutcome(
 )
 _RF = Sourced.reported(0.042, "stub")
 _ERP = Sourced.reported(0.045, "stub")
-
-
-def _dcf_tab():
-    from app.views.research.dcf import render
-
-    render("TEST")
-
-
-def test_the_default_run_is_the_dcf_tabs_untouched_value(
-    statements_payload, tickers_response, monkeypatch
-):
-    """The line's last step and the DCF tab's headline are one number, and
-    this is what keeps them one: the tab is run, untouched, beside the model's
-    own default set."""
-    built = build_model(statements_payload, tickers_response, monkeypatch)
-    monkeypatch.setattr(dcf_model, "regress_company_beta", lambda *a, **k: _BETA)
-    monkeypatch.setattr(market_data, "fetch_10y_treasury_rate", lambda: _RF)
-    monkeypatch.setattr(market_data, "fetch_erp", lambda: _ERP)
-
-    app = AppTest.from_function(_dcf_tab, default_timeout=120)
-    app.run()
-    assert not app.exception, app.exception
-    shown = app.session_state["dcf_output"]["result"]
-
-    dataset = built["dataset"]
-    line = dcf_inputs.default_value(
-        dataset, valuation_date=date.today(), risk_free=_RF, erp=_ERP, beta=_BETA
-    )
-    # An untouched input is no override at all, so the two are one run exactly.
-    assert line.headline_bridge.value_per_share == pytest.approx(
-        shown.headline_bridge.value_per_share, rel=1e-12
-    )
-    assert line.headline_method == shown.headline_method == "gordon"
-
-    # The header carries the same headline, where market cap used to be.
-    header = [m for m in app.metric if m.label.startswith("DCF value per share")]
-    assert [m.value for m in header] == [f"{shown.headline_bridge.value_per_share:,.2f}"]
-    assert "vs price" in header[0].delta
 
 
 @pytest.mark.parametrize(
@@ -340,90 +300,6 @@ def test_the_line_reaches_back_five_years_at_most():
 # ---------------------------------------------------------------------------
 # The chart's step line
 # ---------------------------------------------------------------------------
-
-
-def _window(start: str, end: str) -> pd.DataFrame:
-    index = pd.bdate_range(start, end)
-    return pd.DataFrame({"Close": 100.0}, index=index)
-
-
-def _stub_line(monkeypatch, values: dict[date | None, float | None]):
-    filings = tuple(
-        research_dataset.DcfFiling(filed=d, period=f"P{i}") for i, d in enumerate(_FILED)
-    )
-    monkeypatch.setattr(research_dataset, "load_dcf_filings", lambda ticker: filings)
-
-    def point(ticker, as_of=None):
-        value = values.get(as_of)
-        return research_dataset.DcfPoint(as_of, value, "" if value else "no beta that day")
-
-    monkeypatch.setattr(research_dataset, "load_dcf_point", point)
-
-
-def test_the_line_steps_at_each_filing_and_ends_on_todays_value(monkeypatch):
-    _stub_line(monkeypatch, {
-        date(2025, 8, 27): 600.0, date(2025, 11, 19): 660.0, date(2026, 2, 25): 820.0,
-        date(2026, 5, 20): 1040.0, date(2026, 8, 26): 1290.0, None: 1200.0,
-    })
-    company = SimpleNamespace(ticker="T", loaded_at=date(2026, 9, 27))
-    trace, notes = summary_view._dcf_line(company, _window("2025-09-26", "2026-09-25"))
-    assert trace.line.shape == "hv"
-    assert [pd.Timestamp(x).date() for x in trace.x] == [
-        date(2025, 9, 26), date(2025, 11, 19), date(2026, 2, 25), date(2026, 5, 20),
-        date(2026, 8, 26), date(2026, 9, 25),
-    ]
-    assert list(trace.y) == [600.0, 660.0, 820.0, 1040.0, 1290.0, 1200.0]
-    assert trace.customdata[-1] == "today"
-    assert "default headline" in notes[0]
-
-
-def test_a_filing_that_could_not_be_valued_is_a_gap_and_says_why(monkeypatch):
-    _stub_line(monkeypatch, {
-        date(2025, 8, 27): 600.0, date(2025, 11, 19): None, date(2026, 2, 25): 820.0,
-        date(2026, 5, 20): 1040.0, date(2026, 8, 26): 1290.0, None: 1200.0,
-    })
-    company = SimpleNamespace(ticker="T", loaded_at=date(2026, 9, 27))
-    trace, notes = summary_view._dcf_line(company, _window("2025-09-26", "2026-09-25"))
-    assert trace.y[1] is None
-    assert trace.connectgaps is False
-    assert any("no beta that day" in note for note in notes)
-
-
-def test_a_company_with_no_value_at_all_has_no_line(monkeypatch):
-    _stub_line(monkeypatch, {})
-    company = SimpleNamespace(ticker="JPM", loaded_at=date(2026, 9, 27))
-    trace, notes = summary_view._dcf_line(company, _window("2025-09-26", "2026-09-25"))
-    assert trace is None
-    assert notes[0].startswith("No DCF line")
-
-
-def test_the_line_is_named_in_the_legend_with_todays_value(monkeypatch):
-    _stub_line(monkeypatch, {date(2025, 8, 27): 600.0, date(2026, 8, 26): 1290.0, None: 1200.0})
-    company = SimpleNamespace(ticker="T", loaded_at=date(2026, 9, 27))
-    trace, _ = summary_view._dcf_line(company, _window("2025-09-26", "2026-09-25"))
-    assert trace.name == "DCF value · 1,200.00 today"
-    assert trace.showlegend is True
-
-
-def test_a_gap_today_names_the_last_filings_value(monkeypatch):
-    _stub_line(monkeypatch, {date(2025, 8, 27): 600.0, date(2026, 8, 26): 1290.0})
-    company = SimpleNamespace(ticker="T", loaded_at=date(2026, 9, 27))
-    trace, _ = summary_view._dcf_line(company, _window("2025-09-26", "2026-09-25"))
-    assert trace.name == "DCF value · 1,290.00 latest"
-
-
-def test_the_legend_holds_the_dcf_line_alone():
-    """The label never sits on the steps, and the candles need no introduction."""
-    window = pd.DataFrame(
-        {"Open": 1.0, "High": 2.0, "Low": 0.5, "Close": 1.5, "Volume": 10.0},
-        index=pd.bdate_range("2026-09-01", "2026-09-25"),
-    )
-    figure = summary_view._price_figure(window, SimpleNamespace(currency="USD"))
-    figure.add_trace(summary_view.go.Scatter(x=[], y=[], name="DCF value", showlegend=True))
-    summary_view._show_dcf_legend(figure)
-    assert figure.layout.showlegend is True
-    shown = [t.name for t in figure.data if t.showlegend is not False]
-    assert shown == ["DCF value"]
 
 
 def test_the_line_steps_anchor_on_the_windows_first_session_and_end_on_today():

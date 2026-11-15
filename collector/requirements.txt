@@ -1,4 +1,4 @@
-# The collector image only. The Streamlit app does not install these.
+# The collector image only. The API does not install these.
 thetadata>=1.0.15
 python-dotenv  # thetadata 1.0.15 imports it without declaring it
 google-cloud-storage

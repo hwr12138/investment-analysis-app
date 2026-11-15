@@ -1,5 +1,5 @@
 # Built from the repository root: `gcloud builds submit --config collector/cloudbuild.yaml .`
-# thetadata needs Python 3.12 or later; the Streamlit app does not import it.
+# thetadata needs Python 3.12 or later; the API does not import it.
 FROM python:3.12-slim
 
 WORKDIR /job

@@ -271,6 +271,33 @@ def test_cross_implied_figures_invert_each_other():
     assert dcf.exit_multiple_terminal_value(ebitda, multiple) == pytest.approx(terminal)
 
 
+def test_the_two_methods_really_do_cross_imply_each_other():
+    """The Gordon row's multiple and the exit row's figures are not swapped."""
+    drivers = dcf.DriverPath.flat(
+        3, revenue_growth=0.10, operating_margin=0.20, effective_tax_rate=0.25,
+        capex_pct_revenue=0.05, dna_pct_revenue=0.04, nwc_pct_revenue=0.10,
+    )
+    projection = dcf.project(1000.0, drivers, wacc=0.08, mid_year=False)
+    terminals = dcf.build_terminal_values(
+        projection, terminal_growth=0.02, exit_multiple=10.0
+    )
+
+    gordon, exit_multiple = terminals["gordon"], terminals["exit_multiple"]
+    steady = gordon.terminal_year
+    # Gordon states a multiple; feeding it back reproduces Gordon's own value.
+    assert gordon.implied_growth is None
+    assert dcf.exit_multiple_terminal_value(
+        projection.final_ebitda, gordon.implied_exit_multiple
+    ) == pytest.approx(gordon.value)
+    # The exit multiple states a return on new capital; feeding it back through
+    # the value-driver formula reproduces the exit value.
+    assert exit_multiple.implied_exit_multiple is None
+    reinvested = steady.nopat * (1 - 0.02 / exit_multiple.implied_ronic)
+    assert dcf.gordon_growth_terminal_value(reinvested, 0.02, 0.08) == pytest.approx(
+        exit_multiple.value
+    )
+
+
 def test_a_value_beyond_free_growth_has_no_implied_ronic():
     """Worth more than NOPAT growing at g with no reinvestment: no RONIC reaches it."""
     free = 100.0 / (0.08 - 0.02)

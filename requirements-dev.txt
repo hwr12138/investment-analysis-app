@@ -1,4 +1,4 @@
-# Development-only dependencies. Not installed on the deployed app.
--r requirements-api.txt
+# Development-only dependencies. Not installed in the API image.
+-r requirements.txt
 pytest
 httpx  # FastAPI's TestClient

@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        # 3.11 is the devcontainer's; 3.13 is what the app is developed on.
+        # 3.13 is what the API image runs; 3.11 is the oldest the code supports.
         python-version: ["3.11", "3.13"]
     steps:
       - uses: actions/checkout@v4

@@ -1,11 +1,11 @@
 // Reading the scanner and divergence strings for display.
 //
 // The logic layer returns sentences with an emoji in front ("📈 Bullish Momentum
-// (MACD > Signal)"), written for the Streamlit page. Here they become a tone, a
-// headline and a detail. Tone is read from the words "Bull"/"Bear"; anything
-// else, including a wording this does not recognise, is shown as neutral grey
-// rather than guessed at. Returning a structured reading from the logic layer
-// would remove the parsing, once the Streamlit page no longer needs the sentences.
+// (MACD > Signal)"), written for the Streamlit page this app replaced. Here they
+// become a tone, a headline and a detail. Tone is read from the words
+// "Bull"/"Bear"; anything else, including a wording this does not recognise, is
+// shown as neutral grey rather than guessed at. Returning a structured reading
+// from the logic layer would remove the parsing; nothing else reads the sentences.
 import type { Tone } from "../../theme";
 
 export type Reading = {

@@ -422,7 +422,7 @@ def test_no_premium_without_both_sides(peer_universe):
 
 
 # ---------------------------------------------------------------------------
-# The verdict, as both front ends read it
+# The verdict
 # ---------------------------------------------------------------------------
 
 

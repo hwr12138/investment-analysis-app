@@ -710,8 +710,3 @@ def build_key_stats(
     tiles.append(_next_report_tile(quarterly_ar, today))
     return tiles
 
-
-def stats_by_label(stats: list[StatTile]) -> dict[str, StatTile]:
-    """Tiles keyed by label, for laying the table out by :data:`STAT_COLUMNS`."""
-    return {tile.label: tile for tile in stats}
-

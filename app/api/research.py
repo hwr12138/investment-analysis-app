@@ -1,11 +1,11 @@
-"""🔎 Stock Research over HTTP: one route per tab, each calling the loader its Streamlit tab calls.
+"""🔎 Stock Research over HTTP: one route per tab, each calling its own loader in ``dataset``.
 
 The page is a profile and six tabs — 📊 Summary, 📄 Financials, ⚖️ Valuation
 and Growth, 👤 Insiders and 🏛️ Holdings here, and the 💰 DCF in
 :mod:`app.api.dcf`, which loads through the DCF engine rather than the snapshot.
 
 Every route starts from :func:`app.logic.research.dataset.load_research`, the
-snapshot a Streamlit search builds. Its fetches are cached in the data layer, so
+snapshot a search builds. Its fetches are cached in the data layer, so
 after the first route for a company the snapshot costs ~10 ms to rebuild, and
 nothing here keeps one of its own. The frontend asks for the profile first and
 for a tab only once it has arrived, so a cold search fetches the snapshot once
@@ -447,7 +447,7 @@ def financials(
     """One statement, laid out and reconciled by ``logic.statements``.
 
     The balance sheet's leading column is the latest quarter, the others' the
-    trailing twelve months — the same choice the Streamlit tab makes.
+    trailing twelve months.
     """
     dataset = _snapshot(ticker)
     data = research.load_financials(dataset.ticker)

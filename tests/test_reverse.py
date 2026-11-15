@@ -615,3 +615,12 @@ def test_a_held_then_faded_forecast_round_trips_under_both_methods(built, solve,
     )
     assert result.status is Status.SOLVED
     assert result.growth == pytest.approx(start, abs=1e-7)
+
+
+def test_the_out_of_range_reason_states_the_bounds_it_searched():
+    """So the copy cannot drift from GROWTH_BOUNDS."""
+    result = reverse.solve_growth(lambda g: g, 5.0)
+    assert result.status is Status.TARGET_ABOVE_RANGE
+    low, high = reverse.GROWTH_BOUNDS
+    assert f"{low:.2%}" in result.reason
+    assert f"{high:.2%}" in result.reason

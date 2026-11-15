@@ -4,8 +4,8 @@ The tab is one request: the reader's overrides go up, and the resolved panel and
 the valued run come back together, because every number in the panel can move
 when one input does — a cost of debt nobody typed follows the risk-free rate.
 :func:`app.logic.dcf.inputs.resolve` assembles the run from the overrides and
-:func:`~app.logic.dcf.inputs.evaluate` values it; they are the functions the
-Streamlit tab calls, so an untouched panel is the same run on both.
+:func:`~app.logic.dcf.inputs.evaluate` values it; the summary chart's DCF line
+resolves through the same function, so an untouched panel is the line's value.
 
 Two more routes sit beside it: a what-if price solved against the same run, and
 the workbook or CSV export, which needs the reader's acknowledgements as well.
@@ -228,7 +228,7 @@ class BaseFcff(Contract):
 
 
 class Panel(Contract):
-    """Every input, top to bottom, as the Streamlit panel draws them."""
+    """Every input, top to bottom, as the panel draws them."""
 
     base_label: str
     base_detail: str

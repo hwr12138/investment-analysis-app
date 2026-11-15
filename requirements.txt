@@ -1,12 +1,15 @@
-streamlit>=1.57  # stateful st.tabs (on_change="rerun", TabContainer.open)
+# The API service (app/api/, deployed to Cloud Run) and the logic and data layers
+# under it. Streamlit is a library here, not a front end: the data layer still
+# caches through st.cache_data and reads st.secrets.
+streamlit>=1.57
 pandas
 scipy
 numpy
-matplotlib
-seaborn
-plotly
 requests
 yfinance
-openpyxl
-pyarrow  # Parquet: the options page reads the collector's store
+openpyxl  # the DCF's .xlsx export
+pyarrow  # Parquet: the options store the collector writes
 google-cloud-storage  # the options store's bucket
+fastapi
+uvicorn[standard]
+google-auth  # verifies Firebase ID tokens (app/api/auth.py)

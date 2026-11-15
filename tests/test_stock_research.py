@@ -366,19 +366,25 @@ def test_the_headline_stat_is_not_repeated_in_the_table():
     assert summary.HEADLINE_STAT not in laid_out
 
 
+def test_the_table_is_four_columns_of_four():
+    assert len(summary.STAT_COLUMNS) == 4
+    assert all(len(column) == 4 for column in summary.STAT_COLUMNS)
+
+
 def test_every_tile_carries_an_origin():
     assert all(isinstance(tile.origin, Origin) for tile in _build())
 
 
-def test_stats_by_label_round_trips_every_tile():
-    tiles = _build()
-    assert len(summary.stats_by_label(tiles)) == len(tiles)
+def test_every_tile_has_its_own_label():
+    """The grid is laid out by label, so two tiles sharing one would hide one."""
+    labels = [tile.label for tile in _build()]
+    assert len(set(labels)) == len(labels)
 
 
 def test_missing_feeds_produce_unavailable_tiles_rather_than_zeros():
     """A dropped feed must be visible, not silently absent."""
     tiles = _build(daily=pd.DataFrame(), ttm_pl=pd.DataFrame(), actions=_actions([]))
-    by_label = summary.stats_by_label(tiles)
+    by_label = {tile.label: tile for tile in tiles}
     for label in ("Market Cap", "P/E", "EPS (TTM, diluted)", "Ex-Dividend Date"):
         assert not by_label[label].ok, label
         assert by_label[label].origin is Origin.UNAVAILABLE, label
@@ -421,6 +427,12 @@ def test_formatters_never_invent_a_number(value):
     assert formatting.format_count(value) == "not reported"
     assert formatting.format_ratio(value) == "not reported"
     assert formatting.format_pct(value) == "not reported"
+
+
+def test_a_missing_date_renders_as_a_dash_not_a_fabricated_one():
+    assert formatting.format_date(None, missing="—") == "—"
+    assert formatting.format_date(pd.NaT, missing="—") == "—"
+    assert formatting.format_date(pd.Timestamp("2025-09-30"), missing="—") == "2025-09-30"
 
 
 # ---------------------------------------------------------------------------
