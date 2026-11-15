@@ -71,7 +71,8 @@ gcloud run jobs deploy options-collector \
   --task-timeout=24h --max-retries=0 --memory=2Gi --cpu=1
 ```
 
-To redeploy after a code change, rerun both commands.
+After that, a merge to `main` that changes the collector rebuilds its image and points the job
+at it (`deploy/README.md`). To deploy by hand, rerun both commands.
 
 ## 5. Backfill the last year, once
 

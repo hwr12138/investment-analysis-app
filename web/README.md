@@ -115,7 +115,9 @@ One-time setup:
    resolves. Nothing else changes: the page calls `/api` on whichever domain served it, and the
    API checks the token's project, not the domain it came from.
 
-Each release:
+Each release deploys itself: a merge to `main` that changes the API or the web app deploys it
+once the tests pass (`.github/workflows/deploy.yml`; `deploy/README.md` has its one-time setup).
+The first deploy, or one outside a merge, is by hand:
 
 ```bash
 gcloud builds submit --config deploy/api/cloudbuild.yaml --substitutions=_REGION=REGION --service-account=projects/PROJECT/serviceAccounts/options-builder@PROJECT.iam.gserviceaccount.com .
