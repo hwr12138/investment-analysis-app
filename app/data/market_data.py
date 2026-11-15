@@ -11,7 +11,7 @@ float: a scrape or a third-party rate can fail, and a page must be able to tell
 you are looking at a constant". Nothing here substitutes a default on failure.
 
 **Failures are never cached.** Each cached function *raises* :class:`FetchFailed`
-on failure — ``st.cache_data`` does not store an exception — and a thin
+on failure — :mod:`app.data.cache` does not store an exception — and a thin
 uncached wrapper turns it into ``Sourced.unavailable``. Returning the failure
 from the cached function instead, as this module once did, cached a transient
 outage for the full day.
@@ -22,9 +22,9 @@ from datetime import date, datetime, timedelta
 
 import pandas as pd
 import requests
-import streamlit as st
 import yfinance as yf
 
+from app.data import cache
 from app.provenance import Sourced
 
 #: An implied ERP outside this band is not credible and is treated as a failed
@@ -70,7 +70,7 @@ def _yahoo_last_close(symbol: str) -> tuple[float, date | None]:
 HISTORY_MAX_STALENESS_DAYS = 7
 
 
-@st.cache_data(show_spinner=False, ttl=3600 * 24)
+@cache.data(ttl=3600 * 24)
 def _cached_yahoo_history(symbol: str) -> pd.Series:
     """Every daily close Yahoo Finance has for ``symbol``, indexed by date.
 
@@ -131,7 +131,7 @@ TNX_SYMBOL = "^TNX"
 YIELD_PLAUSIBLE_BAND_PCT = (-1.0, 25.0)
 
 
-@st.cache_data(show_spinner=False, ttl=3600 * 24)
+@cache.data(ttl=3600 * 24)
 def _cached_yahoo_yield(symbol: str) -> tuple[float, date | None]:
     """The cache entry: a plausible yield in percent and its date, or a raise."""
     rate_pct, as_of = _yahoo_last_close(symbol)
@@ -228,7 +228,7 @@ def fetch_10y_treasury_rate_on(day: date) -> Sourced:
 # --- Equity Risk Premium & Beta ---
 
 
-@st.cache_data(show_spinner=False, ttl=3600 * 24)
+@cache.data(ttl=3600 * 24)
 def _cached_erp() -> tuple[float, date | None]:
     """The cache entry: the scraped ERP and its date, or a :class:`FetchFailed`."""
     try:
@@ -317,7 +317,7 @@ def fetch_erp() -> Sourced:
 FX_PLAUSIBLE_BAND = (1e-6, 1e3)
 
 
-@st.cache_data(show_spinner=False, ttl=3600 * 6)
+@cache.data(ttl=3600 * 6)
 def _cached_fx_rate(currency: str) -> tuple[float, date | None, str]:
     """The cache entry: USD per unit of ``currency``, its date and the symbol read.
 

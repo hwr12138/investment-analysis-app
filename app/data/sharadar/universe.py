@@ -13,8 +13,8 @@ that day. A second search is free.
 from __future__ import annotations
 
 import pandas as pd
-import streamlit as st
 
+from app.data import cache
 from app.data.sharadar import prices, transport
 
 #: Columns pulled from TICKERS for peer grouping. Projected rather than taking
@@ -59,7 +59,7 @@ def _fetch_universe_daily(as_of: str) -> pd.DataFrame:
     return prices._normalise_daily(transport._request_all("DAILY", {"date": as_of}))
 
 
-@st.cache_data(show_spinner=False, ttl=60 * 60 * 12)
+@cache.data(ttl=60 * 60 * 12)
 def fetch_universe_daily(as_of: str) -> pd.DataFrame:
     """Cached universe-wide DAILY snapshot: ``ticker date ev evebit evebitda
     marketcap pb pe ps``, with ``marketcap`` and ``ev`` in raw units.
@@ -110,7 +110,7 @@ def _fetch_universe_fundamentals(since: str) -> pd.DataFrame:
     return frame.sort_values(["ticker", "calendardate"]).reset_index(drop=True)
 
 
-@st.cache_data(show_spinner=False, ttl=60 * 60 * 12)
+@cache.data(ttl=60 * 60 * 12)
 def fetch_universe_fundamentals(since: str) -> pd.DataFrame:
     """Cached universe-wide TTM fundamentals, one row per ticker and period."""
     return _fetch_universe_fundamentals(since)
@@ -129,7 +129,7 @@ def _fetch_ticker_directory() -> pd.DataFrame:
     return frame.reset_index(drop=True)
 
 
-@st.cache_data(show_spinner=False, ttl=60 * 60 * 24 * 7)
+@cache.data(ttl=60 * 60 * 24 * 7)
 def fetch_ticker_directory() -> pd.DataFrame:
     """Cached ticker → sector/industry directory. Classifications barely move.
 

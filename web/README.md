@@ -147,13 +147,15 @@ Notes:
   chain once per instance (~35 MB in memory) and solves one name, about 0.3 s. A store whose
   tables are older than its manifest's close answers 503 with how to rebuild them
   (`collector/README.md`, "Rebuilding the screens").
-- The data layer's caches are still `st.cache_data`, in process: each instance starts cold, and
-  `--max-instances 2` keeps that bounded. Moving them off Streamlit, and to a shared cache, is
-  what is left of the migration.
+- The data layer's caches (`app/data/cache.py`) are in process: each instance starts cold, and
+  `--max-instances 2` keeps that bounded. A shared cache would let a second instance start warm;
+  nothing needs one yet.
 - **The first request after an idle spell waits 12–15 s** while Cloud Run starts an instance,
   because there is no minimum instance. Locally the app imports in about 1 s, so the time is
   mostly Cloud Run loading the ~300 MB image. `--cpu-boost` made no measurable difference (14.4 s
   with it, 11.6–15.7 s without). `--min-instances 1` would remove the wait at about $13 a month
   idle for 1 vCPU and 1 GiB; the wait was accepted instead (November 2026). A smaller image is the
-  other way out. Removing the Streamlit front end took plotly, matplotlib and seaborn out of it;
-  Streamlit itself stays until the data layer's caches move off it.
+  other way out. Removing the Streamlit front end took plotly, matplotlib and seaborn out of it,
+  and moving the caches and secrets off Streamlit took Streamlit itself: about 110 MB of installed
+  packages that nothing else needs (pydeck, Streamlit, Pillow and Altair are most of it; measured
+  on a local install, not on the image).

@@ -8,15 +8,4 @@ without a request.
 One router module per page, each mounted under ``/api`` by :mod:`app.api.main`.
 Every response model derives from :class:`app.api.contract.Contract`, which
 refuses NaN and infinity at construction — see there for why.
-
-The data layer still caches through ``st.cache_data``, a library use left over
-from the Streamlit front end this API replaced. That works outside a Streamlit
-server (the cache is in-process either way) but logs a warning per
-cached function at import and per call, so Streamlit's logging is turned down
-here, before any submodule can import the data layer. This is the package's one
-Streamlit import, and it goes once the caches move off Streamlit.
 """
-
-from streamlit import logger as _streamlit_logger
-
-_streamlit_logger.set_log_level("ERROR")

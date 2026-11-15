@@ -7,8 +7,8 @@ the vocabulary, because the logic layer reads them.
 from __future__ import annotations
 
 import pandas as pd
-import streamlit as st
 
+from app.data import cache
 from app.data.sharadar import transport
 
 #: ACTIONS fills the contra columns with the *string* ``"N/A"`` rather than a
@@ -40,7 +40,7 @@ def _fetch_actions(ticker: str, start: str | None = None) -> pd.DataFrame:
     return frame.dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
 
 
-@st.cache_data(show_spinner=False, ttl=60 * 60 * 12)
+@cache.data(ttl=60 * 60 * 12)
 def fetch_actions(ticker: str, start: str | None = None) -> pd.DataFrame:
     """Corporate actions for one ticker, oldest first.
 

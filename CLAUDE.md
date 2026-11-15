@@ -26,8 +26,9 @@ in through Workload Identity Federation as a deployer account that trusts only t
 step to remember — and a change that should not ship yet should not be merged.
 
 `SHARADAR_API_KEY` (fundamentals, prices) comes from the environment or
-`.streamlit/secrets.toml` (gitignored; the data layer reads it through `st.secrets`), and on
-Cloud Run from Secret Manager. Treasury yields come from Yahoo Finance via `yfinance` (`^IRX` short rate, `^TNX`
+`.streamlit/secrets.toml` at the repository root (gitignored; `app/data/settings.py` reads it
+with `tomllib`, and the directory keeps the name the Streamlit app gave it), and on Cloud Run
+from Secret Manager. Treasury yields come from Yahoo Finance via `yfinance` (`^IRX` short rate, `^TNX`
 10-year) and need no key. Tests never need either.
 
 The 🎯 Options page reads a store written by a separate job, `collector/` (Python ≥ 3.12, its
@@ -39,9 +40,10 @@ a `[gcp_service_account]` table. `THETADATA_API_KEY` is the collector's, never t
 
 A web app: React + Mantine in `web/` on Firebase Hosting, over a FastAPI layer in `app/api/` on
 Cloud Run, over the logic and data layers. It replaced a Streamlit front end, removed in November
-2026 once every page had been ported; what is left of Streamlit is a library use in the data layer
-(below). `web/README.md` covers running, regenerating the TypeScript types, and deploying. The
-rules that matter:
+2026 once every page had been ported, and Streamlit itself went with it: nothing imports it and
+`requirements.txt` does not install it (`test_architecture.py` checks the first).
+`web/README.md` covers running, regenerating the TypeScript types, and deploying. The rules that
+matter:
 
 - `app/api/` is the top layer: it fetches through `app/data/` and hands frames to `app/logic/`,
   and it does no arithmetic of its own. Logic a page needs goes in the logic module, where it is
@@ -59,16 +61,20 @@ rules that matter:
   missing is typed `float | None` and converted with `finite_or_none`.
 - Every data route carries `auth.require_user` (a test checks the routes). Sign-in is a Firebase
   ID token plus an email allowlist, and `EQUITI_AUTH=off` is ignored on Cloud Run.
-- The data layer still caches through `st.cache_data` and `st.cache_resource`, which work
-  without a Streamlit server but are per process; it also reads `st.secrets`, and
-  `parallel.gather` carries Streamlit's script-run context into its threads. Those three are why
-  `streamlit` is still in `requirements.txt`. `app/api/__init__.py` turns Streamlit's logging down
-  for them, and is the API's only Streamlit import.
+- The data layer caches through `app/data/cache.py` — `@cache.data(ttl=...)` for values,
+  `@cache.resource()` for a shared client — in process, so each Cloud Run instance starts cold.
+  It replaced `st.cache_data` and kept its rules, each of which something relies on: **an
+  exception is never cached**; **the key is the arguments as passed, defaults not filled in**; **one
+  computation per key at a time** (concurrent misses wait for the first, other keys run alongside);
+  and **every hit is an unpickled copy**, so a caller mutating a frame cannot change the next one's.
+  `tests/test_cache.py` pins each. `cache.clear_all()` empties every cache (the tests' autouse
+  fixture). Keys and settings come from
+  `app/data/settings.py`: the environment first, then `.streamlit/secrets.toml`.
 
 Each feature is three Python layers under the page that draws it (`web/src/pages/<feature>/`):
 
 - `app/api/<feature>.py` — the routes and their response models; no arithmetic
-- `app/logic/<feature>.py` — the math, no Streamlit
+- `app/logic/<feature>.py` — the math: no network, no cache
 - `app/data/` — every external API call, so caching and keys stay in one place
 
 A feature earns a **package** in place of a logic module when it grows several independently
@@ -81,7 +87,8 @@ types and neither may import the other. `app/formatting.py` sits beside it and i
 either: the logic layer builds display strings with it (`StatTile`, the DCF panel's notes).
 
 **The layering is enforced, not just described.** `tests/test_architecture.py` parses `app/` into
-an import graph and fails if a logic module reaches Streamlit, `requests` or `yfinance` — even
+an import graph and fails if anything imports Streamlit; if a logic module reaches `requests`,
+`yfinance`, or the data layer's caches and settings (`app.data.cache`, `app.data.settings`) — even
 transitively, which is how it actually breaks — other than the three orchestrators
 (`logic/research/dataset.py`, `logic/dcf/model.py`, `logic/dcf/inputs.py`); if data imports
 logic; if anything below the API imports it; if the DCF arithmetic reaches `app.data` at all; or
@@ -255,8 +262,8 @@ FastAPI   ── app/data/options_store.py → app/api/options.py   (reads the s
   collector that advanced the chain alone would otherwise leave yesterday's screens under
   today's date. Evaluate still solves its one name from `latest/chains.parquet` (~0.3 s), and the
   filters run server-side (`coverage.py`), so the Screen's expiry choices count only the names on
-  screen. On Cloud Run the reader authenticates as the service's own account. `st.secrets` raises
-  when there is no secrets file, so the fallback to that account is explicit.
+  screen. On Cloud Run the reader authenticates as the service's own account: there is no secrets
+  file there, so no `[gcp_service_account]` table, and the fallback to that account is explicit.
 - **`app/logic/options/` is pure and shared**: no Streamlit, no `thetadata`, no `google` —
   `test_architecture.py` forbids both in logic, and checks `collector/*` reaches only
   `app.logic.options` and `app.options_layout`. The collector's image copies just those.
@@ -475,23 +482,25 @@ more than `Tolerances.spread_table_max_age_months` (15) old, but only when the t
 the cost of debt. Where the base period's interest is zero beside debt or not reported at all, the
 latest of the last three fiscal years that disclosed it supplies the coverage.
 
-**Failed market-data fetches are never cached.** Each `st.cache_data` function in
-`app/data/market_data.py` raises `FetchFailed` (Streamlit does not cache exceptions) and an
-uncached wrapper turns it into `Sourced.unavailable`. Returning the failure from the cached
-function cached a transient outage for a day.
+**Failed market-data fetches are never cached.** Each cached function in
+`app/data/market_data.py` raises `FetchFailed` (`app.data.cache` does not store an exception) and
+an uncached wrapper turns it into `Sourced.unavailable`. Returning the failure from the cached
+function cached a transient outage for a day. `options_store.OptionsStoreError` works the same way.
 
 **The API key never appears in an exception, log line, or export.** Nasdaq only accepts it as a
 query parameter, so errors raised from `sharadar_client` carry the table, ticker, and status —
-never the params or full URL.
+never the params or full URL. A secrets file that will not parse is reported by its path alone,
+because a TOML parser's message can quote the line it stopped on.
 
 Two more Sharadar quirks the client absorbs: `DAILY` reports market cap and EV **in millions**
 while `SF1` reports them raw (a missed conversion passes every sanity check by a factor of a
 million), and rows arrive **unsorted** with truncation at 10,000 rows behind an opaque
 `meta.next_cursor_id` cursor.
 
-One Streamlit quirk it absorbs too: **`st.cache_data` keys on the arguments as written at the
-call site and does not apply defaults**, so `f(t, annual=True)` and `f(t, annual=True, ttm=False)`
-are separate entries for the same request. `fetch_statements` is therefore a plain wrapper that
+One cache rule it works around too: **`app.data.cache` keys on the arguments as passed and does
+not apply defaults** (the rule `st.cache_data` had, kept when the cache replaced it), so
+`f(t, annual=True)` and `f(t, annual=True, ttm=False)` are separate entries for the same request;
+a positional argument and the same one by keyword are one entry. `fetch_statements` is therefore a plain wrapper that
 forwards **positionally** to the cached `_cached_statements`; the cache never sits directly on a
 function with keyword defaults. Before that, one search fetched `MRY` and `MRQ` twice each,
 because the research page spelled all three keywords and the DCF spelled two.
@@ -517,10 +526,10 @@ Everything about loading follows from it:
   `DCF_LINE_MAX_YEARS` (5). Measured cold on AAPL: candles 2.7s, a 5Y line 8.1s; once a company's
   as-reported statements are cached, a further filing costs ~0.1s.
 - **The requests inside a loader go out together**, through `app/data/parallel.gather`, which
-  carries the Streamlit run context into its worker threads and re-raises the first failure in
-  submission order. A tolerated fetch is wrapped in `_tolerant` *before* it is handed over. The
-  ticker's `TICKERS` record goes first and alone, because the statement fetches read it through
-  the cache and concurrent misses would each pay for it.
+  runs them in a thread pool and re-raises the first failure in submission order. A tolerated
+  fetch is wrapped in `_tolerant` *before* it is handed over. The ticker's `TICKERS` record goes
+  first and alone, because the statement fetches read it through the cache, which computes one
+  key once: concurrent misses would sit in worker threads queued behind its one request.
 - **One cache entry per underlying request, shared across tabs.** `_fetch_statements` reads the
   *cached* `fetch_ticker_meta`, price routing reads the cached `fetch_price_tables`, and
   `fetch_ohlcv`, the DCF's `fetch_prices` and the benchmark's `fetch_index_prices` all slice one
@@ -603,9 +612,10 @@ the refactor is wrong or the snapshot needs updating with a stated reason.
 
 Tests take the network away by patching **`app.data.sharadar.transport._get`** — every table
 module calls it through the module attribute, so that one patch reaches all of them. An autouse
-fixture in `conftest.py` clears `st.cache_data` before every test, because the private fetchers
+fixture in `conftest.py` calls `cache.clear_all()` before every test, because the private fetchers
 read each other through the cached public ones and a company cached by one test would otherwise
-answer for the next. A test that
+answer for the next. Another points `settings.SECRETS_FILE` at nothing, so no test can pass on
+the strength of a developer's real key; a test about the file writes its own. A test that
 needs a client internal (`_fetch_statements`, `_sf1_frames`, …) imports the submodule that owns
 it as `sh_<module>`; `sharadar_client` re-exports only the public API.
 

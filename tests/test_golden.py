@@ -502,11 +502,11 @@ def test_a_twd_reporter_is_valued_in_dollars_end_to_end(
 ):
     """DCF_ROUND2_INSTRUCTIONS.md §2.4: drivers from the TWD history, every
     monetary input converted once at spot, the valuation struck in USD."""
-    import streamlit as st
+    from app.data import cache
 
     local = build_model(statements_payload, tickers_response, monkeypatch)
     # The TICKERS record is cached per ticker; the second company reuses it.
-    st.cache_data.clear()
+    cache.clear_all()
     statements, tickers = _twd_inputs()
     _spot(monkeypatch, SPOT_USD_PER_TWD)
     converted = build_model(statements, tickers, monkeypatch)

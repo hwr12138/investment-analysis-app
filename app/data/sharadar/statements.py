@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import pandas as pd
-import streamlit as st
 
+from app.data import cache
 from app.data.sharadar import reference, transport
 from app.data.sharadar.transport import TickerNotFoundError
 from app.data.sharadar.vocabulary import (
@@ -169,7 +169,7 @@ def _fetch_statements(
     )
 
 
-@st.cache_data(show_spinner=False, ttl=60 * 60 * 24 * 3)
+@cache.data(ttl=60 * 60 * 24 * 3)
 def _cached_statements(
     ticker: str, annual: bool, ttm: bool, asreported: bool
 ) -> StatementSet:
@@ -191,8 +191,8 @@ def fetch_statements(
     (includes restatements, indexed to the report period).
 
     The cache sits on ``_cached_statements`` rather than here, and this wrapper
-    exists only to fill the defaults in before the key is built. ``st.cache_data``
-    keys on the arguments *as written at the call site*, without applying
+    exists only to fill the defaults in before the key is built. The cache
+    (:mod:`app.data.cache`) keys on the arguments *as passed*, without applying
     defaults: ``fetch_statements(t, annual=True)`` and
     ``fetch_statements(t, annual=True, ttm=False)`` are the same request but
     hashed differently, and each would fetch the same ``MRY`` rows separately.

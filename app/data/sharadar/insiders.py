@@ -15,8 +15,8 @@ The dollar flow is ``transactionshares × transactionpricepershare``, computed i
 from __future__ import annotations
 
 import pandas as pd
-import streamlit as st
 
+from app.data import cache
 from app.data.sharadar import transport
 
 #: The SF2 columns the app reads, projected with ``qopts.columns``. SF2 carries
@@ -144,7 +144,7 @@ def _order_insider_rows(frame: pd.DataFrame) -> pd.DataFrame:
     return ordered.reset_index(drop=True)
 
 
-@st.cache_data(show_spinner=False, ttl=60 * 60 * 12)
+@cache.data(ttl=60 * 60 * 12)
 def fetch_insider_transactions(ticker: str, since: str | None = None) -> pd.DataFrame:
     """Form 3/4/5 line items for one company, oldest filing first.
 
@@ -174,8 +174,8 @@ def fetch_insider_transactions(ticker: str, since: str | None = None) -> pd.Data
     week TICKERS gets would show a stale roster.
 
     Both parameters are forwarded positionally and neither is keyword-only. Do
-    not add a keyword default here: ``st.cache_data`` keys on the arguments as
-    written at the call site without applying defaults, which is the bug
+    not add a keyword default here: the cache keys on the arguments as passed
+    without applying defaults, which is the bug
     :func:`fetch_statements` exists to work around.
     """
     return _fetch_insider_transactions(ticker, since)

@@ -98,9 +98,9 @@ is flagged rather than quietly corrected. Its thresholds live in one
 ### API keys
 
 `SHARADAR_API_KEY` (fundamentals and prices) is the only key the app needs. Locally
-it is read from the environment or `.streamlit/secrets.toml` (gitignored; the data
-layer still reads it through Streamlit's secrets); on Cloud Run it comes from
-Secret Manager. Treasury yields
+it is read from the environment or `.streamlit/secrets.toml` (gitignored, and read
+with `tomllib` by `app/data/settings.py`; the directory keeps the name the Streamlit
+app gave it); on Cloud Run it comes from Secret Manager. Treasury yields
 come from Yahoo Finance via `yfinance`, which needs no key. Nasdaq Data Link
 only accepts its key as a query parameter, so no exception raised by the client
 carries the request params or URL — the key never appears in a log line, an

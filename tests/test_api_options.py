@@ -147,8 +147,9 @@ def test_screens_solved_from_an_older_close_are_refused_not_served(client, store
 
 
 def test_an_unconfigured_store_is_a_503_that_says_how_to_configure_it(client, monkeypatch):
+    # conftest points the secrets file at nothing; the environment is ours to clear.
     monkeypatch.delenv("OPTIONS_STORE_URI", raising=False)
-    monkeypatch.setattr(options_store.st, "secrets", {})
+    monkeypatch.delenv("OPTIONS_BUCKET", raising=False)
     response = client.get("/api/options/overview")
     assert response.status_code == 503
     assert "OPTIONS_STORE_URI" in response.json()["detail"]

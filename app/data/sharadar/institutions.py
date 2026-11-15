@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import pandas as pd
-import streamlit as st
 
+from app.data import cache
 from app.data.sharadar import transport
 from app.data.sharadar.vocabulary import SF3_SHARES
 
@@ -99,7 +99,7 @@ def _fetch_investor_directory(as_of: str) -> pd.DataFrame:
     return frame.drop_duplicates(subset=["investorid"]).reset_index(drop=True)
 
 
-@st.cache_data(show_spinner=False, ttl=60 * 60 * 24)
+@cache.data(ttl=60 * 60 * 24)
 def fetch_institutional_holders(
     ticker: str, since: str | None = None, investorids: tuple[str, ...] = ()
 ) -> pd.DataFrame:
@@ -126,7 +126,7 @@ def fetch_institutional_holders(
     return _fetch_institutional_holders(ticker, since, investorids)
 
 
-@st.cache_data(show_spinner=False, ttl=60 * 60 * 24)
+@cache.data(ttl=60 * 60 * 24)
 def fetch_institutional_summary(ticker: str) -> pd.DataFrame:
     """SF3A: one row per quarter with the whole 13F register summarised.
 
@@ -139,7 +139,7 @@ def fetch_institutional_summary(ticker: str) -> pd.DataFrame:
     return _fetch_institutional_summary(ticker)
 
 
-@st.cache_data(show_spinner=False, ttl=60 * 60 * 24)
+@cache.data(ttl=60 * 60 * 24)
 def fetch_investor_directory(as_of: str) -> pd.DataFrame:
     """``investorid`` → ``investorname``, for every 13F filer on one date.
 

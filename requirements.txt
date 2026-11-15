@@ -1,7 +1,5 @@
 # The API service (app/api/, deployed to Cloud Run) and the logic and data layers
-# under it. Streamlit is a library here, not a front end: the data layer still
-# caches through st.cache_data and reads st.secrets.
-streamlit>=1.57
+# under it.
 pandas
 scipy
 numpy

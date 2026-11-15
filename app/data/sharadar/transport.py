@@ -6,21 +6,22 @@ modules call it through this module's attribute — ``transport._request_all`` �
 rather than importing the function, so the patch reaches them.
 
 The API key is read from the ``SHARADAR_API_KEY`` environment variable (how
-Cloud Run hands over a Secret Manager secret) or else from ``st.secrets``, and
-never leaves this module. Nasdaq
+Cloud Run hands over a Secret Manager secret) or else from
+``.streamlit/secrets.toml`` (:mod:`app.data.settings`), and never leaves this
+module. Nasdaq
 only accepts it as a query parameter, so no exception raised here carries the
 params or the full URL — only the table, the ticker, and the status.
 """
 
 from __future__ import annotations
 
-import os
 import random
 import time
 
 import pandas as pd
 import requests
-import streamlit as st
+
+from app.data import settings
 
 BASE_URL = "https://data.nasdaq.com/api/v3/datatables/SHARADAR"
 
@@ -40,7 +41,7 @@ class SharadarError(Exception):
     Deliberately carries only the table name, the HTTP status, and the ticker.
     The request URL and query params are never attached — Nasdaq only accepts
     the API key as a query parameter, so anything that echoes the params leaks
-    the key into a traceback, a log line, or a Streamlit error block.
+    the key into a traceback, a log line, or an API error response.
     """
 
     def __init__(
@@ -73,13 +74,11 @@ class TickerNotFoundError(SharadarError):
 
 
 def _api_key() -> str:
-    """The environment's key, else Streamlit's. Never logged, never returned to a caller."""
-    key = os.environ.get("SHARADAR_API_KEY")
-    if not key:
-        try:
-            key = st.secrets.get("SHARADAR_API_KEY")
-        except Exception:  # secrets.toml absent entirely
-            key = None
+    """The environment's key, else the secrets file's. Never logged, never returned to a caller."""
+    try:
+        key = settings.get("SHARADAR_API_KEY")
+    except settings.SettingsError as error:
+        raise SharadarError(str(error)) from None
     if not key:
         raise SharadarError(
             "SHARADAR_API_KEY is not set. Add it to .streamlit/secrets.toml, or set "

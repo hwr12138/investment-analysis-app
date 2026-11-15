@@ -5,9 +5,8 @@ from __future__ import annotations
 from functools import partial
 
 import pandas as pd
-import streamlit as st
 
-from app.data import parallel
+from app.data import cache, parallel
 from app.data.sharadar import reference, transport
 from app.data.sharadar.transport import TickerNotFoundError
 
@@ -42,7 +41,7 @@ def _fetch_price_rows(
     return frame.dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
 
 
-@st.cache_data(show_spinner=False, ttl=3600)
+@cache.data(ttl=3600)
 def _price_rows(ticker: str) -> pd.DataFrame:
     """Every SEP/SFP row for one ticker — the one entry both price shapes slice.
 
@@ -110,7 +109,7 @@ def _fetch_daily_metrics(ticker: str, start: str | None = None) -> pd.DataFrame:
     return _normalise_daily(transport._request_all("DAILY", params, ticker=ticker))
 
 
-@st.cache_data(show_spinner=False, ttl=60 * 60 * 12)
+@cache.data(ttl=60 * 60 * 12)
 def fetch_daily_metrics(ticker: str, start: str | None = None) -> pd.DataFrame:
     """Daily valuation ratios: ``ev evebit evebitda marketcap pb pe ps``.
 
@@ -174,7 +173,7 @@ def _fetch_prices(ticker: str, start: str | None = None) -> pd.DataFrame:
     return out.sort_values("Date").reset_index(drop=True)
 
 
-@st.cache_data(show_spinner=False, ttl=60 * 60 * 12)
+@cache.data(ttl=60 * 60 * 12)
 def fetch_prices(ticker: str, start: str | None = None) -> pd.DataFrame:
     """Daily prices and valuation ratios for one company.
 
@@ -222,7 +221,7 @@ def _fetch_price_history(
     return pd.DataFrame(columns).sort_index().dropna(how="all")
 
 
-@st.cache_data(show_spinner=False, ttl=3600)
+@cache.data(ttl=3600)
 def fetch_price_history(
     tickers: tuple[str, ...], start_date: str, end_date: str
 ) -> pd.DataFrame:
@@ -275,7 +274,7 @@ def _fetch_ohlcv(ticker: str, start_date: str, end_date: str) -> pd.DataFrame:
     return out.set_index("Date")[keep]
 
 
-@st.cache_data(show_spinner=False, ttl=3600)
+@cache.data(ttl=3600)
 def fetch_ohlcv(ticker: str, start_date: str, end_date: str) -> pd.DataFrame:
     """Full OHLCV for one ticker, indexed by date.
 
