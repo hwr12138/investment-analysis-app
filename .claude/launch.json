@@ -7,6 +7,18 @@
       "runtimeArgs": ["run", "streamlit_app.py", "--server.headless", "true"],
       "port": 8502,
       "autoPort": true
+    },
+    {
+      "name": "api",
+      "runtimeExecutable": "env",
+      "runtimeArgs": ["EQUITI_AUTH=off", "python3", "-m", "uvicorn", "app.api.main:app", "--port", "8600", "--reload", "--reload-dir", "app"],
+      "port": 8600
+    },
+    {
+      "name": "web",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "web", "run", "dev", "--", "--strictPort"],
+      "port": 5173
     }
   ]
 }

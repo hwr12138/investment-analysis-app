@@ -69,3 +69,47 @@ def test_a_steady_rsi_has_no_failure_swing():
 def test_divergence_is_read_off_the_two_slopes(prices, indicator, points, expected):
     state, _ = ma.analyze_divergence(*prices, *indicator, points)
     assert state == expected
+
+
+# ---------------------------------------------------------------------------
+# Preparing a window: shared by the Streamlit page and the API
+# ---------------------------------------------------------------------------
+
+
+def _ohlcv(periods=120) -> pd.DataFrame:
+    close = 100 + np.sin(np.arange(periods) / 7.0) * 5
+    return pd.DataFrame(
+        {"Open": close, "High": close + 1, "Low": close - 1, "Close": close},
+        index=pd.bdate_range("2024-01-01", periods=periods),
+    )
+
+
+def test_the_indicators_are_settled_on_the_first_bar_kept():
+    full = _ohlcv()
+    frame = ma.indicator_frame(full, pd.Timestamp("2024-01-01").date())
+    # RSI's 14-day window is the slowest to settle (row 13, as above); nothing
+    # before it survives.
+    assert frame.index[0] == full.index[13]
+    assert not frame.isna().any().any()
+
+
+def test_trimming_happens_after_the_indicators_not_before():
+    full = _ohlcv()
+    start = full.index[60].date()
+    trimmed = ma.indicator_frame(full, start)
+    assert trimmed.index[0] == full.index[60]
+    # Computed over the run-up, so the first kept RSI matches the full series.
+    assert trimmed["RSI"].iloc[0] == ma.calculate_rsi(full).iloc[60]
+
+
+def test_an_anchor_snaps_back_to_the_last_session_on_or_before_it():
+    frame = ma.indicator_frame(_ohlcv(), pd.Timestamp("2024-01-01").date())
+    saturday = pd.Timestamp("2024-03-02")
+    point = ma.anchor_point(frame, saturday.date())
+    assert point.session == pd.Timestamp("2024-03-01")
+    assert point.close == frame.loc["2024-03-01", "Close"]
+
+
+def test_an_anchor_before_the_frame_is_none_rather_than_moved():
+    frame = ma.indicator_frame(_ohlcv(), pd.Timestamp("2024-02-01").date())
+    assert ma.anchor_point(frame, pd.Timestamp("2024-01-15").date()) is None

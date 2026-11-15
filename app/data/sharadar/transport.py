@@ -5,13 +5,16 @@ tests patch ``transport._get`` and nothing else to take the network away. Table
 modules call it through this module's attribute — ``transport._request_all`` —
 rather than importing the function, so the patch reaches them.
 
-The API key is read from ``st.secrets`` and never leaves this module. Nasdaq
+The API key is read from the ``SHARADAR_API_KEY`` environment variable (how
+Cloud Run hands over a Secret Manager secret) or else from ``st.secrets``, and
+never leaves this module. Nasdaq
 only accepts it as a query parameter, so no exception raised here carries the
 params or the full URL — only the table, the ticker, and the status.
 """
 
 from __future__ import annotations
 
+import os
 import random
 import time
 
@@ -70,15 +73,17 @@ class TickerNotFoundError(SharadarError):
 
 
 def _api_key() -> str:
-    """Reads the key from Streamlit secrets. Never logged, never returned to a caller."""
-    try:
-        key = st.secrets.get("SHARADAR_API_KEY")
-    except Exception:  # secrets.toml absent entirely
-        key = None
+    """The environment's key, else Streamlit's. Never logged, never returned to a caller."""
+    key = os.environ.get("SHARADAR_API_KEY")
+    if not key:
+        try:
+            key = st.secrets.get("SHARADAR_API_KEY")
+        except Exception:  # secrets.toml absent entirely
+            key = None
     if not key:
         raise SharadarError(
-            "SHARADAR_API_KEY is not set. Add it to .streamlit/secrets.toml to use "
-            "this page."
+            "SHARADAR_API_KEY is not set. Add it to .streamlit/secrets.toml, or set "
+            "it in the environment, to use this page."
         )
     return str(key)
 

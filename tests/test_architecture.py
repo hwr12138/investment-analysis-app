@@ -240,6 +240,37 @@ def test_shared_root_modules_import_no_layer(module):
 
 
 # ---------------------------------------------------------------------------
+# The API layer — the web frontend's, beside the Streamlit views it replaces
+# ---------------------------------------------------------------------------
+
+
+def test_the_scanner_finds_the_api():
+    assert {"app.api.main", "app.api.momentum"} <= set(_in_layer("app.api"))
+
+
+@pytest.mark.parametrize("module", sorted(set(MODULES) - set(_in_layer("app.api"))))
+def test_nothing_below_the_api_imports_it(module):
+    internal, _ = _imports(module)
+    assert not {name for name in internal if name.startswith("app.api")}
+
+
+@pytest.mark.parametrize("module", _in_layer("app.api"))
+def test_the_api_never_imports_the_streamlit_views(module):
+    """Both are top layers over the same logic; neither may lean on the other."""
+    internal, _ = _imports(module)
+    assert not {name for name in internal if name.startswith(("app.views", "app.charts"))}
+
+
+def test_the_api_imports_streamlit_only_to_quiet_it():
+    """The package ``__init__`` turns Streamlit's logging down, because the data
+    layer still caches through ``st.cache_data``. Nothing else in the API may
+    touch Streamlit; this test goes when the caches move off it."""
+    assert {
+        name for name in _in_layer("app.api") if "streamlit" in _imports(name)[1]
+    } == {"app.api"}
+
+
+# ---------------------------------------------------------------------------
 # Private names stay private
 # ---------------------------------------------------------------------------
 

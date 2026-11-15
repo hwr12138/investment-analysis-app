@@ -1,3 +1,59 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import date
+
+import pandas as pd
+
+#: Lookback windows, in calendar days. Sharadar is queried by date range rather
+#: than by a named period, and MACD needs ~34 sessions of run-up before its
+#: first valid value, so the shortest windows deliberately over-fetch and the
+#: chart is trimmed afterwards.
+PERIOD_DAYS = {"5D": 7, "1M": 31, "3M": 92, "6M": 183, "1Y": 365, "5Y": 1826}
+
+#: Extra calendar days fetched purely to warm up the indicators.
+INDICATOR_WARMUP_DAYS = 90
+
+
+# --- Preparing a window ---
+
+def indicator_frame(ohlcv: pd.DataFrame, window_start: date) -> pd.DataFrame:
+    """OHLCV plus RSI and MACD, computed over the whole fetch, then trimmed to the window.
+
+    Computing before trimming is the point: the first bar kept already has a
+    settled RSI and MACD rather than a warm-up artefact. Rows still warming up
+    are dropped, never filled.
+    """
+    frame = ohlcv.copy()
+    frame["RSI"] = calculate_rsi(frame)
+    frame["MACD"], frame["Signal"], frame["MACD_Hist"] = calculate_macd(frame)
+    return frame.dropna().loc[pd.Timestamp(window_start):]
+
+
+@dataclass(frozen=True)
+class AnchorPoint:
+    """The close and both indicators at one session, for a divergence line."""
+
+    session: pd.Timestamp
+    close: float
+    macd: float
+    rsi: float
+
+
+def anchor_point(frame: pd.DataFrame, day: date) -> AnchorPoint | None:
+    """The last session on or before ``day``; ``None`` when ``day`` precedes the frame."""
+    stamp = pd.Timestamp(day)
+    if frame.index.tz is not None:
+        stamp = stamp.tz_localize(frame.index.tz)
+    session = frame.index.asof(stamp)
+    if pd.isna(session):
+        return None
+    row = frame.loc[session]
+    if isinstance(row, pd.DataFrame):  # a duplicated session: the later row wins
+        row = row.iloc[-1]
+    return AnchorPoint(session, float(row["Close"]), float(row["MACD"]), float(row["RSI"]))
+
+
 # --- Core Indicator Math ---
 
 def calculate_rsi(data, window=14):
