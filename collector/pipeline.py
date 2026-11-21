@@ -298,7 +298,11 @@ def _earnings_stale(store: Store, today: date) -> bool:
     frame = store.read_frame(layout.EARNINGS)
     if frame is None or frame.empty or "fetched" not in frame:
         return True
-    return (today - max(frame["fetched"])).days >= EARNINGS_MAX_AGE_DAYS
+    # Read as either type: a refresh before this was fixed wrote ``fetched`` as a
+    # Timestamp, and subtracting that from a date crashed every run from
+    # 2026-11-18 on, after its fetch and before its manifest.
+    fetched = pd.to_datetime(frame["fetched"]).max().date()
+    return (today - fetched).days >= EARNINGS_MAX_AGE_DAYS
 
 
 def _refresh_earnings(store: Store, log, today: date) -> None:
@@ -308,13 +312,13 @@ def _refresh_earnings(store: Store, log, today: date) -> None:
     except ImportError:
         log("  yfinance not installed; earnings dates not refreshed")
         return
-    today = pd.Timestamp.now(tz="America/New_York").normalize().tz_localize(None)
+    cutoff = pd.Timestamp(today)  # the job's ET date; ``fetched`` stays a date
     rows = []
     for symbol in sorted(universe.SINGLE_STOCKS):
         try:
             dates = yf.Ticker(symbol).get_earnings_dates(limit=8)
             stamps = pd.to_datetime(dates.index).tz_localize(None) if dates is not None else []
-            upcoming = sorted(t for t in stamps if t >= today)
+            upcoming = sorted(t for t in stamps if t >= cutoff)
         except Exception as error:  # noqa: BLE001 — a scrape; recorded, never fatal
             log(f"  earnings for {symbol} failed: {type(error).__name__}")
             continue

@@ -7,6 +7,8 @@ with ``code()``/``details()``) so the normalisation and retry code run for real.
 
 from __future__ import annotations
 
+import sys
+import types
 from datetime import date, timedelta
 
 import pandas as pd
@@ -108,6 +110,10 @@ def _source(client):
 @pytest.fixture
 def store(tmp_path):
     return LocalStore(tmp_path)
+
+
+#: The real refresh, kept before the autouse stub below replaces it.
+_REAL_REFRESH_EARNINGS = pipeline._refresh_earnings
 
 
 @pytest.fixture(autouse=True)
@@ -244,6 +250,44 @@ def test_earnings_refresh_by_age_not_by_weekday(store):
                                                      "fetched": [date(2026, 10, 27)]}))
     assert not pipeline._earnings_stale(store, date(2026, 10, 31))  # Saturday, four days on
     assert pipeline._earnings_stale(store, date(2026, 11, 3))       # the next Tuesday
+
+
+def _fake_yfinance(dates_by_symbol):
+    """Yahoo's answer shape: earnings dates as a tz-aware index, one row each."""
+    def get_earnings_dates(symbol, limit):
+        index = pd.DatetimeIndex(dates_by_symbol.get(symbol, []), name="Earnings Date").tz_localize("America/New_York")
+        return pd.DataFrame({"EPS Estimate": [1.0] * len(index)}, index=index)
+
+    module = types.ModuleType("yfinance")
+    module.Ticker = lambda symbol: types.SimpleNamespace(get_earnings_dates=lambda limit=8: get_earnings_dates(symbol, limit))
+    return module
+
+
+def test_what_the_earnings_refresh_writes_its_staleness_check_can_read(store, monkeypatch):
+    """The refresh and the check, both real, through a store round trip.
+
+    The refresh once wrote ``fetched`` as a Timestamp, and the next run's check
+    subtracted it from a date: every run crashed after its fetch, before its
+    manifest. The test above writes the frame itself, so it could not see it.
+    """
+    monkeypatch.setitem(sys.modules, "yfinance", _fake_yfinance({"MU": ["2026-09-23 16:00", "2026-12-17 16:00"]}))
+    monkeypatch.setattr(pipeline.universe, "SINGLE_STOCKS", frozenset({"MU", "NVDA"}))
+    _REAL_REFRESH_EARNINGS(store, lambda m: None, date(2026, 11, 17))
+
+    frame = store.read_frame(layout.EARNINGS).set_index("symbol")
+    assert frame.loc["MU", "next_earnings"] == date(2026, 12, 17)
+    assert frame.loc["NVDA", "next_earnings"] is None  # nothing upcoming is not a date
+    assert set(frame["fetched"]) == {date(2026, 11, 17)}
+    assert not pipeline._earnings_stale(store, date(2026, 11, 18))
+    assert pipeline._earnings_stale(store, date(2026, 11, 24))
+
+
+def test_earnings_staleness_reads_the_timestamp_the_store_already_holds(store):
+    """The bucket's file from 2026-11-17 carries ``fetched`` as datetime64."""
+    store.write_frame(layout.EARNINGS, pd.DataFrame({"symbol": ["MU"], "next_earnings": [date(2026, 12, 17)],
+                                                     "fetched": pd.to_datetime(["2026-11-17"])}))
+    assert not pipeline._earnings_stale(store, date(2026, 11, 21))
+    assert pipeline._earnings_stale(store, date(2026, 11, 24))
 
 
 def test_daily_solves_the_screens_and_writes_them_before_the_manifest(store):
