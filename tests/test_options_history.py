@@ -106,7 +106,25 @@ def test_no_score_on_a_short_history():
 
 def test_universe_shape():
     assert len(universe.UNIVERSE) == len(set(universe.UNIVERSE))
+    # The API and ``--symbols`` upper-case what they are given before looking it up.
+    assert all(s == s.strip().upper() and s for s in universe.UNIVERSE)
+    assert all(theme.strip() for theme in universe.UNIVERSE.values())
     assert universe.SINGLE_STOCKS <= universe.UNIVERSE.keys()
     assert universe.INDICES <= universe.UNIVERSE.keys()
-    assert set(universe.INDEX_ROOTS) <= universe.INDICES
+    assert set(universe.OPTION_ROOTS) <= universe.UNIVERSE.keys()
+    assert not universe.SINGLE_STOCKS & universe.INDICES
     assert len(universe.universe_hash()) == 12
+
+
+def test_a_duplicate_ticker_is_caught_in_the_source():
+    """A dict literal keeps the last of two equal keys without a word, so read the source."""
+    import ast
+    import inspect
+
+    tree = ast.parse(inspect.getsource(universe))
+    literal = next(
+        node.value for node in ast.walk(tree)
+        if isinstance(node, ast.AnnAssign) and getattr(node.target, "id", None) == "UNIVERSE"
+    )
+    keys = [key.value for key in literal.keys]
+    assert len(keys) == len(set(keys)) == len(universe.UNIVERSE)
