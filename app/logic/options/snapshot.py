@@ -2,8 +2,8 @@
 
 The newest stored chain for the whole universe is turned into one
 :class:`NameSnapshot` per name (spot, solved surface, quotes by expiry) and the
-two cross-sectional tables. Solving ninety-odd surfaces takes about ten
-seconds, so it is done once per stored night: the nightly collector solves it
+two cross-sectional tables. Solving every surface took about ten seconds at
+ninety names, so it is done once per stored night: the nightly collector solves it
 with :func:`solve_screens` and stores the tables (``latest/discover.parquet``
 and its neighbours), which the web API reads instead of solving — a request
 cannot wait ten seconds.

@@ -1,4 +1,4 @@
-// 🎯 Options — buying upside through calls, across ~90 names, from a stored night.
+// 🎯 Options — buying upside through calls, across ~120 names, from a stored night.
 //
 // The shell: the close the page is from (and a banner once that is more than a
 // session behind), the theme and earnings filters, the names that are not on

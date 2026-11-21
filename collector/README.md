@@ -76,13 +76,17 @@ at it (`deploy/README.md`). To deploy by hand, rerun both commands.
 
 ## 5. Backfill the last year, once
 
-This takes about 12–18 hours, because the free tier allows one request at a time.
-Measured locally, each name-month took about 45 s of ThetaData time and 2 s of
-computation. The job checkpoints each finished (name, month) in the manifest, so
-if it stops for any reason, running the same command again picks up where it
-left off. To see the page sooner, backfill a few names first with
-`--args=backfill,--start,2025-10-24,--symbols,GLD,SPY,QQQ`; a later full run
+This takes the better part of a day (12–18 hours when the universe was 90 names),
+because the free tier allows one request at a time. Measured locally, each
+name-month took about 45 s of ThetaData time and 2 s of computation. The job
+checkpoints each finished (name, month) in the manifest, so if it stops for any
+reason, running the same command again picks up where it left off. To see the
+page sooner, backfill a few names first with
+`--args='^;^backfill;--start;2025-10-24;--symbols;GLD,SPY,QQQ'`; a later full run
 skips what is already done.
+
+`--args` splits on commas, so a flag whose value is a list needs another
+delimiter: `^;^` makes it `;`, and the quotes keep the shell off the `;`.
 
 ```bash
 gcloud run jobs execute options-collector --region=REGION --args=backfill,--start,2025-10-24
@@ -134,12 +138,71 @@ gcloud run jobs execute options-collector --region=REGION --args=screens --wait
 
 The image must be rebuilt first (§4) for the job to know the mode.
 
+## Repairing a partly stored session
+
+The free tier releases a session gradually overnight. A run that lands mid-release
+stores only the names already out, and since the next run starts after the newest
+stored session, nobody asks for the rest. The 01:30 ET runs stored 49 of 90 names for
+2026-10-27 and 26 for 2026-11-06 this way. `repair` fetches each name a stored
+session has no metrics row for, then rebuilds the screens. It never moves the
+newest session or the chain the page shows.
+
+```bash
+gcloud run jobs execute options-collector --region=REGION --args='^;^repair;--sessions;2026-10-27,2026-11-06' --wait
+```
+
+Names it still cannot fetch are listed under `repair.errors` in the manifest. A name
+added to the universe after a session has no row for it either, so it is fetched
+too; pass `--symbols` to repair only the names you mean.
+
+## Adding names to the universe
+
+Edit `app/logic/options/universe.py` (its docstring lists what an edit carries with
+it) and merge. The next nightly run follows the new names from its session on, and
+they show no buy-vol score until they have 120 sessions, so backfill them. Two rules:
+
+* **Start no earlier than the listing.** Tickers are reused: `SPCX` was a SPAC fund
+  until 2026-04-06 and has been SpaceX since 2026-06-12, so a backfill from before
+  June would store the fund's options under SpaceX's name. A name whose options are
+  not listed yet (a fresh IPO) needs no backfill: the nightly run picks it up once
+  they are, and until then the page lists it as unavailable, "no option chain".
+* **Backfill each start date as its own execution.** They need not wait for one
+  another or for the night: see *One run at a time* below. At ~45 s a name-month
+  (measured on the original, mostly ETF list), sixty names over a year take about
+  ten hours.
+
+```bash
+gcloud run jobs execute options-collector --region=REGION --args='^;^backfill;--start;2025-10-24;--symbols;AAPL,MSFT'
+```
+
+## One run at a time
+
+The free tier serves one request at a time, and every run rewrites the manifest,
+so two runs at once would fail each other's fetches and undo each other's writes.
+Every mode therefore holds a lease, `options/lock.json`, for its whole run, renewed
+every minute; one that died is taken over ten minutes after its last renewal. A
+run that finds the store held waits: up to half an hour, or up to 20 hours for a
+backfill.
+
+A backfill gives way. A nightly run (or a repair, recompute or screens run) that
+finds one holding the store leaves `options/lock-wanted.json`; the backfill sees it
+between name-months, lets that run through, and carries on after it. So a backfill
+can be started at any hour, and several can be started at once — each queues
+behind the one before. A run that waited past its limit fails, says which run held
+the store, and writes nothing; the next nightly run catches up.
+
+To see who holds the store:
+
+```bash
+gcloud storage cat gs://BUCKET/options/lock.json
+```
+
 ## When a metric's definition changes
 
 Every raw chain is kept in the bucket, so the history can be rebuilt without a
 ThetaData request. Run **Execute with overrides** with the single argument
 `recompute`, or `--args=recompute` from the command line. It takes about 0.1 s
-per name-session, so roughly 40 minutes for a year of 90 names. It rebuilds the screens
+per name-session, so roughly 50 minutes for a year of 116 names. It rebuilds the screens
 afterwards, since the Discover table ranks against the history it restated.
 
 ## Running it locally

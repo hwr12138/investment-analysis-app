@@ -16,7 +16,7 @@ import pytest
 
 from app import options_layout as layout
 from app.logic.options import chain as C
-from app.logic.options import snapshot
+from app.logic.options import snapshot, universe
 from collector import pipeline
 from collector.client import SourceError, ThetaSource, chunks, normalise_chain
 from collector.store import LocalStore
@@ -137,12 +137,22 @@ def test_normalise_chain_takes_the_session_from_the_report_stamp():
     assert set(chain[C.RIGHT]) == {C.CALL, C.PUT}
 
 
-def test_spx_merges_its_two_roots_keeping_spxw_where_they_overlap():
+def test_an_index_merges_its_two_roots_keeping_the_first_where_they_overlap(monkeypatch):
+    monkeypatch.setitem(universe.OPTION_ROOTS, "SPX", ("SPXW", "SPX"))
     client = FakeClient()
     chain = _source(client).option_chain("SPX", date(2026, 10, 23), date(2026, 10, 23))
     assert [c[1] for c in client.calls] == ["SPXW", "SPX"]
     assert set(chain[C.SYMBOL]) == {"SPX"}
     assert not chain.duplicated([C.SESSION, C.EXPIRATION, C.STRIKE, C.RIGHT]).any()
+
+
+def test_berkshire_options_are_fetched_under_their_occ_root_and_stored_under_the_name():
+    client = FakeClient()
+    source = _source(client)
+    chain = source.option_chain("BRK.B", date(2026, 10, 23), date(2026, 10, 23))
+    source.closes("BRK.B", date(2026, 10, 23), date(2026, 10, 23))
+    assert [c[:2] for c in client.calls] == [("option", "BRKB"), ("eod", "BRK.B")]
+    assert set(chain[C.SYMBOL]) == {"BRK.B"}
 
 
 def test_too_many_concurrent_is_retried_and_a_permission_error_is_not():
@@ -221,8 +231,9 @@ def test_recompute_restates_metrics_from_stored_chains_without_a_request(store):
 
 
 def test_chain_paths_round_trip():
-    path = layout.chain_path(date(2026, 10, 23), "SPX")
-    assert layout.parse_chain_path(path) == (date(2026, 10, 23), "SPX")
+    for symbol in ("SPX", "BRK.B"):  # a share class's dot is not the extension
+        path = layout.chain_path(date(2026, 10, 23), symbol)
+        assert layout.parse_chain_path(path) == (date(2026, 10, 23), symbol)
     assert layout.parse_chain_path(layout.METRICS) is None
 
 
@@ -282,6 +293,16 @@ def test_what_the_earnings_refresh_writes_its_staleness_check_can_read(store, mo
     assert pipeline._earnings_stale(store, date(2026, 11, 24))
 
 
+def test_the_earnings_refresh_asks_yahoo_for_berkshire_by_its_hyphenated_name(store, monkeypatch):
+    # Yahoo answers ``BRK.B`` with nothing; the date is under ``BRK-B``.
+    monkeypatch.setitem(sys.modules, "yfinance", _fake_yfinance({"BRK-B": ["2027-03-01 08:00"]}))
+    monkeypatch.setattr(pipeline.universe, "SINGLE_STOCKS", frozenset({"BRK.B"}))
+    _REAL_REFRESH_EARNINGS(store, lambda m: None, date(2026, 11, 21))
+
+    frame = store.read_frame(layout.EARNINGS).set_index("symbol")
+    assert frame.loc["BRK.B", "next_earnings"] == date(2027, 3, 1)
+
+
 def test_earnings_staleness_reads_the_timestamp_the_store_already_holds(store):
     """The bucket's file from 2026-11-17 carries ``fetched`` as datetime64."""
     store.write_frame(layout.EARNINGS, pd.DataFrame({"symbol": ["MU"], "next_earnings": [date(2026, 12, 17)],
@@ -328,3 +349,173 @@ def test_a_recompute_rebuilds_the_screens_from_the_restated_history(store):
     manifest = pipeline.run_recompute(store, ["GLD"], log=lambda m: None)
     assert manifest["screens"]["session"] == "2026-10-27"
     assert list(store.read_frame(layout.DISCOVER)["symbol"]) == ["GLD"]
+
+
+def _partly_stored(store):
+    """Three sessions as a run inside the free tier's release leaves them: SPY's chains not out yet."""
+    store.write_json(layout.MANIFEST, {"last_session": "2026-10-22"})
+    client = FakeClient(fail={"SPY": NoDataFoundError()})
+    pipeline.run_daily(_source(client), store, ["GLD", "SPY"], date(2026, 10, 28), log=lambda m: None)
+
+
+def test_repair_fetches_only_the_names_a_session_is_missing(store):
+    _partly_stored(store)
+    assert set(store.read_frame(layout.METRICS)["symbol"]) == {"GLD"}
+    latest = store.read_bytes(layout.LATEST_CHAINS)
+    (store.root / layout.DISCOVER).unlink()
+
+    client = FakeClient()
+    manifest = pipeline.run_repair(_source(client), store, ["GLD", "SPY"], [date(2026, 10, 26)], log=lambda m: None)
+
+    assert [c[1:4] for c in client.calls if c[0] == "option"] == [("SPY", date(2026, 10, 26), date(2026, 10, 26))]
+    metrics = store.read_frame(layout.METRICS)
+    assert list(metrics[metrics["symbol"] == "SPY"]["session"]) == [date(2026, 10, 26)]
+    assert metrics["atm_iv_30"].notna().all()
+    assert store.read_frame(layout.chain_path(date(2026, 10, 26), "SPY")) is not None
+    # The night the page shows is untouched; its screens are rebuilt over the longer history.
+    assert manifest["last_session"] == "2026-10-27"
+    assert store.read_bytes(layout.LATEST_CHAINS) == latest
+    assert manifest["screens"]["session"] == "2026-10-27" and store.read_frame(layout.DISCOVER) is not None
+    assert manifest["repair"]["repaired"] == 1 and manifest["repair"]["errors"] == {}
+    assert store.read_json(layout.MANIFEST) == manifest
+
+    again = FakeClient()
+    manifest = pipeline.run_repair(_source(again), store, ["GLD", "SPY"], [date(2026, 10, 26)], log=lambda m: None)
+    assert not [c for c in again.calls if c[0] == "option"] and manifest["repair"]["repaired"] == 0
+
+
+def test_a_name_still_missing_after_a_repair_is_recorded(store):
+    _partly_stored(store)
+    client = FakeClient(fail={"SPY": NoDataFoundError()})
+    manifest = pipeline.run_repair(_source(client), store, ["GLD", "SPY"], [date(2026, 10, 26)], log=lambda m: None)
+    assert manifest["repair"]["errors"] == {"SPY:2026-10-26": "no option chain"}
+    assert set(store.read_frame(layout.METRICS)["symbol"]) == {"GLD"}
+
+
+def test_repair_refuses_the_daily_runs_sessions_and_days_that_are_not_sessions(store):
+    with pytest.raises(SourceError, match="no completed daily run"):
+        pipeline.run_repair(_source(FakeClient()), store, ["SPY"], [date(2026, 10, 26)], log=lambda m: None)
+    _partly_stored(store)
+    before = store.read_json(layout.MANIFEST)
+    with pytest.raises(SourceError, match="the daily run fetches it"):
+        pipeline.run_repair(_source(FakeClient()), store, ["SPY"], [date(2026, 10, 28)], log=lambda m: None)
+    with pytest.raises(SourceError, match="is not a session"):
+        pipeline.run_repair(_source(FakeClient()), store, ["SPY"], [date(2026, 10, 24)], log=lambda m: None)  # a Saturday
+    assert store.read_json(layout.MANIFEST) == before
+
+
+def test_the_repair_mode_needs_its_sessions(monkeypatch, tmp_path, capsys):
+    from collector import main
+
+    monkeypatch.setenv("THETADATA_API_KEY", "not-a-key")
+    with pytest.raises(SystemExit):
+        main.main(["repair", "--store", f"file://{tmp_path}"])
+    assert "repair needs --sessions" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# One run at a time (collector.lease)
+# ---------------------------------------------------------------------------
+
+
+def test_a_nightly_run_in_the_middle_of_a_backfill_keeps_its_session_and_screens(store):
+    """The backfill gives way between months and does not write back a stale manifest.
+
+    It used to hold the manifest it read at its start and write it back after
+    every name-month, so a nightly run that finished in between had its newest
+    session and screens rolled back by the backfill's next write.
+    """
+    from collector.lease import GuardedStore, Lease
+
+    class Clock:
+        now = 1_000_000.0
+
+        def __call__(self):
+            return self.now
+
+    clock = Clock()
+    hooks = []
+
+    def sleep(seconds):
+        clock.now += seconds
+        if hooks:
+            hooks.pop(0)()
+
+    def lease(mode):
+        return Lease(store, mode, owner=mode, clock=clock, sleep=sleep, log=lambda m: None, renew=False)
+
+    backfill, daily = lease("backfill"), lease("daily")
+
+    class AskedAfterOneMonth(FakeClient):
+        def option_history_eod(self, **kwargs):
+            out = super().option_history_eod(**kwargs)
+            if len([c for c in self.calls if c[0] == "option"]) == 1:
+                daily.ask()  # the nightly run arrives while September is being fetched
+            return out
+
+    nightly = {}
+
+    def nightly_run():
+        daily.acquire(max_wait=0)
+        nightly.update(pipeline.run_daily(
+            _source(FakeClient()), GuardedStore(store, daily), ["GLD", "SPY"], date(2026, 10, 31), log=lambda m: None
+        ))
+        daily.release()
+
+    hooks.append(nightly_run)
+    backfill.acquire()
+    client = AskedAfterOneMonth()
+    pipeline.run_backfill(
+        _source(client), GuardedStore(store, backfill), ["GLD"], date(2026, 9, 1), date(2026, 10, 23),
+        lease=backfill, log=lambda m: None,
+    )
+    backfill.release()
+
+    assert nightly["last_session"] == "2026-10-30"
+    manifest = store.read_json(layout.MANIFEST)
+    assert manifest["last_session"] == "2026-10-30"
+    assert manifest["screens"]["session"] == "2026-10-30"
+    assert manifest["backfill"]["done"] == ["GLD:2026-09", "GLD:2026-10"]
+    metrics = store.read_frame(layout.METRICS)
+    assert {"GLD", "SPY"} <= set(metrics["symbol"])
+    assert date(2026, 10, 30) in set(pd.to_datetime(metrics["session"]).dt.date)
+
+
+def test_a_backfill_records_a_failure_after_its_last_finished_month(store):
+    client = FakeClient(fail={"SPY": RpcError("PERMISSION_DENIED", "not on this tier")})
+    pipeline.run_backfill(_source(client), store, ["GLD", "SPY"], date(2026, 10, 1), date(2026, 10, 23), log=lambda m: None)
+    manifest = store.read_json(layout.MANIFEST)
+    assert manifest["backfill"]["done"] == ["GLD:2026-10"]
+    assert "SPY:2026-10" in manifest["backfill_errors"]
+
+
+def test_a_run_that_cannot_have_the_store_writes_nothing_and_names_the_holder(monkeypatch, tmp_path, capsys):
+    from collector import lease as lease_module
+    from collector import main
+    from collector.lease import Lease
+
+    held = Lease(LocalStore(tmp_path), "backfill", owner="backfill on job-abc", log=lambda m: None, renew=False)
+    held.acquire()
+    monkeypatch.setattr(lease_module, "DEFAULT_MAX_WAIT_SECONDS", 0)
+    monkeypatch.setenv("THETADATA_API_KEY", "not-a-key")
+    monkeypatch.setattr(main.ThetaSource, "connect", classmethod(lambda cls, key: pytest.fail("fetched without the store")))
+
+    assert main.main(["daily", "--store", f"file://{tmp_path}"]) == 1
+    assert "in use by backfill on job-abc" in capsys.readouterr().err
+    assert LocalStore(tmp_path).read_json(layout.MANIFEST) is None
+    assert held.holder()["owner"] == "backfill on job-abc"
+
+
+def test_the_store_is_released_when_a_run_fails(monkeypatch, tmp_path, capsys):
+    from collector import main
+
+    monkeypatch.setenv("THETADATA_API_KEY", "not-a-key")
+    monkeypatch.setattr(main.ThetaSource, "connect", classmethod(lambda cls, key: _source(FakeClient())))
+
+    def fails(*args, **kwargs):
+        raise SourceError("ThetaData is down")
+
+    monkeypatch.setattr(main.pipeline, "run_daily", fails)
+    assert main.main(["daily", "--store", f"file://{tmp_path}"]) == 1
+    assert "ThetaData is down" in capsys.readouterr().err
+    assert LocalStore(tmp_path).read_bytes(layout.LOCK) is None

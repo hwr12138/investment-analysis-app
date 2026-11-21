@@ -239,7 +239,7 @@ fetches the company and that day's rates; `resolve` and `evaluate` take what the
 
 The one page that fetches nothing from a vendor. ThetaData's free tier — the source — serves
 **one request at a time** at ~1–2.5 s of server time per session, refuses the current day, and has
-no open interest or greeks, so ~90 names cannot be fetched while a page loads. Instead:
+no open interest or greeks, so ~120 names cannot be fetched while a page loads. Instead:
 
 ```
 Cloud Scheduler → Cloud Run job  collector/  (thetadata, python 3.12) ─┐ imports only
@@ -254,8 +254,8 @@ FastAPI   ── app/data/options_store.py → app/api/options.py   (reads the s
   **last** by every run, so a reader can trust whatever a manifest names; `latest/chains.parquet`
   is the only chain the page reads; `metrics/daily.parquet` (one row per name per session) is all
   the history panels read. Bump `PREFIX` to change a stored shape.
-- **The collector also solves the screens.** Solving all ~90 surfaces takes ~12 s, too slow for
-  a request. So every daily run (and
+- **The collector also solves the screens.** Solving every surface took ~12 s at 90 names, too
+  slow for a request. So every daily run (and
   `recompute`, and the offline `screens` mode) writes `latest/discover|spreads|expirations.parquet`
   through `snapshot.solve_screens` and records `screens.session` in the manifest. The API
   **refuses tables solved from an older close than `last_session`** (503), because an older
@@ -297,9 +297,25 @@ FastAPI   ── app/data/options_store.py → app/api/options.py   (reads the s
   chains (~0.1 s a row). **Buy-vol score**
   = 50 × mean(−z IV, −z(IV − RV21), −z skew) against the name's own year — our definition, shown
   on the page. Both need `min_history_sessions` (120) or show nothing.
-- **The universe is curated** (`universe.py`, 90 names transcribed from the reference page, with
-  theme labels as reading aids) — a printed judgement like `FILER_FAMILIES`. SPX is two roots,
-  `SPXW` and `SPX`, merged with `SPXW` winning an overlap.
+- **The free tier releases a session gradually overnight**. Since November 2026 it has finished
+  between 01:30 and 07:00 ET, and a run inside that window stores only part of the session. The
+  daily run never fetches a stored session again, so `repair --sessions …` fetches the names a
+  session is missing (Oct 27 and Nov 6, 2026 were stored with 49 and 26 of 90).
+- **One run at a time** (`collector/lease.py`). ThetaData serves one request at a time and every
+  run rewrites the manifest, so every mode holds `options/lock.json` (outside `PREFIX`: the limit is
+  the account's) for its whole run — an exclusive create, renewed every minute, taken over ten
+  minutes after a dead run's last renewal — and writes through `GuardedStore`, which refuses once
+  the lease is lost. A backfill holds it for hours, so it **gives way**: a waiting run leaves
+  `options/lock-wanted.json`, the backfill releases between name-months, and it **re-reads the
+  manifest before every write** (it once wrote back the one it read at its start, rolling a nightly
+  run's newest session and screens back).
+- **The universe is curated** (`universe.py`: ETFs and single stocks, with theme labels as reading
+  aids) — a printed judgement like `FILER_FAMILIES`. A stock must be in `SINGLE_STOCKS` too, or it
+  gets no earnings date and the earnings filter passes it silently. `OPTION_ROOTS` maps a name to
+  the roots its options list under where they differ: `BRK.B` lists as `BRKB` (and Yahoo wants
+  `BRK-B`, so the earnings refresh asks for that); SPX, while it was followed, was `SPXW` and
+  `SPX`, merged with `SPXW` winning an overlap. **Tickers are reused**: `SPCX` was a SPAC fund
+  until 2026-04-06 and SpaceX from 2026-06-12, so a new name's backfill starts at its listing.
 - **Cboe vol indices are not an input.** Yahoo still has history for only VIX/VXN/VXD/GVZ/OVX, and
   GVZ sits 0.5–5.3 vol points above GLD's 30d ATM IV with a moving gap (it includes the wings).
 - The repo is public and ThetaData's data is licensed, so **no real chain is committed**:

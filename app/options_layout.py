@@ -22,6 +22,11 @@ the page moves over when it is deployed.
   row per symbol per session — every history panel reads only this.
 * ``chains/session=…/<SYM>.parquet`` keeps every raw chain fetched, so metrics
   can be recomputed when a definition changes without paying for the fetch again.
+
+:data:`LOCK` and :data:`LOCK_WANTED` are the collector's alone
+(:mod:`collector.lease`) and sit outside :data:`PREFIX`: they keep two runs from
+sharing ThetaData, whose limit of one request at a time is the account's, not
+one stored shape's.
 """
 
 from __future__ import annotations
@@ -42,6 +47,9 @@ CLOSES = f"{PREFIX}/ref/closes.parquet"
 
 
 CHAINS = f"{PREFIX}/chains/"
+
+LOCK = "options/lock.json"
+LOCK_WANTED = "options/lock-wanted.json"
 
 
 def chain_path(session: date, symbol: str) -> str:

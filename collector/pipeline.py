@@ -1,5 +1,8 @@
 """The two runs: nightly catch-up, and the one-time history backfill.
 
+(And the store-only ``recompute`` and ``screens``, and :func:`run_repair`, which
+fetches the names a stored session is missing.)
+
 Both end every unit of work the same way — chain files, then the closes and
 rates it read, then ``metrics/daily.parquet``, then **the manifest last** — so a
 run killed at any point leaves a manifest that names only what was finished.
@@ -34,6 +37,7 @@ from app.logic.options import freshness, history, snapshot, universe
 from app.logic.options.rates import CURVE_MAX_STALENESS_DAYS, curve_on
 from app.logic.options.tolerances import DEFAULT
 from collector.client import SourceError, ThetaSource, chunks
+from collector.lease import Lease
 from collector.store import Store
 
 COLLECTOR_VERSION = "1"
@@ -206,17 +210,25 @@ def run_daily(source: ThetaSource, store: Store, symbols, today: date, *, log: C
 
 
 def run_backfill(
-    source: ThetaSource, store: Store, symbols, start: date, end: date, *, log: Callable[[str], None] = print
+    source: ThetaSource, store: Store, symbols, start: date, end: date, *,
+    lease: Lease | None = None, log: Callable[[str], None] = print,
 ) -> dict:
-    manifest = load_manifest(store)
-    progress = manifest.setdefault("backfill", {"start": start.isoformat(), "end": end.isoformat(), "done": []})
-    done = set(progress["done"])
+    """Every session from ``start`` to ``end`` for ``symbols``, a calendar month per request.
+
+    Each finished (name, month) is checkpointed in the manifest, so a rerun
+    resumes. A backfill takes hours, so under a ``lease`` it gives the store to
+    any run waiting for it between name-months (:mod:`collector.lease`), and it
+    re-reads the manifest before every write: writing back the one it read at
+    its start would undo whatever ran in the meantime.
+    """
+    done = _backfill_done(store)
+    errors: dict[str, str] = {}
+    cleared: set[str] = set()
 
     closes, close_errors = _fetch_closes(source, symbols, start - timedelta(days=_CLOSES_LEAD_DAYS), end, log)
     rates = source.treasury(start - timedelta(days=CURVE_MAX_STALENESS_DAYS + 3), end)
     _merge(store, layout.CLOSES, _closes_frame(closes), ["symbol", "session"])
     _merge(store, layout.RATES, rates, ["session", "tenor"])
-    errors = manifest.setdefault("backfill_errors", {})
 
     for symbol in symbols:
         if symbol in close_errors:
@@ -226,6 +238,11 @@ def run_backfill(
             key = f"{symbol}:{a:%Y-%m}"
             if key in done:
                 continue
+            if lease is not None and lease.should_give_way():
+                lease.give_way()
+                done |= _backfill_done(store)  # another backfill may have had the store meanwhile
+                if key in done:
+                    continue
             try:
                 raw = source.option_chain(symbol, a, b, max_dte=BACKFILL_MAX_DTE)
             except SourceError as error:
@@ -244,10 +261,28 @@ def run_backfill(
                 _merge(store, layout.METRICS, pd.DataFrame(rows, columns=list(history.METRIC_COLUMNS)), ["symbol", "session"])
             done.add(key)
             errors.pop(key, None)
-            progress["done"] = sorted(done)
-            manifest.update(universe_hash=universe.universe_hash(), collector_version=COLLECTOR_VERSION, written_at=_now())
-            store.write_json(layout.MANIFEST, manifest)
+            cleared.add(key)
+            _record_backfill(store, start, end, done, errors, cleared)
             log(f"{key}: {len(rows)} sessions ({source.requests} requests so far)")
+    # Once more, so failures after the last finished month are recorded too.
+    return _record_backfill(store, start, end, done, errors, cleared)
+
+
+def _backfill_done(store: Store) -> set[str]:
+    return set(load_manifest(store).get("backfill", {}).get("done", []))
+
+
+def _record_backfill(store: Store, start: date, end: date, done: set[str], errors: dict[str, str], cleared: set[str]) -> dict:
+    """Write this backfill's progress into the manifest as it is now, leaving every other key alone."""
+    manifest = load_manifest(store)
+    progress = manifest.setdefault("backfill", {"start": start.isoformat(), "end": end.isoformat(), "done": []})
+    progress["done"] = sorted(set(progress.get("done", [])) | done)
+    stored = manifest.setdefault("backfill_errors", {})
+    for key in cleared:
+        stored.pop(key, None)
+    stored.update(errors)
+    manifest.update(universe_hash=universe.universe_hash(), collector_version=COLLECTOR_VERSION, written_at=_now())
+    store.write_json(layout.MANIFEST, manifest)
     return manifest
 
 
@@ -289,6 +324,76 @@ def run_recompute(store: Store, symbols, *, log: Callable[[str], None] = print) 
     return manifest
 
 
+def run_repair(
+    source: ThetaSource, store: Store, symbols, sessions, *, log: Callable[[str], None] = print
+) -> dict:
+    """Fetches again the names a stored session is missing.
+
+    The daily run starts after ``last_session``, so each session is fetched once.
+    A run that lands while the free tier is still releasing a session stores only
+    the names already out, and no later run asks for the rest: the 01:30 ET runs
+    kept 49 of 90 names for 2026-10-27 and 26 for 2026-11-06. This fetches each
+    name in ``symbols`` that has no metrics row for a session, as :func:`run_daily`
+    would, then rebuilds the screens, whose percentiles read that history.
+
+    It never moves ``last_session`` or ``latest/chains.parquet``: a session after
+    ``last_session`` is the daily run's to fetch, and is refused here.
+    """
+    manifest = load_manifest(store)
+    if not manifest.get("last_session"):
+        raise SourceError("The store has no completed daily run to repair")
+    last = date.fromisoformat(manifest["last_session"])
+    sessions = sorted(set(sessions))
+    if later := [s.isoformat() for s in sessions if s > last]:
+        raise SourceError(f"{', '.join(later)} is after the last stored session, {last}: the daily run fetches it")
+    closes_frame, rates = store.read_frame(layout.CLOSES), store.read_frame(layout.RATES)
+    if closes_frame is None or rates is None:
+        raise SourceError("The store has no closes or rates to repair with")
+    closes = {s: g.set_index("session")["close"].sort_index() for s, g in closes_frame.groupby("symbol")}
+    calendar = closes.get(CALENDAR_SYMBOL, pd.Series(dtype=float)).index
+    if not_sessions := [s.isoformat() for s in sessions if s not in calendar]:
+        raise SourceError(f"{', '.join(not_sessions)} has no stored {CALENDAR_SYMBOL} close, so is not a session")
+
+    stored = _stored_metrics(store)
+    have = set(zip(stored["symbol"], pd.to_datetime(stored["session"]).dt.date))
+    rows, errors = [], {}
+    for session in sessions:
+        missing = [s for s in symbols if (s, session) not in have]
+        log(f"{session}: {len(missing)} of {len(symbols)} names missing")
+        for symbol in missing:
+            key = f"{symbol}:{session}"
+            try:
+                chain = source.option_chain(symbol, session, session)
+            except SourceError as error:
+                errors[key] = str(error)
+                continue
+            if chain.empty:
+                errors[key] = "no option chain"
+                continue
+            store.write_frame(layout.chain_path(session, symbol), chain)
+            row, problem = _metrics_row(symbol, chain, session, closes, rates)
+            if row is None:
+                errors[key] = problem
+                continue
+            rows.append(row)
+
+    if rows:
+        frame = pd.DataFrame(rows, columns=list(history.METRIC_COLUMNS))
+        _merge(store, layout.METRICS, frame, ["symbol", "session"])
+        latest = store.read_frame(layout.LATEST_CHAINS)
+        if latest is not None:
+            manifest["screens"] = write_screens(store, last, latest, _stored_metrics(store), rates, log=log)
+    for key, error in errors.items():
+        log(f"  {key} still missing: {error}")
+    manifest["repair"] = {
+        "sessions": [s.isoformat() for s in sessions], "repaired": len(rows), "errors": errors, "at": _now(),
+    }
+    manifest.update(written_at=_now())
+    store.write_json(layout.MANIFEST, manifest)
+    log(f"Repaired {len(rows)} name-sessions, {len(errors)} still missing ({source.requests} requests)")
+    return manifest
+
+
 #: Earnings dates are refreshed once they are this old. By age, not by weekday:
 #: the job runs Tuesday to Saturday, so a "refresh on Mondays" rule never fired.
 EARNINGS_MAX_AGE_DAYS = 6
@@ -305,6 +410,11 @@ def _earnings_stale(store: Store, today: date) -> bool:
     return (today - fetched).days >= EARNINGS_MAX_AGE_DAYS
 
 
+def _yahoo_symbol(symbol: str) -> str:
+    """Yahoo writes a share class with a hyphen: ``BRK.B`` finds nothing, ``BRK-B`` does."""
+    return symbol.replace(".", "-")
+
+
 def _refresh_earnings(store: Store, log, today: date) -> None:
     """Next earnings date for each single stock, from Yahoo. ETFs have none."""
     try:
@@ -316,7 +426,7 @@ def _refresh_earnings(store: Store, log, today: date) -> None:
     rows = []
     for symbol in sorted(universe.SINGLE_STOCKS):
         try:
-            dates = yf.Ticker(symbol).get_earnings_dates(limit=8)
+            dates = yf.Ticker(_yahoo_symbol(symbol)).get_earnings_dates(limit=8)
             stamps = pd.to_datetime(dates.index).tz_localize(None) if dates is not None else []
             upcoming = sorted(t for t in stamps if t >= cutoff)
         except Exception as error:  # noqa: BLE001 — a scrape; recorded, never fatal

@@ -132,7 +132,7 @@ class ThetaSource:
     def option_chain(self, symbol: str, start: date, end: date, max_dte: int | None = None) -> pd.DataFrame:
         """Every contract's EOD row for ``symbol`` over the range, all roots merged."""
         frames = []
-        for root in universe.INDEX_ROOTS.get(symbol, (symbol,)):
+        for root in universe.OPTION_ROOTS.get(symbol, (symbol,)):
             for a, b in chunks(start, end, months=True):
                 kwargs = dict(start_date=a, end_date=b, symbol=root, expiration="*")
                 if max_dte is not None:
@@ -141,7 +141,7 @@ class ThetaSource:
                 frames.append(normalise_chain(raw, symbol))
         chain = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=list(C.COLUMNS))
         # One expiry can be listed under two roots (SPXW and SPX); the first root
-        # in INDEX_ROOTS wins.
+        # in OPTION_ROOTS wins. Rows carry the name, never the root.
         key = [C.SESSION, C.EXPIRATION, C.STRIKE, C.RIGHT]
         return chain.drop_duplicates(subset=key, keep="first").reset_index(drop=True)
 
