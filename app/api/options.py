@@ -298,7 +298,7 @@ def _filtered(
     themes: set[str] | None, window: int,
 ) -> tuple[list[str], list[str]]:
     """The visible names, and the ones the earnings window took out of the themes kept."""
-    names = dict(zip(discover["symbol"], discover["theme"]))
+    names = coverage.themes_of(discover["symbol"])
     hidden = coverage.hidden_for_earnings(earnings, session, window)
     kept = coverage.visible(names, themes, ())
     return coverage.visible(names, themes, hidden), [s for s in kept if s in hidden]
@@ -338,7 +338,7 @@ def overview(
         {} if earnings is None or earnings.empty
         else dict(zip(earnings["symbol"], earnings["next_earnings"]))
     )
-    themes_of = dict(zip(discover["symbol"], discover["theme"]))
+    themes_of = coverage.themes_of(discover["symbol"])
     try:
         written_at = datetime.fromisoformat(manifest.get("written_at", ""))
     except ValueError:
@@ -349,8 +349,8 @@ def overview(
         sessions_behind=freshness.sessions_behind(session, _today_et()),
         themes=sorted(set(themes_of.values())),
         names=[
-            Name(symbol=s, theme=themes_of[s], next_earnings=_date_or_none(next_earnings.get(s)))
-            for s in universe.UNIVERSE if s in themes_of
+            Name(symbol=s, theme=theme, next_earnings=_date_or_none(next_earnings.get(s)))
+            for s, theme in themes_of.items()
         ],
         visible=visible,
         hidden_for_earnings=hidden,
@@ -402,7 +402,7 @@ def discover(
         rows=[
             DiscoverRow(
                 symbol=row["symbol"],
-                theme=row["theme"],
+                theme=universe.UNIVERSE[row["symbol"]],
                 spot=float(row["spot"]),
                 score=finite_or_none(row["score"]),
                 z_iv=finite_or_none(row["z IV level"]),
@@ -456,7 +456,7 @@ def screen(
         rows=[
             Spread(
                 symbol=row["symbol"],
-                theme=row["theme"],
+                theme=universe.UNIVERSE[row["symbol"]],
                 move=float(row["move"]),
                 long_strike=float(row["long_strike"]),
                 short_strike=float(row["short_strike"]),

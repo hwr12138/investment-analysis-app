@@ -37,6 +37,22 @@ def test_visible_keeps_universe_order_and_the_chosen_themes():
     assert coverage.visible(themes, set(), set()) == []
 
 
+def test_a_stored_name_takes_its_theme_from_the_universe_and_one_taken_out_is_dropped():
+    # The order the names were stored in is not the order they are shown in.
+    assert coverage.themes_of(["GLD", "ZZZZ", "MU", "SPY", "GLD"]) == {
+        "SPY": universe.UNIVERSE["SPY"], "MU": universe.UNIVERSE["MU"], "GLD": universe.UNIVERSE["GLD"],
+    }
+    assert list(coverage.themes_of(["GLD", "MU", "SPY"])) == ["SPY", "MU", "GLD"]
+    assert coverage.themes_of([]) == {}
+
+
+def test_a_name_taken_out_of_the_universe_is_not_listed_as_missing():
+    manifest = {"symbols": {"SLV": {"error": "option EOD SLV: INVALID_ARGUMENT"}, "ZZZZ": {"error": "no data"}}}
+    assert coverage.unavailable(manifest, {"YYYY": "no close for the session"}) == {
+        "SLV": "option EOD SLV: INVALID_ARGUMENT",
+    }
+
+
 def test_a_failed_fetch_and_an_unpriced_chain_are_both_listed_with_their_reason():
     manifest = {"symbols": {"GLD": {"error": None}, "SLV": {"error": "option EOD SLV: INVALID_ARGUMENT"}}}
     assert coverage.unavailable(manifest, {"SPY": "no close for the session"}) == {

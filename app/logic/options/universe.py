@@ -5,7 +5,10 @@
 classification: Sharadar's sector labels cover stocks and say nothing useful
 about a silver-miners ETF, and a name sits where a reader would look for it.
 Edit this file to change the universe; the collector picks the change up on its
-next run and the manifest records the list's hash.
+next run and the manifest records the list's hash. The page reads each name's
+theme from here, not from the stored tables, so once the API deploys a renamed
+or moved theme shows and a name taken out leaves; a name added shows after the
+collector's next run.
 
 An edit carries three things with it:
 
