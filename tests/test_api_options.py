@@ -131,6 +131,40 @@ def test_an_unknown_theme_is_refused(client, store):
     assert "Gold" in response.json()["detail"]
 
 
+def test_themes_are_the_universes_not_those_the_stored_tables_were_solved_under(client, store):
+    # The night was solved under an older universe: GLD sat under a theme renamed
+    # since, and OLD has been taken out. Its rows are still in the tables, and it
+    # failed that night, as did GONE's chain.
+    for path in (layout.DISCOVER, layout.SPREADS):
+        table = store.read_frame(path)
+        table.loc[table["symbol"] == "GLD", "theme"] = "Commodities"
+        old = table[table["symbol"] == "SPY"].assign(symbol="OLD", theme="Clean Energy")
+        store.write_frame(path, pd.concat([table, old], ignore_index=True))
+    manifest = store.read_json(layout.MANIFEST)
+    manifest["symbols"]["OLD"] = {"error": "option EOD OLD: no data"}
+    manifest["screens"]["unpriced"] = {"GONE": "no expiry had enough two-sided quotes"}
+    store.write_json(layout.MANIFEST, manifest)
+    assert "OLD" not in universe.UNIVERSE and "GONE" not in universe.UNIVERSE
+    assert universe.UNIVERSE["GLD"] == "Metals"
+
+    body = _strict(client.get("/api/options/overview"))
+    assert body["themes"] == ["Benchmark", "Metals", "Semiconductors"]
+    assert [n["symbol"] for n in body["names"]] == ["SPY", "MU", "GLD"]
+    assert body["visible"] == ["SPY", "GLD"]
+    assert [u["symbol"] for u in body["unavailable"]] == ["SLV"]
+    for theme in body["themes"]:  # every theme the filter offers is one it takes
+        _strict(client.get("/api/options/overview", params={"themes": [theme]}))
+    assert _strict(client.get("/api/options/overview", params={"themes": ["Metals"]}))["visible"] == ["GLD"]
+
+    rows = _strict(client.get("/api/options/discover"))["rows"]
+    assert {r["symbol"]: r["theme"] for r in rows} == {"SPY": "Benchmark", "GLD": "Metals"}
+    rows = _strict(client.get("/api/options/screen"))["rows"]
+    assert rows and {r["symbol"]: r["theme"] for r in rows} == {
+        r["symbol"]: universe.UNIVERSE[r["symbol"]] for r in rows
+    }
+    assert "OLD" not in {r["symbol"] for r in rows}
+
+
 def test_a_store_two_sessions_behind_says_so(client, store, monkeypatch):
     monkeypatch.setattr(options_api, "_today_et", lambda: date(2026, 10, 28))
     assert _strict(client.get("/api/options/overview"))["sessions_behind"] == 2

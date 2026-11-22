@@ -6,12 +6,14 @@ theme left out, earnings too close) is the reader's choice; a name that
 collected** at all is listed with its reason, never dropped quietly.
 
 The web API filters the collector's stored tables through :func:`visible`, so
-the expiry choices a screen offers count only the names on it.
+the expiry choices a screen offers count only the names on it, and takes each
+name's theme from the universe as it is now (:func:`themes_of`), not from the
+tables, which carry the theme it had when they were solved.
 """
 
 from __future__ import annotations
 
-from collections.abc import Collection, Mapping
+from collections.abc import Collection, Iterable, Mapping
 from datetime import date
 
 import pandas as pd
@@ -38,6 +40,18 @@ def hidden_for_earnings(earnings: pd.DataFrame | None, session: date, days: int)
     return hidden
 
 
+def themes_of(stored: Iterable[str]) -> dict[str, str]:
+    """Each stored name the universe still holds, under the theme it has there now, in universe order.
+
+    The collector writes each name's theme into the tables it solves, and the
+    universe can be edited before the next solve. Read from those tables, a
+    theme renamed since is offered to a filter that refuses it, a name moved to
+    another theme answers to its old one, and a name taken out stays on the page.
+    """
+    held = set(stored)
+    return {symbol: theme for symbol, theme in universe.UNIVERSE.items() if symbol in held}
+
+
 def visible(
     themes: Mapping[str, str], chosen: Collection[str] | None, hidden: Collection[str]
 ) -> list[str]:
@@ -56,7 +70,8 @@ def unavailable(manifest: Mapping, unpriced: Mapping[str, str]) -> dict[str, str
     """Collected names that are not on the page, with why, sorted by name.
 
     A failed fetch is the manifest's record of the run; a chain that came back
-    but could not be priced is the solve's (``unpriced``).
+    but could not be priced is the solve's (``unpriced``). A name taken out of
+    the universe since that run is not listed: it is not missing from the page.
     """
     problems = {
         symbol: status.get("error")
@@ -64,7 +79,7 @@ def unavailable(manifest: Mapping, unpriced: Mapping[str, str]) -> dict[str, str
         if status.get("error")
     }
     problems.update(unpriced)
-    return dict(sorted(problems.items()))
+    return dict(sorted((s, reason) for s, reason in problems.items() if s in universe.UNIVERSE))
 
 
 def not_collected(manifest: Mapping) -> list[str]:
